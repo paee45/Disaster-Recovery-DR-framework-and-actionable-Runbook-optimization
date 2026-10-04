@@ -7,8 +7,9 @@ variable "account_id" {
   }
 }
 variable "aws_profile" {
-  description = "Named AWS CLI profile (SSO) for the sandbox account."
+  description = "Named AWS CLI profile (SSO) for the sandbox account. null = default credential chain (e.g. the Terrakube instance role)."
   type        = string
+  default     = null
 }
 variable "region" {
   type    = string

@@ -1,0 +1,369 @@
+# Terrakube docker-compose, adapted from terrakube-io/terrakube tag 2.33.2 (Apache-2.0, docker-compose/).
+# Changes for the DR platform EC2 (iac/platform/terrakube): pinned images (Traefik v2.11; MinIO → pgsty/silo, the
+# minio/minio images were withdrawn), restart policies, memory limits + JVM heap caps for a 2 GB instance + swap.
+
+### DNS ####
+
+x-terrakube_dns: &terrakube_dns
+  - ${DNS_IP_PUBLIC:-1.1.1.1}
+
+#### Extra Hosts #####
+
+x-terrakube_hosts: &terrakube_hosts
+  - "terrakube-api.${DOMAIN}:${HOST_GATEWAY}"
+  - "terrakube-dex.${DOMAIN}:${HOST_GATEWAY}"
+  - "terrakube-executor.${DOMAIN}:${HOST_GATEWAY}"
+  - "terrakube.${DOMAIN}:${HOST_GATEWAY}"
+  - "terrakube-registry.${DOMAIN}:${HOST_GATEWAY}"
+
+#### Container Environment Variables #####
+
+x-api: &api_env
+  JAVA_TOOL_OPTIONS: "-Xms128m -Xmx384m -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC -Xss512k -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=32m"
+  BPL_JVM_THREAD_COUNT: "50"
+  ApiDataSourceType: POSTGRESQL
+  DatasourceHostname: postgresql-service
+  DatasourceDatabase: ${TK_POSTGRESQL_DATABASE_NAME}
+  DatasourceUser: ${TK_POSTGRESQL_USERNAME}
+  DatasourcePassword: ${TK_POSTGRESQL_PASSWORD}
+  GroupValidationType: DEX
+  UserValidationType: DEX
+  AuthenticationValidationType: DEX
+  TerrakubeHostname: terrakube-api.${DOMAIN}
+  AzBuilderExecutorUrl: http://terrakube-executor:8090/api/v1/terraform-rs
+  PatSecret: ${PAT_SECRET}
+  InternalSecret: ${INTERNAL_SECRET}
+  DexIssuerUri: https://terrakube-dex.${DOMAIN}/dex
+  StorageType: AWS
+  AwsStorageAccessKey: $TK_OUTPUT_ACCESS_KEY
+  AwsStorageSecretKey: $TK_OUTPUT_SECRET_KEY
+  AwsStorageBucketName: $TK_OUTPUT_BUCKET_NAME
+  AwsStorageRegion: $TK_OUTPUT_STORAGE_REGION
+  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  TerrakubeUiURL: https://terrakube.${DOMAIN}
+  spring_profiles_active: demo
+  DexClientId: terrakube-app
+  TerrakubeToolsRepository: https://github.com/terrakube-io/terrakube-extensions.git
+  TerrakubeToolsBranch: main
+  CustomTerraformReleasesUrl: "https://releases.hashicorp.com/terraform/index.json"
+  TerrakubeRedisHostname: ${TK_REDIS_CONTAINER_NAME}
+  TerrakubeRedisPort: 6379
+  TerrakubeRedisPassword: ${TK_REDIS_PASSWORD}
+  SERVICE_BINDING_ROOT: /mnt/platform/bindings
+
+x-executor: &executor_env
+  JAVA_TOOL_OPTIONS: "-Xms64m -Xmx256m -XX:MaxMetaspaceSize=140m -XX:+UseSerialGC -Xss512k -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=32m"
+  BPL_JVM_THREAD_COUNT: "50"
+  TerrakubeEnableSecurity: "true"
+  InternalSecret: ${INTERNAL_SECRET}
+  TerraformStateType: AwsTerraformStateImpl
+  AwsTerraformStateAccessKey: $TK_OUTPUT_ACCESS_KEY
+  AwsTerraformStateSecretKey: $TK_OUTPUT_SECRET_KEY
+  AwsTerraformStateBucketName: $TK_OUTPUT_BUCKET_NAME
+  AwsTerraformStateRegion: ${TK_OUTPUT_BUCKET_REGION}
+  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  TerraformOutputType: AwsTerraformOutputImpl
+  AwsTerraformOutputAccessKey: $TK_OUTPUT_ACCESS_KEY
+  AwsTerraformOutputSecretKey: $TK_OUTPUT_SECRET_KEY
+  AwsTerraformOutputBucketName: $TK_OUTPUT_BUCKET_NAME
+  AwsTerraformOutputRegion: ${TK_OUTPUT_BUCKET_REGION}
+  AzBuilderApiUrl: https://terrakube-api.${DOMAIN}
+  ExecutorFlagBatch: "false"
+  ExecutorFlagDisableAcknowledge: "false"
+  TerrakubeToolsRepository: https://github.com/terrakube-io/terrakube-extensions.git
+  TerrakubeToolsBranch: main
+  TerrakubeRegistryDomain: terrakube-registry.${DOMAIN}
+  TerrakubeApiUrl: https://terrakube-api.${DOMAIN}
+  CustomTerraformReleasesUrl: "https://releases.hashicorp.com/terraform/index.json"
+  TerrakubeRedisHostname: ${TK_REDIS_CONTAINER_NAME}
+  TerrakubeRedisPort: 6379
+  TerrakubeRedisPassword: ${TK_REDIS_PASSWORD}
+  SERVICE_BINDING_ROOT: /mnt/platform/bindings
+
+x-registry: &registry_env
+  JAVA_TOOL_OPTIONS: "-Xms64m -Xmx200m -XX:MaxMetaspaceSize=120m -XX:+UseSerialGC -Xss512k -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=32m"
+  BPL_JVM_THREAD_COUNT: "50"
+  AzBuilderRegistry: https://terrakube-registry.${DOMAIN}
+  AzBuilderApiUrl: https://terrakube-api.${DOMAIN}
+  AuthenticationValidationTypeRegistry: DEX
+  TerrakubeEnableSecurity: "true"
+  DexIssuerUri: https://terrakube-dex.${DOMAIN}/dex
+  TerrakubeUiURL: https://terrakube.${DOMAIN}
+  PatSecret: ${PAT_SECRET}
+  InternalSecret: ${INTERNAL_SECRET}
+  RegistryStorageType: AwsStorageImpl
+  AwsStorageAccessKey: $TK_OUTPUT_ACCESS_KEY
+  AwsStorageSecretKey: $TK_OUTPUT_SECRET_KEY
+  AwsStorageBucketName: $TK_OUTPUT_BUCKET_NAME
+  AwsStorageRegion: $TK_OUTPUT_STORAGE_REGION
+  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  AppClientId: terrakube-app
+  AppIssuerUri: https://terrakube-dex.${DOMAIN}/dex
+  SERVICE_BINDING_ROOT: /mnt/platform/bindings
+
+x-ldap: &ldap_env
+  LDAP_ORGANISATION: "Example, Inc"
+  LDAP_DOMAIN: "example.org"
+  LDAP_ADMIN_PASSWORD: ${TK_LDAP_ADMIN_PASSWORD}
+  LDAP_TLS: "false"
+  # Keep bootstrap config so osixia skips the post-setup rm, which fails on the
+  # single-file LDIF bind mount ("Device or resource busy").
+  LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
+
+x-minio: &minio_env
+  MINIO_ROOT_USER: ${TK_OUTPUT_ACCESS_KEY}
+  MINIO_ROOT_PASSWORD: ${TK_OUTPUT_SECRET_KEY}
+
+x-ui: &ui_env
+  REACT_APP_TERRAKUBE_API_URL: https://terrakube-api.${DOMAIN}/api/v1/
+  REACT_APP_CLIENT_ID: terrakube-app
+  REACT_APP_AUTHORITY: https://terrakube-dex.${DOMAIN}/dex
+  REACT_APP_REDIRECT_URI: https://terrakube.${DOMAIN}
+  REACT_APP_REGISTRY_URI: https://terrakube-registry.${DOMAIN}
+  REACT_APP_SCOPE: email openid profile offline_access groups
+  REACT_APP_TERRAKUBE_SEND_COOKIES: "false"
+  JAVA_TOOL_OPTIONS: -Dcom.sun.security.enableAIAcaIssuers=true
+
+x-traefik_env: &traefik_env
+  TRAEFIK_API_DASHBOARD: "false"
+  TRAEFIK_ENTRYPOINTS_WEB: "true"
+  TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":${TRAEFIK_HTTP_PORT}"
+  TRAEFIK_ENTRYPOINTS_WEB_HTTP_ENCODEQUERYSEMICOLONS: "true"
+  TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_ENCODEQUERYSEMICOLONS: "true"
+  TRAEFIK_ENTRYPOINTS_WEBSECURE: "true"
+  TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS: ":${TRAEFIK_HTTPS_PORT}"
+  TRAEFIK_PROVIDERS_DOCKER: "true"
+  TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "false"
+  TRAEFIK_PROVIDERS_FILE_FILENAME: /etc/traefik_dynamic.yml
+
+## Terrakube API
+x-traefik_api_labels: &traefik_api_labels
+  traefik.enable: true
+  ## Terrakube API HTTPS
+  traefik.http.routers.terrakube-api-https.rule: Host(`terrakube-api.${DOMAIN}`)
+  traefik.http.routers.terrakube-api-https.entrypoints: websecure
+  traefik.http.routers.terrakube-api-https.tls: true
+  traefik.http.routers.terrakube-api-https.middlewares: terrakube-dex-allow-origin
+  traefik.http.services.terrakube-api-https.loadbalancer.server.port: 8080
+  ## Redirect to HTTPS
+  traefik.http.routers.terrakube-api-http.rule: Host(`terrakube-api.${DOMAIN}`)
+  traefik.http.routers.terrakube-api-http.entrypoints: web
+  traefik.http.routers.terrakube-api-http.middlewares: terrakube-api-redirect-https
+  traefik.http.middlewares.terrakube-api-redirect-https.redirectscheme.scheme: https
+
+## Traefik labels
+## Terrakube Executor
+x-traefik_executor_labels: &traefik_executor_labels
+  traefik.enable: false
+  ## Terrakube executor HTTPS
+  traefik.http.routers.terrakube-executor-https.rule: Host(`terrakube-executor.${DOMAIN}`)
+  traefik.http.routers.terrakube-executor-https.entrypoints: websecure
+  traefik.http.routers.terrakube-executor-https.tls: true
+  traefik.http.routers.terrakube-executor-https.middlewares: terrakube-dex-allow-origin
+  traefik.http.services.terrakube-executor-https.loadbalancer.server.port: 8090
+  ## Redirect to HTTPS
+  traefik.http.routers.terrakube-executor-http.rule: Host(`terrakube-executor.${DOMAIN}`)
+  traefik.http.routers.terrakube-executor-http.entrypoints: web
+  traefik.http.routers.terrakube-executor-http.middlewares: terrakube-executor-redirect-https
+  traefik.http.middlewares.terrakube-executor-redirect-https.redirectscheme.scheme: https
+
+## Terrakube UI
+x-traefik_ui_labels: &traefik_ui_labels
+  traefik.enable: true
+  ## Terrakube UI HTTPS
+  traefik.http.routers.terrakube-ui-https.rule: Host(`terrakube.${DOMAIN}`)
+  traefik.http.routers.terrakube-ui-https.entrypoints: websecure
+  traefik.http.routers.terrakube-ui-https.middlewares: terrakube-dex-allow-origin
+  traefik.http.routers.terrakube-ui-https.tls: true
+  traefik.http.services.terrakube-ui-https.loadbalancer.server.port: 8080
+  ## Redirect to HTTPS
+  traefik.http.routers.terrakube-ui-http.rule: Host(`terrakube.${DOMAIN}`)
+  traefik.http.routers.terrakube-ui-http.entrypoints: web
+  traefik.http.routers.terrakube-ui-http.middlewares: terrakube-ui-redirect-https
+  traefik.http.middlewares.terrakube-ui-redirect-https.redirectscheme.scheme: https
+
+x-traefik_dex_labels: &traefik_dex_labels
+  traefik.enable: true
+  ## Terrakube DEX HTTPS
+  traefik.http.routers.terrakube-dex-https.rule: Host(`terrakube-dex.${DOMAIN}`)
+  traefik.http.routers.terrakube-dex-https.entrypoints: websecure
+  traefik.http.routers.terrakube-dex-https.middlewares: terrakube-dex-allow-origin
+  traefik.http.routers.terrakube-dex-https.tls: true
+  traefik.http.services.terrakube-dex-https.loadbalancer.server.port: 5556
+  ## Redirect to HTTPS
+  traefik.http.routers.terrakube-dex-http.rule: Host(`terrakube-dex.${DOMAIN}`)
+  traefik.http.routers.terrakube-dex-http.entrypoints: web
+  traefik.http.routers.terrakube-dex-http.middlewares: terrakube-dex-redirect-https
+  traefik.http.middlewares.terrakube-dex-redirect-https.redirectscheme.scheme: https
+  ## Allow CORs from Terrakube UI
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accesscontrolallowmethods: GET, PATCH, PUT, POST, DELETE, HEAD, OPTIONS
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accesscontrolallowheaders: >
+    Content-Type, Accept, Authorization, X-Requested-With, Origin, *
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accesscontrolalloworiginlist: https://terrakube.${DOMAIN}
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accesscontrolallowcredentials: true
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accessControlExposeHeaders: >
+    Cache-Control, Content-Language, Content-Length, Content-Type, Expires, Last-Modified,
+    Pragma, x-amz-server-side-encryption, x-amz-request-id, x-amz-id-2, ETag, x-terraform-get
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.accesscontrolmaxage: 86400
+  traefik.http.middlewares.terrakube-dex-allow-origin.headers.addvaryheader: true
+
+  ## Terrakube registry
+x-traefik_registry_labels: &traefik_registry_labels
+  traefik.enable: true
+  ## Terrakube registry HTTPS
+  traefik.http.routers.terrakube-registry-https.rule: Host(`terrakube-registry.${DOMAIN}`)
+  traefik.http.routers.terrakube-registry-https.entrypoints: websecure
+  traefik.http.routers.terrakube-registry-https.tls: true
+  traefik.http.routers.terrakube-registry-https.middlewares: terrakube-dex-allow-origin
+  traefik.http.services.terrakube-registry-https.loadbalancer.server.port: 8075
+  ## Redirect to HTTPS
+  traefik.http.routers.terrakube-registry-http.rule: Host(`terrakube-registry.${DOMAIN}`)
+  traefik.http.routers.terrakube-registry-http.entrypoints: web
+  traefik.http.routers.terrakube-registry-http.middlewares: terrakube-registry-redirect-https
+  traefik.http.middlewares.terrakube-registry-redirect-https.redirectscheme.scheme: https
+
+
+### Containers
+services:
+  traefik:
+    mem_limit: 96m
+    image: traefik:v2.11
+    container_name: terrakube-traefik
+    # Give Traefik a reserved IP address in your external network, pick something towards the end of the network to avoid conflicts
+    networks:
+      default:
+        ipv4_address: $TRAEFIK_IPV4_ADDRESS
+    environment: *traefik_env
+    dns: *terrakube_dns
+    ports:
+      - $TRAEFIK_HTTP_PORT:80
+      - $TRAEFIK_HTTPS_PORT:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik_dynamic.yml:/etc/traefik_dynamic.yml
+      - ./key.pem:/letsencrypt/privkey.pem:ro
+      - ./cert.pem:/letsencrypt/fullchain.pem:ro
+    restart: unless-stopped
+  terrakube-api:
+    restart: unless-stopped
+    mem_limit: 750m
+    image: azbuilder/api-server:${TK_VERSION}
+    container_name: terrakube-api
+    environment:
+      <<: [*api_env]
+    volumes:
+      - ./rootCA.pem:/mnt/platform/bindings/ca-certificates/rootCA.pem:ro
+      - ./type:/mnt/platform/bindings/ca-certificates/type:ro
+    labels: *traefik_api_labels
+    extra_hosts: *terrakube_hosts
+    depends_on:
+      - postgresql-service
+  terrakube-ui:
+    restart: unless-stopped
+    mem_limit: 64m
+    image: azbuilder/terrakube-ui:${TK_VERSION}
+    container_name: terrakube-ui
+    extra_hosts: *terrakube_hosts
+    labels: *traefik_ui_labels
+    volumes:
+      - ./env-config.js:/usr/share/nginx/html/env-config.js
+      - ./my_server_block.conf:/etc/nginx/conf.d/default.conf
+    environment:
+      <<: [*ui_env]
+  terrakube-executor:
+    restart: unless-stopped
+    mem_limit: 1000m
+    dns: *terrakube_dns
+    image: azbuilder/executor:${TK_VERSION}
+    labels: *traefik_executor_labels
+    extra_hosts: *terrakube_hosts
+    container_name: terrakube-executor
+    volumes:
+      - ./rootCA.pem:/mnt/platform/bindings/ca-certificates/rootCA.pem:ro
+      - ./type:/mnt/platform/bindings/ca-certificates/type:ro
+    environment:
+      <<: [*executor_env]
+  terrakube-registry:
+    restart: unless-stopped
+    mem_limit: 512m
+    dns: *terrakube_dns
+    image: azbuilder/open-registry:${TK_VERSION}
+    labels: *traefik_registry_labels
+    extra_hosts: *terrakube_hosts
+    container_name: terrakube-registry
+    volumes:
+      - ./rootCA.pem:/mnt/platform/bindings/ca-certificates/rootCA.pem:ro
+      - ./type:/mnt/platform/bindings/ca-certificates/type:ro
+    environment:
+      <<: [*registry_env]
+  terrakube-dex:
+    restart: unless-stopped
+    mem_limit: 64m
+    image: ghcr.io/dexidp/dex:${TK_DEX_VERSION}
+    extra_hosts: *terrakube_hosts
+    labels: *traefik_dex_labels
+    container_name: terrakube-dex
+    volumes:
+      - ./config-ldap.yaml:/etc/dex/config.docker.yaml
+  ldap-service:
+    restart: unless-stopped
+    mem_limit: 128m
+    image: osixia/openldap:${TK_LDAP_VERSION}
+    container_name: terrakube-ldap-service
+    environment: *ldap_env
+    volumes:
+      - ./ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom
+  minio:
+    restart: unless-stopped
+    mem_limit: 256m
+    container_name: terrakube-minio
+    image: pgsty/silo:${TK_MINIO_VERSION}
+    command: server /data --console-address ":9001"
+    environment: *minio_env
+    volumes:
+      - 'minio_data:/data'
+  minio-init:
+    image: pgsty/silo:${TK_MINIO_VERSION}
+    container_name: terrakube-minio-init
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh","-c","until /usr/bin/mc alias set tk http://minio:9000 ${TK_OUTPUT_ACCESS_KEY} ${TK_OUTPUT_SECRET_KEY}; do echo 'waiting for minio'; sleep 2; done; /usr/bin/mc mb --ignore-existing tk/${TK_OUTPUT_BUCKET_NAME}; exit 0;"]
+  redis-service:
+    restart: unless-stopped
+    mem_limit: 64m
+    image: valkey/valkey:${TK_REDIS_VERSION}
+    container_name: ${TK_REDIS_CONTAINER_NAME}
+    command:
+      - valkey-server
+      - --requirepass
+      - ${TK_REDIS_PASSWORD}
+      - --rename-command
+      - FLUSHDB
+      - ""
+      - --rename-command
+      - FLUSHALL
+      - ""
+    volumes:
+      - 'redis_data:/data'
+  postgresql-service:
+    restart: unless-stopped
+    mem_limit: 256m
+    image: postgres:${TK_POSTGRESQL_VERSION}
+    container_name: postgresql-service
+    environment:
+      - POSTGRES_USER=${TK_POSTGRESQL_USERNAME}
+      - POSTGRES_PASSWORD=${TK_POSTGRESQL_PASSWORD}
+      - POSTGRES_DB=${TK_POSTGRESQL_DATABASE_NAME}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+volumes:
+  minio_data:
+  redis_data:
+  postgresql_data:
+    driver: local
+# External network is required, import its name below
+networks:
+  default:
+    name: $EXTERNAL_NETWORK_NAME
+    external: true

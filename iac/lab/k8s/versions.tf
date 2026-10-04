@@ -17,35 +17,31 @@ data "terraform_remote_state" "aws" {
 }
 
 locals {
-  a         = data.terraform_remote_state.aws.outputs
-  exec_args = ["--profile", local.a.aws_profile, "--region", local.a.region, "eks", "get-token", "--cluster-name", local.a.eks_cluster_name, "--output", "json"]
+  a = data.terraform_remote_state.aws.outputs
 }
 
 provider "aws" {
-  profile             = local.a.aws_profile
+  profile             = local.a.aws_profile == "" ? null : local.a.aws_profile
   region              = local.a.region
   allowed_account_ids = [local.a.account_id]
   default_tags { tags = { dr-lab = "true", managed-by = "terraform", repo-path = "iac/lab/k8s" } }
 }
 
+# Short-lived token from the AWS provider — no aws CLI needed (works on a Mac and inside the Terrakube executor).
+data "aws_eks_cluster_auth" "this" {
+  name = local.a.eks_cluster_name
+}
+
 provider "kubernetes" {
   host                   = local.a.eks_endpoint
   cluster_ca_certificate = base64decode(local.a.eks_ca)
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args        = local.exec_args
-  }
+  token                  = data.aws_eks_cluster_auth.this.token
 }
 
 provider "helm" {
   kubernetes {
     host                   = local.a.eks_endpoint
     cluster_ca_certificate = base64decode(local.a.eks_ca)
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "aws"
-      args        = local.exec_args
-    }
+    token                  = data.aws_eks_cluster_auth.this.token
   }
 }

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Terrakube host bootstrap (rendered by Terraform; config ${config_hash}). Log: /var/log/terrakube-bootstrap.log
+set -euxo pipefail
+exec > >(tee -a /var/log/terrakube-bootstrap.log) 2>&1
+REGION=${region}
+DIR=/opt/terrakube
+
+# swap: the 2 GB instance needs it (Java services + Terraform runs)
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l ${swap_gb}G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  grep -q /swapfile /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  sysctl -w vm.swappiness=20 && echo 'vm.swappiness=20' > /etc/sysctl.d/90-swap.conf
+fi
+
+dnf install -y docker
+ARCH=$(uname -m)
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+  "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-$ARCH"
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+systemctl enable --now docker
+
+mkdir -p $DIR && chmod 700 $DIR && cd $DIR
+aws s3 cp --region $REGION --recursive --only-show-errors s3://${bucket}/compose/ $DIR/
+param() { aws ssm get-parameter --region $REGION --with-decryption --name "${param_prefix}/$1" --query Parameter.Value --output text; }
+param cert > cert.pem; param key > key.pem; param rootCA > rootCA.pem; chmod 600 key.pem
+ADMIN_PW=$(param admin-password); LDAP_PW=$(param ldap-admin-password)
+sed -i "s|__ADMIN_PASSWORD__|$ADMIN_PW|" ldif/config-ldap.ldif
+sed -i "s|__LDAP_ADMIN_PASSWORD__|$LDAP_PW|" config-ldap.yaml
+
+# internal secrets: generated here once, kept on the instance only (not in Terraform state)
+if [ ! -s secrets.env ]; then
+  b64() { openssl rand -hex 16 | tr -d '\n' | base64; }
+  umask 077
+  cat > secrets.env <<SECRETS
+PAT_SECRET=$(b64)
+INTERNAL_SECRET=$(b64)
+TK_OUTPUT_ACCESS_KEY=tk$(openssl rand -hex 8)
+TK_OUTPUT_SECRET_KEY=$(openssl rand -hex 20)
+TK_POSTGRESQL_PASSWORD=$(openssl rand -hex 16)
+TK_REDIS_PASSWORD=$(openssl rand -hex 16)
+SECRETS
+fi
+umask 077
+cat > .env <<ENV
+TK_VERSION=${tk_version}
+DOMAIN=platform.local
+EXTERNAL_NETWORK_NAME=terrakube-network
+TRAEFIK_IPV4_ADDRESS=10.25.25.253
+HOST_GATEWAY=10.25.25.253
+TRAEFIK_HTTP_PORT=80
+TRAEFIK_HTTPS_PORT=443
+DNS_IP_PUBLIC=
+TK_DEX_VERSION=v2.42.0
+TK_LDAP_VERSION=1.5.0
+TK_LDAP_ADMIN_PASSWORD=$LDAP_PW
+TK_MINIO_VERSION=${silo_version}
+TK_OUTPUT_ENDPOINT=http://terrakube-minio:9000
+TK_OUTPUT_STORAGE_REGION=us-east-1
+TK_OUTPUT_BUCKET_NAME=terrakube
+TK_OUTPUT_BUCKET_REGION=us-east-1
+TK_POSTGRESQL_VERSION=17
+TK_POSTGRESQL_USERNAME=terrakube
+TK_POSTGRESQL_DATABASE_NAME=terrakubedb
+TK_REDIS_CONTAINER_NAME=terrakube-redis
+TK_REDIS_VERSION=8-alpine
+$(cat secrets.env)
+ENV
+
+docker network inspect terrakube-network >/dev/null 2>&1 \
+  || docker network create terrakube-network -d bridge --subnet 10.25.25.0/24 --gateway 10.25.25.254
+docker compose pull --quiet
+docker compose up -d
+docker compose ps
+echo "TERRAKUBE BOOTSTRAP DONE"

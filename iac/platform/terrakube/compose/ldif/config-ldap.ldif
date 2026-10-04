@@ -1,0 +1,25 @@
+# One admin user (password filled in at boot from SSM: /<name>/terrakube/admin-password). Demo users removed.
+dn: ou=users,dc=example,dc=org
+ou: users
+objectClass: organizationalunit
+
+dn: cn=admin,ou=users,dc=example,dc=org
+objectClass: inetOrgPerson
+sn: Admin
+cn: admin
+mail: admin@example.com
+userpassword: __ADMIN_PASSWORD__
+
+dn: ou=Groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: Groups
+
+dn: cn=TERRAKUBE_ADMIN,ou=Groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: TERRAKUBE_ADMIN
+member: cn=admin,ou=users,dc=example,dc=org
+
+dn: cn=TERRAKUBE_DEVELOPERS,ou=Groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: TERRAKUBE_DEVELOPERS
+member: cn=admin,ou=users,dc=example,dc=org

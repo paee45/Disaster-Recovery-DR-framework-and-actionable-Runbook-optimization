@@ -64,7 +64,7 @@ resource "local_sensitive_file" "kubeconfig" {
     apiVersion  = "v1"
     kind        = "Config"
     clusters    = [{ name = aws_eks_cluster.this.arn, cluster = { server = aws_eks_cluster.this.endpoint, "certificate-authority-data" = aws_eks_cluster.this.certificate_authority[0].data } }]
-    users       = [{ name = aws_eks_cluster.this.arn, user = { exec = { apiVersion = "client.authentication.k8s.io/v1beta1", command = "aws", args = ["--profile", var.aws_profile, "--region", var.region, "eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--output", "json"] } } }]
+    users       = [{ name = aws_eks_cluster.this.arn, user = { exec = { apiVersion = "client.authentication.k8s.io/v1beta1", command = "aws", args = concat(var.aws_profile == null ? [] : ["--profile", var.aws_profile], ["--region", var.region, "eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--output", "json"]) } } }]
     contexts    = [{ name = var.kube_context, context = { cluster = aws_eks_cluster.this.arn, user = aws_eks_cluster.this.arn } }]
     preferences = {}
   })

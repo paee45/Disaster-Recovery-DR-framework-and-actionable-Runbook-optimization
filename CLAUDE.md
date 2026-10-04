@@ -35,6 +35,10 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   built with **Terraform only** (`iac/lab/aws` then `iac/lab/k8s`; anything reusable lives in git/IaC, no ad-hoc
   shell builders). Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
   Destroy after each session (EKS is ~0.10 USD/h). Terraform state stays local and git-ignored.
+- Terraform UI = **Terrakube on one EC2 `t4g.small`** (owner choice: cheap, with swap + JVM caps; `t4g.medium` if too
+  slow; t4g.micro is too small) — `iac/platform/terrakube`. No inbound ports: SSM port-forward + mkcert + /etc/hosts
+  `*.platform.local`. Built BEFORE the DR lab (owner choice). Instance role AdministratorAccess (sandbox only) so
+  Terrakube can run the lab stacks (`aws_profile` empty → instance role; k8s auth by token).
 
 ## Key entry points
 | Need | Use |
@@ -42,6 +46,7 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 | Run a restore step by step (live output, evidence per step, gates, resume) | `automation/scripts/dr-run.sh S3\|S4` (`--list`, `--dry-run`, `--to P2-S05`, `--resume <DR_ID>`) |
 | Recorded manual shell | `automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` |
 | Build / destroy the sandbox lab (Terraform) | `iac/lab/README.md` |
+| Terraform UI for the sandbox (Terrakube on EC2) | `iac/platform/terrakube/README.md` |
 | Safe test against real AWS (dev/uat only) | `tests/aws/sandbox-test.sh readonly` then `full` |
 | Local end-to-end tests | `tests/local/up.sh && tests/local/run-tests.sh` (report `tests/local/.state/test-report.md`) |
 | Secret endpoint / consumers tools | `k8s-secret-endpoint.sh`, `k8s-secret-consumers.sh`, `dr-secret-cutover.sh`, `dr-eks-rollout.sh` |
@@ -61,7 +66,8 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
   zsh: paste blocks without inline `#` comments (or `setopt interactivecomments`).
-- **Next:** build the lab (`iac/lab/README.md`: `brew install hashicorp/tap/terraform helm`, tfvars, apply aws → k8s;
+- **Next:** build Terrakube first (`iac/platform/terrakube/README.md`: mkcert certs, /etc/hosts, tfvars, plan, apply,
+  tunnel), then the lab (`iac/lab/README.md`: `brew install hashicorp/tap/terraform helm`, tfvars, apply aws → k8s;
   not yet applied, `terraform validate` passes), then `source env/uat.env`, `tests/aws/sandbox-test.sh readonly`,
   `automation/scripts/dr-run.sh S3 --dry-run`, then `--to P2-S05`.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

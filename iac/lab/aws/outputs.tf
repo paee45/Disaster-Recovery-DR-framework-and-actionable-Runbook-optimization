@@ -1,5 +1,5 @@
 output "account_id" { value = var.account_id }
-output "aws_profile" { value = var.aws_profile }
+output "aws_profile" { value = var.aws_profile == null ? "" : var.aws_profile }
 output "region" { value = var.region }
 output "db_identifier" { value = aws_db_instance.primary.identifier }
 output "db_address" { value = aws_db_instance.primary.address }
