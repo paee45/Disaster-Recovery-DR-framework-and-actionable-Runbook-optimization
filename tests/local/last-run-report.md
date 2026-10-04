@@ -22,9 +22,9 @@
 | B02 | inventory: app-a/app-b Reloader YES, app-c NO, CronJob listed | PASS | logs/B02.log |
 | B03 | preflight restore → PASS (inputs copied from source) | PASS | logs/B03.log |
 | B04 | preflight replica → PASS | PASS | logs/B04.log |
-| C00 | capture baseline of the source (describe + 4 tags + pg_settings) | PASS | logs/C00.log |
+| C00 | capture baseline of the UAT-shaped source (3 SGs, 3 subnets, 4 user + 3 aws:* tags, pg_settings) | PASS | logs/C00.log |
 | C01 | list-snapshots | PASS | logs/C01.log |
-| C01b | plan: request from baseline (3 SGs, subnets, PG, retention 7, logs, tags) — no change made | PASS | logs/C01b.log |
+| C01b | plan: request from baseline (3 SGs, subnet group, PG, retention 7, window, logs, CA, user tags, NO aws:* tags) — no change | PASS | logs/C01b.log |
 | C02 | restore snapshot with the baseline request (--cli-input-json) | PASS | logs/C02.log |
 | C03 | wait until available (progress + T5) | PASS | logs/C03.log |
 | C03b | validate right after restore: SGs, subnets, PG, retention 7, logs, tags already match | PASS | logs/C03b.log |
@@ -64,7 +64,7 @@
 | F01 | S2 promote replica + wait-promoted (standalone + writable) | PASS | logs/F01.log |
 | F02 | S4 PITR latest → restore request from baseline with 3 SGs | PASS | logs/F02.log |
 | F03 | S4 PITR: wait + harden → VALIDATED against the baseline | PASS | logs/F03.log |
-| G00 | recorded session: transcript + history, password redacted, REFUSED shown, synced to S3 | **FAIL** | logs/G00.log |
+| G00 | recorded session: transcript + history, password redacted, REFUSED shown, synced to S3 | PASS | logs/G00.log |
 | G00b | audit log commands.jsonl: every call, secret-string redacted, refusals recorded | PASS | logs/G00b.log |
 | G01 | phase timer + summary | PASS | logs/G01.log |
 | G01b | dr_phase end syncs the evidence folder to S3 (timeline already off the machine) | PASS | logs/G01b.log |
@@ -72,21 +72,26 @@
 | G03 | KPI report: RPO from snapshot time, RTO ~20 min | PASS | logs/G03.log |
 | G04 | SSM Automation documents accepted (create-document) | PASS | logs/G04.log |
 | G05 | tracker CSV generated for every runbook | PASS | logs/G05.log |
+| I01 | restore request (UAT): 3 SGs, subnet group, PG, no default option group, no gp3 IOPS <400GB, port 5432 (not DbInstancePort 0), lifecycle/backup target/license, no aws:* tags | PASS | logs/I01.log |
+| I02 | harden request (UAT) after a restore: maintenance window, Enhanced Monitoring 60s + role, PI + KMS + 7d, Database Insights, retention 1→7 | PASS | logs/I02.log |
+| I03 | create-like request (UAT): engine 17.9, RDS-managed master password, gp3 20GB, monitoring + PI + window at create | PASS | logs/I03.log |
+| I04 | validate ignores identity/runtime fields + UpgradeRolloutOrder (not settable), compares everything else | PASS | logs/I04.log |
+| I05 | create-like: empty test instance with the primary's configuration → harden → VALIDATED | PASS | logs/I05.log |
 | H01 | show: both host keys = old primary, not managed by ESO | PASS | logs/H01.log |
 | H02 | refuses to patch an ESO-owned Secret (ESO would revert it) | PASS | logs/H02.log |
 | H03 | refuses an ID with spaces / bad characters | PASS | logs/H03.log |
 | H04 | preflight (SECRET_MODE=k8s): host keys present, not ESO-owned | PASS | logs/H04.log |
-| H05 | cutover #1 (id DR-20261004-0650-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
+| H05 | cutover #1 (id DR-20261004-0732-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
 | H06 | ledger entry #1: id, old→new endpoint per key, old/new DB identifier | PASS | logs/H06.log |
 | H07 | Reloader restarted app-d; app-e (no annotation) SKIPPED | PASS | logs/H07.log |
 | H08 | stale check finds app-e (HOST2), restart-stale → both apps on restored | PASS | logs/H08.log |
-| H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | PASS | logs/H09.log |
-| H10 | cutover #2 (id DR-20261004-0650-local-S2): → promoted replica | PASS | logs/H10.log |
-| H11 | failback to the endpoint before #1 (id DR-20261004-0650-local-FB-S3S4 → ref DR-20261004-0650-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
+| H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | **FAIL** | logs/H09.log |
+| H10 | cutover #2 (id DR-20261004-0732-local-S2): → promoted replica | PASS | logs/H10.log |
+| H11 | failback to the endpoint before #1 (id DR-20261004-0732-local-FB-S3S4 → ref DR-20261004-0732-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
 | H12 | history: #1 cutover, #2 cutover, #3 failback (ref #1) — who/when/from→to | PASS | logs/H12.log |
 | H13 | rollback undoes the latest change (failback) → replica again | PASS | logs/H13.log |
 | H14 | rollback refuses when the Secret was changed outside the ledger | PASS | logs/H14.log |
 
-**PASS=85 FAIL=1** · DR_ID=DR-localtest-20261004064443 · 2026-10-04T06:50:22Z
+**PASS=90 FAIL=1** · DR_ID=DR-localtest-20261004072715 · 2026-10-04T07:33:09Z
 
-> G00 failed only at its final S3 check: `aws s3 ls | grep -q` under pipefail → SIGPIPE ("Broken pipe") once the bucket held ~100 objects. Test fixed (grep without -q); the session/redaction/sync behaviour itself passed and the fixed check was verified against this run's evidence.
+> H09 failed only because the check read the last 200 log lines of the alert sink; the alert had been received (verified in the sink log). Check now reads the whole log; verified against this run.

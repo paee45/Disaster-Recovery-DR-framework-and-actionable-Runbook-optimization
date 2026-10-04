@@ -4,7 +4,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 
 | Level | What | Changes anything real? | Command |
 |---|---|---|---|
-| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 86 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 91 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
@@ -26,6 +26,11 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
      └──► Postgres containers      "old primary" .21 · "replica" .22 · "restored" .23
           (mock RDS ids → real Postgres via tests/local/.state/endpoint-map, a LOCAL-ONLY seam refused in real envs)
 ```
+
+The local primary is built from a **sanitised real UAT describe** (`tests/local/fixtures/rds-primary-uat-like.json`: same class,
+engine 17.9, gp3 20 GB, 3 SGs, 3 subnets in 2 AZs, parameter group, windows, monitoring, PI, CloudFormation `aws:*` tags) via the
+same request builder the DR scripts use. Use another instance's shape: `RDS_FIXTURE=/path/describe-object.json tests/local/up.sh`
+(one `DBInstances[0]` object — sanitise account ids/ARNs first).
 
 Requirements: Docker, `kubectl`, `helm`, `aws` CLI, `psql`, `jq`, Python 3 with `moto[server]` (`pip install "moto[server]"`).
 
@@ -54,6 +59,7 @@ What is covered:
 | F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` from the baseline, harden → VALIDATED |
 | G. Evidence | **recorded session** `dr-session.sh` (transcript + history, password redacted, refusal visible, synced to S3), **`commands.jsonl` audit** (secret-string redacted, refusals logged), phase timers + **sync at phase end**, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
 | H. `SECRET_MODE=k8s` | plain Secret `app-db-direct` with **two host keys** (`POSTGRES_DB_HOST1` → app-d, annotated; `POSTGRES_DB_HOST2` → app-e, not annotated): show; refuses an ESO-owned Secret and a bad ID; pre-flight; cutover #1 → **both keys** = restored + annotations; ledger entry (id, old→new per key, old/new DB id); Reloader restarts app-d, app-e reported then restarted by `restart-stale`; **Reloader alert webhook received**; cutover #2 → replica; **`failback <id of #1>`** → both keys + both apps back on the old primary; `history` shows 3 entries; `rollback` undoes the failback; rollback refused when the Secret was changed outside the ledger |
+| I. UAT-shaped requests | offline from the sanitised UAT describe (`tests/local/fixtures/rds-primary-uat-like.json`): restore request (3 SGs, subnet group, PG, no default option group, **no gp3 IOPS < 400 GB**, port 5432 not `DbInstancePort` 0, lifecycle/backup target/license, **no `aws:*` tags**); harden request (maintenance window, Enhanced Monitoring + role, PI + KMS + retention, Database Insights, retention 1→7); create-like request; validate ignores identity fields + `UpgradeRolloutOrder`; **create-like round trip** on the mock → harden → VALIDATED |
 
 Mock limitations (documented, not hidden): moto keeps the replica link after promotion (patched in `moto_launcher.py`, the mock is fixed, not the scripts); no real replication lag/WAL; CloudTrail lookups return nothing; SSM documents are stored but not executed.
 

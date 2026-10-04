@@ -13,6 +13,7 @@ if [[ "${K3S_MODE:-docker}" == existing ]]; then   # refuse a non-local cluster 
   [[ "$_srv" =~ $LOCAL_API_RE ]] || { echo "REFUSED: EXISTING_KUBECONFIG points at '$_srv' — up.sh only runs against a local cluster (127.x/localhost/::1)." >&2; exit 2; }
 fi
 STATE="$HERE/.state"; mkdir -p "$STATE"
+RDS_FIXTURE="${RDS_FIXTURE:-$HERE/fixtures/rds-primary-uat-like.json}"
 NET=drtest; SUBNET=172.30.0.0/24
 IP_LS=172.30.0.10; IP_OLD=172.30.0.21; IP_REPLICA=172.30.0.22; IP_RESTORED=172.30.0.23
 K3S_IMAGE="${K3S_IMAGE:-rancher/k3s:v1.31.4-k3s1}"; LS_IMAGE="${LS_IMAGE:-localstack/localstack:4.0}"; PG_IMAGE=postgres:16-alpine
@@ -77,21 +78,28 @@ CFG
 export AWS_CONFIG_FILE="$STATE/aws-config" AWS_SHARED_CREDENTIALS_FILE="$STATE/aws-credentials"
 A() { command aws --profile dr-local "$@"; }
 
-log "mock AWS resources: VPC, 3 SGs, subnet/parameter groups, primary + replica, secrets, evidence bucket"
+log "mock AWS resources from the UAT-shaped fixture ($RDS_FIXTURE): VPC, SGs, subnet/parameter groups, primary + replica, secrets, bucket"
+# The local primary copies EVERY setting of the fixture (a sanitised real describe-db-instances) through the same request
+# builder the DR scripts use (automation/scripts/rds-requests.jq: create_req). Only identifiers and network ids are local.
+# Use your own: RDS_FIXTURE=/path/to/describe.json tests/local/up.sh  (one DBInstances[0] object, sanitise ids first).
+FX="$(jq 'del(._comment)' "$RDS_FIXTURE")"
 VPC=$(A ec2 create-vpc --cidr-block 10.0.0.0/16 --query Vpc.VpcId --output text)
-SN1=$(A ec2 create-subnet --vpc-id "$VPC" --cidr-block 10.0.1.0/24 --availability-zone eu-west-1a --query Subnet.SubnetId --output text)
-SN2=$(A ec2 create-subnet --vpc-id "$VPC" --cidr-block 10.0.2.0/24 --availability-zone eu-west-1b --query Subnet.SubnetId --output text)
-SGS=""; for n in app db-access monitoring; do SGS+="$(A ec2 create-security-group --group-name "$n" --description "$n" --vpc-id "$VPC" --query GroupId --output text) "; done
+SUBNETS=(); n=0
+for az in $(jq -r '.DBSubnetGroup.Subnets[].SubnetAvailabilityZone.Name' <<<"$FX"); do     # same count + AZ spread as the fixture
+  n=$((n+1)); SUBNETS+=("$(A ec2 create-subnet --vpc-id "$VPC" --cidr-block "10.0.$n.0/24" --availability-zone "eu-west-1${az: -1}" --query Subnet.SubnetId --output text)")
+done
+SGS=""; for i in $(seq 1 "$(jq '.VpcSecurityGroups | length' <<<"$FX")"); do                 # same number of SGs
+  SGS+="$(A ec2 create-security-group --group-name "db-sg-$i" --description "db-sg-$i" --vpc-id "$VPC" --query GroupId --output text) "; done
 QSG=$(A ec2 create-security-group --group-name quarantine --description "no inbound" --vpc-id "$VPC" --query GroupId --output text)
-A rds create-db-subnet-group --db-subnet-group-name app-local-db-subnets --db-subnet-group-description local --subnet-ids "$SN1" "$SN2" >/dev/null
-A rds create-db-parameter-group --db-parameter-group-name app-pg16-local --db-parameter-group-family postgres16 --description local >/dev/null
-# shellcheck disable=SC2086
-A rds create-db-instance --db-instance-identifier app-pg-local --engine postgres --db-instance-class db.t4g.micro --allocated-storage 20 \
-  --master-username postgres --master-user-password masterpw --db-subnet-group-name app-local-db-subnets --vpc-security-group-ids $SGS \
-  --db-parameter-group-name app-pg16-local --backup-retention-period 7 --deletion-protection \
-  --copy-tags-to-snapshot --preferred-maintenance-window sun:03:00-sun:03:30 --preferred-backup-window 01:00-01:30 \
-  --enable-cloudwatch-logs-exports postgresql upgrade \
-  --tags '[{"Key":"app","Value":"orders"},{"Key":"owner","Value":"sre-team"},{"Key":"cost-center","Value":"CC 1234 / retail"},{"Key":"backup-plan","Value":"local-daily"}]' >/dev/null
+SUBNET_GROUP="$(jq -r .DBSubnetGroup.DBSubnetGroupName <<<"$FX")"; PARAM_GROUP="$(jq -r '.DBParameterGroups[0].DBParameterGroupName' <<<"$FX")"
+A rds create-db-subnet-group --db-subnet-group-name "$SUBNET_GROUP" --db-subnet-group-description "$(jq -r .DBSubnetGroup.DBSubnetGroupDescription <<<"$FX")" --subnet-ids "${SUBNETS[@]}" >/dev/null
+A rds create-db-parameter-group --db-parameter-group-name "$PARAM_GROUP" --db-parameter-group-family "postgres$(jq -r '.EngineVersion | split(".")[0]' <<<"$FX")" --description local >/dev/null
+# tags: the fixture's own (incl. aws:cloudformation:* — must NOT be copied by a restore) + 4 user tags (must be copied)
+TEST_TAGS='[{"Key":"app","Value":"orders"},{"Key":"owner","Value":"sre-team"},{"Key":"cost-center","Value":"CC 1234 / retail"},{"Key":"backup-plan","Value":"local-daily"}]'
+jq -S --argjson tags "$(jq -c --argjson t "$TEST_TAGS" '.TagList + $t' <<<"$FX")" \
+      --argjson ov "$(jq -cn --arg sgs "$SGS" '{MasterUserPassword: "masterpw", VpcSecurityGroupIds: ($sgs | split(" ") | map(select(. != "")))}')" \
+      "$(cat "$ROOT/automation/scripts/rds-requests.jq")"' create_req("app-pg-local"; $tags; $ov)' <<<"$FX" > "$STATE/create-primary-request.json"
+A rds create-db-instance --cli-input-json "file://$STATE/create-primary-request.json" >/dev/null
 A rds create-db-instance-read-replica --db-instance-identifier app-pg-local-replica --source-db-instance-identifier app-pg-local >/dev/null
 A secretsmanager create-secret --name local/app/db --secret-string \
   "{\"engine\":\"postgres\",\"host\":\"$IP_OLD\",\"port\":5432,\"dbname\":\"app\",\"username\":\"app_user\",\"password\":\"apppw-current\",\"dbInstanceIdentifier\":\"app-pg-local\"}" >/dev/null

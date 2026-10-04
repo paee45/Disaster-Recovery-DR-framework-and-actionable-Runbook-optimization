@@ -16,6 +16,8 @@
 #                                                backup window, deletion protection; reboot if the parameter group is
 #                                                pending-reboot; then validate
 #   validate <new-db-id>                         compare ALL settings with the baseline; exit 1 on any unexpected difference
+#   create-like <source-db> <new-db-id>          EMPTY instance with the source's configuration (a test primary for
+#                                                local/dev/uat); master password managed by RDS in Secrets Manager
 #   validate-pg                                  compare pg_settings of TARGET_DSN with the source (live OLD_DSN, else baseline)
 #
 # Baseline resolution (restore/harden/validate): BASELINE_FILE if set → else capture live from the source if it still
@@ -36,38 +38,7 @@ RET_FLOOR="${BACKUP_RETENTION_DAYS:-7}"
 [[ -n "$RET_FLOOR" ]] || RET_FLOOR=7
 
 # ---------- jq library shared by plan / restore / harden / validate ----------
-# shellcheck disable=SC2016  # jq program, not shell
-JQLIB='
-def userTags: [ .[]? | select(.Key | test("^(aws:|dr-restore$|dr-restored-from$)") | not) ];
-# baseline instance → what the restored instance MUST look like (overrides + policy floors applied)
-def expected($ov; $env; $floor; $maz):
-    .DBInstanceClass = ($ov.class // .DBInstanceClass)
-  | (if $ov.subnets then .DBSubnetGroup = {DBSubnetGroupName: $ov.subnets} else . end)
-  | (if $ov.sgs then .VpcSecurityGroups = ($ov.sgs | map({VpcSecurityGroupId: ., Status: "active"})) else . end)
-  | (if $ov.pg then .DBParameterGroups = [{DBParameterGroupName: $ov.pg}] else . end)
-  | .DBParameterGroups |= map(.ParameterApplyStatus = "in-sync")
-  | .MultiAZ = ((.MultiAZ // false) or $maz)
-  | .DeletionProtection = ((.DeletionProtection // false) or ($env != "dev"))
-  | .BackupRetentionPeriod = ([.BackupRetentionPeriod // 0, $floor] | max);
-# every attribute, flattened to "path" → value; identity/runtime fields removed; lists sorted and joined
-def norm:
-    del(.DBInstanceIdentifier, .DBInstanceArn, .DbiResourceId, .Endpoint.Address, .Endpoint.HostedZoneId,
-        .InstanceCreateTime, .LatestRestorableTime, .DBInstanceStatus, .PendingModifiedValues,
-        .ReadReplicaDBInstanceIdentifiers, .ReadReplicaSourceDBInstanceIdentifier, .ReadReplicaDBClusterIdentifiers,
-        .AvailabilityZone, .SecondaryAvailabilityZone, .StatusInfos, .CertificateDetails.ValidTill,
-        .EnhancedMonitoringResourceArn, .ActivityStreamStatus, .DBInstanceAutomatedBackupsReplications,
-        .AutomaticRestartTime, .ResumeFullAutomationModeTime, .MasterUserSecret, .TagList, .DBSecurityGroups,
-        .ListenerEndpoint, .IsStorageConfigUpgradeAvailable)
-  | .VpcSecurityGroups      = ([.VpcSecurityGroups[]? | .VpcSecurityGroupId] | sort | join(","))
-  | .DBParameterGroups      = ([.DBParameterGroups[]? | .DBParameterGroupName + ":" + (.ParameterApplyStatus // "?")] | sort | join(","))
-  | .OptionGroupMemberships = ([.OptionGroupMemberships[]? | .OptionGroupName] | sort | join(","))
-  | .AssociatedRoles        = ([.AssociatedRoles[]? | .RoleArn + ":" + (.FeatureName // "")] | sort | join(","))
-  | .DomainMemberships      = ([.DomainMemberships[]? | .Domain] | sort | join(","))
-  | .EnabledCloudwatchLogsExports = ((.EnabledCloudwatchLogsExports // []) | sort | join(","))
-  | .DBSubnetGroup = ({name: .DBSubnetGroup.DBSubnetGroupName, vpc: .DBSubnetGroup.VpcId,
-                       subnets: ([.DBSubnetGroup.Subnets[]?.SubnetIdentifier] | sort | join(","))} | with_entries(select(.value != null and .value != "")))
-  | [paths(scalars) as $p | {key: ($p | map(tostring) | join(".")), value: getpath($p)}] | from_entries;
-'
+JQLIB="$(cat "$HERE/rds-requests.jq")"          # shared request builders (also used by tests/local/up.sh)
 
 # ---------- baseline ----------
 capture() { # <source-db> → prints the file path
@@ -139,29 +110,11 @@ wanted_tags() { # <restored-from> → JSON tag list: baseline tags (minus aws:*)
 
 # restore request (shared part) — every setting the Restore* APIs accept, from the expected baseline
 restore_request() { # <op-specific-json> <restored-from>
-  jq -S --argjson op "$1" --argjson tags "$(wanted_tags "$2")" '
-    def gp3big: (.StorageType == "gp3" and (.AllocatedStorage // 0) >= 400);
-    {
-      DBInstanceClass, MultiAZ, DeletionProtection, BackupRetentionPeriod, PreferredBackupWindow,
-      AutoMinorVersionUpgrade, CopyTagsToSnapshot, CACertificateIdentifier, NetworkType, StorageType, DedicatedLogVolume,
-      Port: (.Endpoint.Port // .DbInstancePort),
-      DBSubnetGroupName: .DBSubnetGroup.DBSubnetGroupName,
-      VpcSecurityGroupIds: [.VpcSecurityGroups[].VpcSecurityGroupId],
-      DBParameterGroupName: .DBParameterGroups[0].DBParameterGroupName,
-      # default:* option groups are assigned by RDS automatically (and are engine-version specific) → only pass custom ones
-      OptionGroupName: ([.OptionGroupMemberships[]?.OptionGroupName | select(startswith("default:") | not)][0] // null),
-      PubliclyAccessible: (.PubliclyAccessible // false),
-      EnableIAMDatabaseAuthentication: (.IAMDatabaseAuthenticationEnabled // false),
-      EnableCloudwatchLogsExports: (.EnabledCloudwatchLogsExports // []),
-      Iops: (if (.StorageType | test("^io")) or gp3big then .Iops else null end),
-      StorageThroughput: (if gp3big then .StorageThroughput else null end),
-      Tags: $tags
-    } + $op
-    | with_entries(select(.value != null and .value != [] and .value != ""))' <<<"$(expected_json)"
+  jq -S --argjson op "$1" --argjson tags "$(wanted_tags "$2")" "$JQLIB"' restore_req($op; $tags)' <<<"$(expected_json)"
 }
 
 run_request() { # <api-op> <request-file> <description>
-  echo "restore request ($3) → $2"; jq . "$2"
+  echo "request ($3) → $2"; jq . "$2"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then echo "DRY_RUN: aws --profile $AWS_PROFILE --region $AWS_REGION rds $1 --cli-input-json file://$2"; return 0; fi
   dr_confirm "$3" || exit 1
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds "$1" --cli-input-json "file://$2" \
@@ -197,43 +150,7 @@ harden() {
   local db="$1" t e mod req roles tags arn
   t="$(describe "$db")"; e="$(expected_json)"
   # Modify request: only attributes that differ from the expected baseline (converge, don't churn).
-  mod="$(jq -S -n --argjson t "$t" --argjson e "$e" --arg db "$db" '
-    def same($a; $b): ($a | tojson) == ($b | tojson);
-    {
-      DBInstanceClass: $e.DBInstanceClass, MultiAZ: $e.MultiAZ, BackupRetentionPeriod: $e.BackupRetentionPeriod,
-      PreferredBackupWindow: $e.PreferredBackupWindow, PreferredMaintenanceWindow: $e.PreferredMaintenanceWindow,
-      DeletionProtection: $e.DeletionProtection, CopyTagsToSnapshot: $e.CopyTagsToSnapshot,
-      AutoMinorVersionUpgrade: $e.AutoMinorVersionUpgrade, MaxAllocatedStorage: $e.MaxAllocatedStorage,
-      CACertificateIdentifier: $e.CACertificateIdentifier,
-      DBParameterGroupName: $e.DBParameterGroups[0].DBParameterGroupName,
-      OptionGroupName: ([$e.OptionGroupMemberships[]?.OptionGroupName | select(startswith("default:") | not)][0] // null),
-      EnableIAMDatabaseAuthentication: ($e.IAMDatabaseAuthenticationEnabled // false),
-      VpcSecurityGroupIds: ([$e.VpcSecurityGroups[].VpcSecurityGroupId] | sort)
-    } as $want
-    | {
-      DBInstanceClass: $t.DBInstanceClass, MultiAZ: $t.MultiAZ, BackupRetentionPeriod: $t.BackupRetentionPeriod,
-      PreferredBackupWindow: $t.PreferredBackupWindow, PreferredMaintenanceWindow: $t.PreferredMaintenanceWindow,
-      DeletionProtection: $t.DeletionProtection, CopyTagsToSnapshot: $t.CopyTagsToSnapshot,
-      AutoMinorVersionUpgrade: $t.AutoMinorVersionUpgrade, MaxAllocatedStorage: $t.MaxAllocatedStorage,
-      CACertificateIdentifier: $t.CACertificateIdentifier,
-      DBParameterGroupName: $t.DBParameterGroups[0].DBParameterGroupName,
-      OptionGroupName: ($t.OptionGroupMemberships[0].OptionGroupName // null),
-      EnableIAMDatabaseAuthentication: ($t.IAMDatabaseAuthenticationEnabled // false),
-      VpcSecurityGroupIds: ([$t.VpcSecurityGroups[].VpcSecurityGroupId] | sort)
-    } as $have
-    | ($want | with_entries(select(.value != null and (same(.value; $have[.key]) | not))))
-    # Performance Insights and Enhanced Monitoring travel as a set
-    + (if same($e.PerformanceInsightsEnabled // false; $t.PerformanceInsightsEnabled // false)
-          and same($e.PerformanceInsightsRetentionPeriod; $t.PerformanceInsightsRetentionPeriod) then {}
-       else {EnablePerformanceInsights: ($e.PerformanceInsightsEnabled // false)}
-            + (if $e.PerformanceInsightsEnabled then {PerformanceInsightsRetentionPeriod: $e.PerformanceInsightsRetentionPeriod,
-                 PerformanceInsightsKMSKeyId: $e.PerformanceInsightsKMSKeyId} | with_entries(select(.value != null)) else {} end) end)
-    + (if same($e.MonitoringInterval // 0; $t.MonitoringInterval // 0) then {}
-       else {MonitoringInterval: ($e.MonitoringInterval // 0)} + (if ($e.MonitoringInterval // 0) > 0 then {MonitoringRoleArn: $e.MonitoringRoleArn} else {} end) end)
-    + (((($e.EnabledCloudwatchLogsExports // []) - ($t.EnabledCloudwatchLogsExports // [])) as $on
-        | (($t.EnabledCloudwatchLogsExports // []) - ($e.EnabledCloudwatchLogsExports // [])) as $off
-        | if ($on + $off) == [] then {} else {CloudwatchLogsExportConfiguration: {EnableLogTypes: $on, DisableLogTypes: $off}} end))
-    | if . == {} then . else . + {DBInstanceIdentifier: $db, ApplyImmediately: true} end')"
+  mod="$(jq -S --argjson t "$t" --arg db "$db" "$JQLIB"' harden_req($t; $db)' <<<"$e")"
   req="$OUT/harden-request-${db}.json"; echo "$mod" > "$req"
   if [[ "$mod" == "{}" ]]; then echo "harden: no setting differs from the baseline"
   else
@@ -288,6 +205,10 @@ validate() { # <db> — exit 1 on unexpected differences
       | ([$t.DBInstanceStatus | select(. != "available") | "DIFF    status \(.) (expected available)"]) as $st
       | ($diff + $tagdiff + $pend + $st) as $all
       | ($pol + $extra)[], $all[],
+        (if ($b[0].instance.UpgradeRolloutOrder // null) != ($t.UpgradeRolloutOrder // null) then
+           "INFO    UpgradeRolloutOrder: source \($b[0].instance.UpgradeRolloutOrder | tojson), target \($t.UpgradeRolloutOrder | tojson) — not settable by the API, not compared" else empty end),
+        (if ($b[0].instance.StorageEncrypted // false) == false then
+           "NOTE    source is NOT encrypted at rest — snapshots/restores inherit it (ISO 27001 A.8.24). Fix: copy-db-snapshot --kms-key-id …, restore the encrypted copy" else empty end),
         (if ($b[0].instance.ReadReplicaDBInstanceIdentifiers // []) != [] then
            "NOTE    source had read replica(s) \($b[0].instance.ReadReplicaDBInstanceIdentifiers | join(",")) — a restore does not recreate them (runbook failback/rebuild step)" else empty end),
         "RESULT  \($match) settings match, \(($b[0].tags | userTags) | length) tags checked, \($all | length) unexpected difference(s) → \(if ($all | length) == 0 then "VALIDATED" else "NOT VALIDATED" end)"'
@@ -332,6 +253,16 @@ cmd_snapshot() { # <snap> <new>
   run_request restore-db-instance-from-db-snapshot "$req" "restore $snap → $new"
 }
 
+cmd_create_like() { # <source-db> <new-db> — EMPTY instance with the source's configuration (test primary)
+  local src="$1" new="$2" req
+  load_baseline "$src"
+  req="$OUT/create-request-${new}.json"
+  # CREATE_OVERRIDES='{"MasterUserPassword":"…"}' (local tests) — default: RDS-managed master password in Secrets Manager
+  jq -S --arg id "$new" --argjson tags "$(wanted_tags "$src@create-like")" --argjson ov "${CREATE_OVERRIDES:-{\}}" \
+     "$JQLIB"' create_req($id; $tags; $ov)' <<<"$(expected_json)" > "$req"
+  run_request create-db-instance "$req" "create $new like $src (empty, same configuration)"
+}
+
 cmd_pitr() { # <src> <new> <ts|latest>
   local src="$1" new="$2" ts="$3" op req s t
   load_baseline "$src"
@@ -354,6 +285,7 @@ case "${1:-}" in
   plan)           shift; export DRY_RUN=1
                   case "${1:-}" in snapshot) cmd_snapshot "${2:?snapshot}" "${3:?new db}" ;;
                                    pitr) cmd_pitr "${2:?source}" "${3:?new db}" "${4:?ts|latest}" ;;
+                                   create-like) cmd_create_like "${2:?source}" "${3:?new db}" ;;
                                    *) echo "usage: $0 plan {snapshot <snap> <new>|pitr <src> <new> <ts|latest>}"; exit 2 ;; esac ;;
   list-snapshots)
     db="${2:?db id}"
@@ -369,6 +301,7 @@ case "${1:-}" in
     ;;
   snapshot)       cmd_snapshot "${2:?snapshot id}" "${3:?new db id}" ;;
   pitr)           cmd_pitr "${2:?source db id}" "${3:?new db id}" "${4:?restore time or latest}" ;;
+  create-like)    cmd_create_like "${2:?source db id}" "${3:?new db id}" ;;
   wait)           wait_available "${2:?db id}" ;;
   harden)         db="${2:?db id}"; dr_confirm "harden $db" || exit 1
                   BASELINE_FILE="${BASELINE_FILE:-$BASELINE_DIR/baseline-$(source_of "$db").json}"; BASE="$BASELINE_FILE"

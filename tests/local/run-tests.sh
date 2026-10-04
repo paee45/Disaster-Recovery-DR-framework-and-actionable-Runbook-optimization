@@ -81,16 +81,22 @@ source "$S/dr-lib.sh"; dr_init S3 > "$LOGS/C00.log" 2>&1 || { echo "dr_init fail
 export OLD_DB="$PRIMARY_DB"
 SNAP="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --snapshot-type automated --query 'DBSnapshots[0].DBSnapshotIdentifier' --output text)"
 export WAIT_POLL_S=3 HARDEN_SETTLE_S=2
-c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e '(.tags | length) == 4 and (.pgSettings | length) > 100 and (.instance.VpcSecurityGroups | length) == 3' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
-t  C00 "capture baseline of the source (describe + 4 tags + pg_settings)" c00
+FX="$HERE/fixtures/rds-primary-uat-like.json"; JQL="$(cat "$S/rds-requests.jq")"
+c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e --slurpfile fx "$FX" '([.tags[] | select(.Key | startswith("aws:") | not)] | length) == 4
+          and ([.tags[] | select(.Key | startswith("aws:"))] | length) == 3 and (.pgSettings | length) > 100
+          and (.instance.VpcSecurityGroups | length) == ($fx[0].VpcSecurityGroups | length)
+          and (.instance.DBSubnetGroup.Subnets | length) == ($fx[0].DBSubnetGroup.Subnets | length)' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
+t  C00 "capture baseline of the UAT-shaped source (3 SGs, 3 subnets, 4 user + 3 aws:* tags, pg_settings)" c00
 t  C01 "list-snapshots"                                              "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB"
 REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
-c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e '(.VpcSecurityGroupIds | length) == 3 and .BackupRetentionPeriod == 7
-           and .DBSubnetGroupName == "app-local-db-subnets" and .DBParameterGroupName == "app-pg16-local" and .PreferredBackupWindow == "01:00-01:30"
-           and (.EnableCloudwatchLogsExports | sort) == ["postgresql","upgrade"] and .CopyTagsToSnapshot and .DeletionProtection
-           and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)' "$REQ" \
+c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and .BackupRetentionPeriod == 7
+           and .DBSubnetGroupName == $f.DBSubnetGroup.DBSubnetGroupName and .DBParameterGroupName == $f.DBParameterGroups[0].DBParameterGroupName
+           and .PreferredBackupWindow == $f.PreferredBackupWindow and .EnableCloudwatchLogsExports == $f.EnabledCloudwatchLogsExports
+           and .CopyTagsToSnapshot == $f.CopyTagsToSnapshot and .DeletionProtection and .CACertificateIdentifier == $f.CACertificateIdentifier
+           and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)
+           and ([.Tags[].Key | select(startswith("aws:"))] | length) == 0' "$REQ" \
          && ! command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" >/dev/null 2>&1; }
-t  C01b "plan: request from baseline (3 SGs, subnets, PG, retention 7, logs, tags) — no change made" c01b
+t  C01b "plan: request from baseline (3 SGs, subnet group, PG, retention 7, window, logs, CA, user tags, NO aws:* tags) — no change" c01b
 c02() { "$S/dr-restore.sh" snapshot "$SNAP" "$RESTORED_DB" && has "sgs=\[sg-[0-9a-f]+ sg-[0-9a-f]+ sg-[0-9a-f]+\]" "$LOGS/C02.log"; }
 t  C02 "restore snapshot with the baseline request (--cli-input-json)"  c02
 t  C03 "wait until available (progress + T5)"                          "$S/dr-restore.sh" wait "$RESTORED_DB"
@@ -187,6 +193,39 @@ g04() { for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFro
 t  G04 "SSM Automation documents accepted (create-document)"            g04
 t  G05 "tracker CSV generated for every runbook"                        bash -c "for f in '$ROOT'/runbooks/*/RB-*.md; do python3 '$S/runbook-to-tracker.py' \"\$f\" -o /dev/null || exit 1; done"
 
+echo "=== I. UAT-shaped requests (offline, from the sanitised UAT describe) + create-like round trip"
+ireq() { jq -S --argjson ov '{}' "$JQL"' (.TagList | userTags) as $t | expected($ov; "uat"; 7; false) | '"$1" "$FX"; }
+i01() { ireq 'restore_req({DBInstanceIdentifier:"x", DBSnapshotIdentifier:"s"}; $t)' | tee /dev/stderr | jq -e '
+          (.VpcSecurityGroupIds | length) == 3 and .DBSubnetGroupName == "ev-uat-eks-rdssubnetgroup-example" and .DBParameterGroupName == "ev-postgres-17"
+          and (has("OptionGroupName") | not) and (has("Iops") | not) and (has("StorageThroughput") | not) and .Port == 5432
+          and .BackupRetentionPeriod == 7 and .PreferredBackupWindow == "17:58-18:28" and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
+          and .EnableCloudwatchLogsExports == ["postgresql"] and .DeletionProtection and (.CopyTagsToSnapshot == false)
+          and .EngineLifecycleSupport == "open-source-rds-extended-support" and .BackupTarget == "region" and .LicenseModel == "postgresql-license"
+          and .NetworkType == "IPV4" and ((.Tags // []) | length) == 0'; }
+t  I01 "restore request (UAT): 3 SGs, subnet group, PG, no default option group, no gp3 IOPS <400GB, port 5432 (not DbInstancePort 0), lifecycle/backup target/license, no aws:* tags" i01
+i02() { local tg; tg="$(jq -c '.PreferredMaintenanceWindow="mon:03:10-mon:03:40" | .MonitoringInterval=0 | del(.MonitoringRoleArn) | .PerformanceInsightsEnabled=false
+                             | del(.PerformanceInsightsKMSKeyId,.PerformanceInsightsRetentionPeriod,.DatabaseInsightsMode) | .BackupRetentionPeriod=1' "$FX")"
+        jq -S --argjson ov '{}' --argjson tg "$tg" "$JQL"' expected($ov; "uat"; 7; false) | harden_req($tg; "x")' "$FX" | tee /dev/stderr | jq -e '
+          .PreferredMaintenanceWindow == "thu:19:30-thu:20:00" and .MonitoringInterval == 60 and (.MonitoringRoleArn | endswith(":role/rds-monitoring-role"))
+          and .EnablePerformanceInsights and .PerformanceInsightsRetentionPeriod == 7 and (.PerformanceInsightsKMSKeyId | startswith("arn:aws:kms:"))
+          and .DatabaseInsightsMode == "standard" and .BackupRetentionPeriod == 7 and .ApplyImmediately'; }
+t  I02 "harden request (UAT) after a restore: maintenance window, Enhanced Monitoring 60s + role, PI + KMS + 7d, Database Insights, retention 1→7" i02
+i03() { ireq 'create_req("x"; $t; {})' | tee /dev/stderr | jq -e '.Engine == "postgres" and .EngineVersion == "17.9" and .MasterUsername == "postgres"
+          and .ManageMasterUserPassword and (has("MasterUserPassword") | not) and .AllocatedStorage == 20 and .StorageType == "gp3" and (has("Iops") | not)
+          and .MonitoringInterval == 60 and .EnablePerformanceInsights and .PreferredMaintenanceWindow == "thu:19:30-thu:20:00" and (.StorageEncrypted == false)'; }
+t  I03 "create-like request (UAT): engine 17.9, RDS-managed master password, gp3 20GB, monitoring + PI + window at create" i03
+i04() { jq -n --slurpfile f "$FX" "$JQL"' ($f[0] | norm) as $a
+          | ($f[0] | .DBInstanceIdentifier="other" | .DbiResourceId="db-X" | .Endpoint.Address="other.host" | .UpgradeRolloutOrder="first"
+             | .InstanceCreateTime="2030-01-01" | .AutomaticRestartTime=null | .CertificateDetails.ValidTill="x" | norm) as $b
+          | [$a | keys[] | select(($a[.] | tojson) != ($b[.] | tojson))] | if . == [] then true else error("diff: \(.)") end'; }
+t  I04 "validate ignores identity/runtime fields + UpgradeRolloutOrder (not settable), compares everything else" i04
+CL_DB="${PRIMARY_DB}-c$(date -u +%H%M%S)"
+i05() { CREATE_OVERRIDES='{"MasterUserPassword":"masterpw"}' "$S/dr-restore.sh" create-like "$PRIMARY_DB" "$CL_DB" \
+        && "$S/dr-restore.sh" wait "$CL_DB" && "$S/dr-restore.sh" harden "$CL_DB" | tee /dev/stderr | grep -q '→ VALIDATED$'; }
+t  I05 "create-like: empty test instance with the primary's configuration → harden → VALIDATED" i05
+command aws --profile dr-local rds modify-db-instance --db-instance-identifier "$CL_DB" --no-deletion-protection --apply-immediately >/dev/null 2>&1
+command aws --profile dr-local rds delete-db-instance --db-instance-identifier "$CL_DB" --skip-final-snapshot >/dev/null 2>&1
+
 echo "=== H. SECRET_MODE=k8s: plain Secret with TWO host keys, ledger IDs, failback by ID, Reloader alert"
 IP_REPLICA=172.30.0.22
 EPT=("$S/k8s-secret-endpoint.sh" --context dr-local -n app -s app-db-direct -k "POSTGRES_DB_HOST1,POSTGRES_DB_HOST2" --expect-env local)
@@ -217,7 +256,7 @@ h08() { local out rc; out="$("$S/k8s-secret-consumers.sh" --context dr-local -n 
         && "$S/k8s-secret-consumers.sh" --context dr-local -n app -s app-db-direct restart | tee /dev/stderr | grep -q '^restarted=1' \
         && wait_dsessions "$IP_RESTORED" direct-d,direct-e; }
 t  H08 "stale check finds app-e (HOST2), restart-stale → both apps on restored" h08
-h09() { local l; for _ in $(seq 1 20); do l="$(k -n reloader logs deploy/reloader-alert-sink --tail=200 2>/dev/null)"; grep -q 'app-d' <<<"$l" && break; sleep 3; done
+h09() { local l; for _ in $(seq 1 20); do l="$(k -n reloader logs deploy/reloader-alert-sink --tail=-1 2>/dev/null)"; grep -q 'app-d' <<<"$l" && break; sleep 3; done
         echo "$l" | tail -15; grep -q 'app-db-direct' <<<"$l" && grep -q 'app-d' <<<"$l" && grep -q 'cluster=dr-local' <<<"$l"; }
 t  H09 "Reloader ALERT webhook received the reload (secret, app-d, cluster info)" h09
 t  H10 "cutover #2 (id $C2): → promoted replica"                         bash -c "$(declare -f dhosts k); ${KMODE[*]} CUTOVER_ID=$C2 TARGET_DB=$REPLICA_DB '$S/dr-secret-cutover.sh' apply && [[ \$(dhosts) == $IP_REPLICA,$IP_REPLICA ]]"

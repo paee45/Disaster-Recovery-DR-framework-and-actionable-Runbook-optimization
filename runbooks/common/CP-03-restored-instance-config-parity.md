@@ -26,6 +26,43 @@ no alarms, the default parameter group, or is invisible to Terraform is the **ne
 | Secrets Manager rotation | Suspended in CP01-S02 | Same | Re-enable after stabilisation |
 | Terraform/CloudFormation state | Drift (unknown instance; replica resource changed) | Drift (unknown instance) | **IaC adoption** (§3) |
 
+## 1b. Field-by-field: how each `describe-db-instances` field reaches the new instance
+Single source: [`automation/scripts/rds-requests.jq`](../../automation/scripts/rds-requests.jq) (used by `dr-restore.sh`
+restore / `create-like` / `harden` / `validate` and by the local test bed). Example values = the UAT instance (sanitised).
+
+| Field (example) | Restore request | Harden (modify after) | Validate |
+|---|---|---|---|
+| `DBInstanceClass` db.t4g.small · `MultiAZ` false | ✔ | converge if different | ✔ |
+| `VpcSecurityGroups` (3 SGs) | ✔ **all** SG ids | converge (sorted) | ✔ |
+| `DBSubnetGroup` (name; 3 subnets in 1a/1b/1b) | ✔ group **name** (the group carries its subnets) | — | ✔ name, VPC, subnet ids |
+| `DBParameterGroups` ev-postgres-17 | ✔ | converge; **reboot** if `pending-reboot` | ✔ incl. `in-sync` |
+| `OptionGroupMemberships` default:postgres-17 | only if **custom** (default:* is automatic) | converge if custom | ✔ |
+| `Endpoint.Port` 5432 (`DbInstancePort` 0) | ✔ `Port` from the endpoint (0 is never sent) | — | ✔ |
+| `StorageType` gp3 · `AllocatedStorage` 20 | ✔ type; size = snapshot size (or larger baseline) | `MaxAllocatedStorage` | ✔ |
+| `Iops` 3000 · `StorageThroughput` 125 | **not sent** for gp3 < 400 GiB (fixed baseline; the API rejects them); sent for io1/io2 and gp3 ≥ 400 GiB | — | ✔ (equal by design) |
+| `BackupRetentionPeriod` 7 · `PreferredBackupWindow` | ✔ (CLI default would be **1 day**) | converge | ✔ |
+| `PreferredMaintenanceWindow` | ✘ (API) | ✔ | ✔ |
+| `BackupTarget` region · `LicenseModel` · `EngineLifecycleSupport` (extended support) · `NetworkType` · `DedicatedLogVolume` · `CACertificateIdentifier` rds-ca-rsa2048-g1 · `EnabledCloudwatchLogsExports` [postgresql] · `IAMDatabaseAuthenticationEnabled` · `PubliclyAccessible` · `AutoMinorVersionUpgrade` · `CopyTagsToSnapshot` · `DeletionProtection` | ✔ | converge where the API allows | ✔ |
+| `MonitoringInterval` 60 + `MonitoringRoleArn` | ✘ (API) | ✔ | ✔ |
+| `PerformanceInsightsEnabled` + KMS key + retention 7 · `DatabaseInsightsMode` standard | ✘ (API) | ✔ (as one set) | ✔ |
+| `AssociatedRoles` (none in UAT) | ✘ | ✔ `add-role-to-db-instance` | ✔ |
+| `TagList` | user tags ✔ · **`aws:*` never** (AWS-reserved, e.g. `aws:cloudformation:*`) | missing user tags added | user tags ✔ |
+| `EngineVersion` 17.9 · `StorageEncrypted` false · `KmsKeyId` | from the **snapshot** (not settable on restore) | — (an engine diff = IC decision) | ✔ |
+| `UpgradeRolloutOrder` second | not settable by any API | — | reported as INFO, not compared |
+| identity/runtime: identifier, ARN, `DbiResourceId`, endpoint address, create/restorable/restart times, status, AZ, certificate `ValidTill`, monitoring resource ARN, replica lists, activity stream | — | — | ignored |
+
+**What the UAT describe tells us (2026-10):**
+- **Not encrypted at rest** (`StorageEncrypted: false`): every snapshot and restore is unencrypted too → ISO 27001 A.8.24 finding.
+  Remediation: `copy-db-snapshot --kms-key-id …` then restore the encrypted copy (one-time migration, plan a window).
+- **Status `stopped`**: restores still work (restore point ≤ `LatestRestorableTime`), but `pg_settings` can't be captured and AWS
+  auto-starts it at `AutomaticRestartTime` (7-day limit). Pre-flight warns.
+- **Managed by CloudFormation** (`aws:cloudformation:stack-name` ev-uat-eks, logical id UatRDSInstance): a restored
+  instance is **outside the stack** → IaC adoption (§3) or the stack keeps pointing at the old instance; never let a stack
+  update "fix" the drift by replacing resources during the event.
+- **No read replica** (`ReadReplicaDBInstanceIdentifiers: []`): S2 (promote replica) is not available in UAT today →
+  RB-UAT-S2 needs the replica first; until then S3/S4 are the UAT scenarios.
+- Subnets: 3 subnets but only **2 AZs** (1a, 1b, 1b) → Multi-AZ possible; no third AZ.
+
 ## 2. Steps
 
 | ID | Step | Owner | ⏱ | Expected / verify |
