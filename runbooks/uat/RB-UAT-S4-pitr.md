@@ -16,6 +16,15 @@ source automation/scripts/dr-lib.sh && dr_init S4
 export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 ```
 
+**Step by step with the runner (recommended):** `./automation/scripts/dr-run.sh S4` runs this runbook in order with the same step IDs.
+For each step it shows the command, the live output (indented), ✅/❌ with the time taken, the timeline markers written and the evidence
+files created; it stops at every ⛳ gate for a typed `GO` + approver names, asks the inputs (T0, BAD_TS/RESTORE_TS, mode, E2E reference) once,
+prints `dr_phase` time vs budget and syncs the evidence to S3 at each phase end. A failed step stops the run (or `[r]etry`/`[s]kip`);
+steps that depend on it are **blocked**, never run. Continue later with `--resume <DR_ID>`. `--list` shows the steps, `--dry-run` the commands,
+`--to <ID>` stops early (e.g. `--to P3A-S01` = restore + verify, no cutover). Logs: `evidence/<DR_ID>/run.log`, `steps/<ID>.log`, `run-report.md`.
+Runner-only rows (not in the table below): `P0-S01..S03` (env check, pre-flight, names), `P2-G3` ⛳ restore point signed off, `P3A-G0` ⛳ cutover GO; P3A-S04 is split into `P3A-S04` connections, `P3A-S05` E2E → T9, `P3A-G5` ⛳ declare → T10. Mode B: the runner stops after `P3B-S01` (manual repair, confirmed by name).
+The table stays the manual procedure: use it when you run the commands yourself.
+
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Open the incident (SEV3) + channel; `dr_mark T1`, `dr_mark T0 --at <first bad change>` | SRE on-call | 3 | Open |

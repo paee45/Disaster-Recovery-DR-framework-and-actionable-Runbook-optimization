@@ -61,6 +61,7 @@
 
 - **Profile:** `source env/<env>.env` (copy from `env/<env>.env.example`), run `./automation/scripts/dr-env-check.sh <SCENARIO>` (must PASS), then `source automation/scripts/dr-lib.sh && dr_init <SCENARIO>`. Never edit values inside commands.
 - **Recorded shell (recommended):** `./automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` does the profile + guard + `dr_init` and records the whole terminal session, command history and every aws/kubectl call into the evidence folder (synced to S3). See [docs/05](../docs/05-evidence-and-audit.md).
+- **Step-by-step runner (S3/S4):** `./automation/scripts/dr-run.sh S3|S4` walks the runbook steps in order with their IDs: live output per step, ✅/❌ + duration, the timeline markers and evidence files each step produced, ⛳ gates with typed GO + names, phase times vs budget, evidence sync at every phase end, `--resume <DR_ID>` after a stop. Failed step → dependents blocked. `--list`, `--dry-run`, `--only/--skip/--from/--to`.
 - **Strict pinning:** every `aws` command is written `aws --profile $AWS_PROFILE --region $AWS_REGION …` and every `kubectl` command `kubectl --context $EKS_CONTEXT …` (as in the snippets). Without the flags the shell refuses the command (exit 97) — by design, see [docs/12](../docs/12-account-and-cluster-safety.md).
 - **CLI, not console:** every action has a copy-paste CLI command or script ([CLI quick reference](../docs/11-aws-cli-quick-reference.md)).
 - **Phase timers:** `dr_phase start|end <phase> <budget>`; `dr_summary` shows where the time went.

@@ -14,6 +14,8 @@ source env/dev.env && source automation/scripts/dr-lib.sh && dr_init S4
 export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 ```
 
+**Step-by-step runner:** `./automation/scripts/dr-run.sh S4` executes the restore with live output, evidence per step, gates and `--resume` (step IDs follow [RB-UAT-S4](../uat/RB-UAT-S4-pitr.md); `--list` maps them). This table remains the authoritative manual procedure.
+
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Team channel post. Stop the offending job/migration. `dr_mark T1`, `dr_mark T0 --at <bad change>` | Engineer | 3 | Posted |

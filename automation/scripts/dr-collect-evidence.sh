@@ -54,6 +54,7 @@ python3 "$HERE/dr-rto-rpo-calc.py" "${DR_EVIDENCE_DIR}/timeline.jsonl" --out "${
 MANIFEST_SHA="$(sha256sum "${DR_EVIDENCE_DIR}/manifest.json" | cut -d' ' -f1)"
 
 PREFIX="s3://${EVIDENCE_BUCKET}/${DR_ENV}/$(date -u +%Y)/${DR_ID}/"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" s3 cp --recursive --sse aws:kms "${DR_EVIDENCE_DIR}/" "$PREFIX"
+aws --profile "$AWS_PROFILE" --region "$AWS_REGION" s3 cp --recursive --sse aws:kms --only-show-errors "${DR_EVIDENCE_DIR}/" "$PREFIX" \
+  && echo "uploaded $(find "$DR_EVIDENCE_DIR" -type f | wc -l) files → $PREFIX"
 dr_mark EVIDENCE_UPLOADED "prefix=${PREFIX} manifest_sha256=${MANIFEST_SHA}"
 echo "POST IN INCIDENT CHANNEL ->  EVIDENCE: ${PREFIX}manifest.json sha256=${MANIFEST_SHA}"

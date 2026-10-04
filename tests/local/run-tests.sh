@@ -292,6 +292,46 @@ t  H15 "CUTOVER_SECRET=ro: only the RO host key moves (HOST1), HOST2 untouched, 
 tf H16 "revert with a different key list than the change used is refused"  "was written for keys" "${EPT[@]}" rollback --id DR-test-keys
 t  H17 "RO rollback (same key list) restores the RO key only"   bash -c "$(declare -f dhosts k); ${RO_ENV[*]} '$S/dr-secret-cutover.sh' rollback && [[ \$(dhosts) == $IP_OLD,$IP_OLD ]]"
 
+echo "=== J. dr-run.sh: step-by-step runner (SECRET_MODE=k8s, app-db-direct), gates auto, failure blocking, stop + resume"
+RUN="$S/dr-run.sh"; JTS="$(date -u +%H%M%S)"; JS3="DR-localtest-run-S3-$JTS"; JF="DR-localtest-run-F-$JTS"; JS4="DR-localtest-run-S4-$JTS"
+JENV=(env -u DR_EVIDENCE_DIR -u DR_TIMELINE SECRET_MODE=k8s K8S_SECRET=app-db-direct "K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2" K8S_PORT_KEY=POSTGRES_DB_PORT
+      OLD_DB="$PRIMARY_DB" DR_RUN_GATES=auto FENCE=skip)
+jdir() { echo "$ROOT/evidence/$1"; }
+jst()  { awk -F'\t' -v i="$2" '$1==i{s=$2} END{print s}' "$(jdir "$1")/run-state.tsv"; }
+j01() { "$RUN" S3 --list | tee /dev/stderr | grep -c '^P[0-9]' | grep -qx 20 && "$RUN" S4 --list | grep -c '^P[0-9]' | grep -qx 22; }
+t  J01 "--list: S3 = 20 steps, S4 = 22 steps (IDs as in the runbooks), no AWS access needed" j01
+j02() { local d; d="$(jdir DR-localtest-dry-$JTS)"; DR_ID="DR-localtest-dry-$JTS" "$RUN" S3 --dry-run | tee /dev/stderr | grep -q 'dr-restore.sh snapshot' && [[ ! -e "$d" ]]; }
+t  J02 "--dry-run prints every step + command and creates nothing (no evidence folder)" j02
+tf J03 "DR_RUN_GATES=auto is refused outside the local test bed" "only for the local test bed" env DR_ENV=uat DR_RUN_GATES=auto "$RUN" S3
+k patch secret app-db-direct --type merge -p '{"stringData":{"POSTGRES_DB_HOST1":"'"$IP_OLD"'","POSTGRES_DB_HOST2":"'"$IP_OLD"'"}}' >/dev/null
+j04() { "${JENV[@]}" DR_ID="$JS3" RESTORED_DB="app-pg-local-r$JTS" "$RUN" S3; local rc=$? d; d="$(jdir "$JS3")"; echo "rc=$rc"
+        (( rc == 0 )) && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]] \
+        && [[ "$(jq -r '.marker' "$d/timeline.jsonl" | grep -E '^T(0|1|2|4|5|6|7|9|10)$' | sort -u | wc -l)" == 9 ]] \
+        && [[ "$(grep -c '| PASS |' "$d/run-report.md")" == 19 ]] && grep -q '| P3-S01 | change | .* | NA |' "$d/run-report.md" \
+        && ls "$d"/steps/P2-S04.log "$d"/approvals/P1-G1.txt "$d"/approvals/P3-G0.txt "$d"/approvals/P4-G4.txt >/dev/null \
+        && grep -q 'RESULT .* VALIDATED' "$d/steps/P2-S04.log" && grep -q 'EVIDENCE_UPLOADED' "$d/timeline.jsonl" \
+        && grep -q '📄 evidence' "$d/run.log" && [[ -z "$(find "$d/steps" -name '.*' -type f)" ]]; }
+t  J04 "S3 end to end: 19 PASS + fence N/A, T0…T10, VALIDATED, both host keys → restored, approvals, step logs" j04
+j05() { "${JENV[@]}" DR_ID="$JF" SNAPSHOT_ID=does-not-exist RESTORED_DB="app-pg-local-rf$JTS" "$RUN" S3 --on-fail continue --skip P0-S01,P0-S02 --to P3-S03
+        local rc=$?; echo "rc=$rc"
+        (( rc == 1 )) && [[ "$(jst "$JF" P1-S02)" == FAIL && "$(jst "$JF" P2-S01)" == BLOCKED && "$(jst "$JF" P3-S02)" == BLOCKED ]] \
+        && ! grep -q '"marker":"T4"' "$(jdir "$JF")/timeline.jsonl" && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]]; }
+t  J05 "a failed step BLOCKS what depends on it: bad snapshot → no restore, no cutover (--on-fail continue)" j05
+k patch secret app-db-direct --type merge -p '{"stringData":{"POSTGRES_DB_HOST1":"'"$IP_OLD"'","POSTGRES_DB_HOST2":"'"$IP_OLD"'"}}' >/dev/null
+j06() { "${JENV[@]}" DR_ID="$JS4" RESTORED_DB="app-pg-local-p$JTS" DR_RUN_AUTO_NO=P3A-G0 "$RUN" S4; local rc=$?; echo "rc=$rc"
+        (( rc == 4 )) && [[ "$(jst "$JS4" P3A-G0)" == STOPPED ]] && [[ "$(dhosts)" == "$IP_OLD,$IP_OLD" ]] \
+        && grep -q 'P3A-G0 NO by' "$(jdir "$JS4")/timeline.jsonl" && grep -q '"marker":"RPO_RESTORE_TS"' "$(jdir "$JS4")/timeline.jsonl"; }
+t  J06 "S4 (mode A): NO at the cutover gate stops the run (exit 4), Secret untouched, decision recorded" j06
+j07() { "${JENV[@]}" "$RUN" S4 --resume "$JS4" | tee "$LOGS/J07.out"; local rc=${PIPESTATUS[0]}; echo "rc=$rc"
+        (( rc == 0 )) && grep -q 'P2-S01 .*done earlier (PASS)' "$LOGS/J07.out" && [[ "$(grep -c '"marker":"T4"' "$(jdir "$JS4")/timeline.jsonl")" == 1 ]] \
+        && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]] && grep -q '"marker":"T10"' "$(jdir "$JS4")/timeline.jsonl"; }
+t  J07 "--resume continues after the gate: passed steps not repeated (one T4), cutover + T10 done" j07
+tf J08 "a second run with the same DR_ID without --resume is refused" "already has a run" "${JENV[@]}" DR_ID="$JS4" "$RUN" S4
+j09() { local out id; out="$("${JENV[@]}" -u DR_ID RESTORED_DB=app-pg-local-rx "$RUN" S3 --only P0-S03)"; echo "$out"
+        id="$(grep -oE 'DR_ID DR-[0-9]{8}-[0-9]{4}-local-S3' <<<"$out" | head -1 | cut -d' ' -f2)"; echo "id=$id"
+        [[ -n "$id" ]] && [[ "$(jst "$id" P0-S03)" == PASS ]] && [[ -f "$(jdir "$id")/run.log" ]]; }
+t  J09 "no DR_ID given: a new DR-<date>-local-S3 id + its own evidence folder" j09
+
 echo; echo "PASS=$PASSN FAIL=$FAILN  (report: $REPORT, evidence: $DR_EVIDENCE_DIR)"
 printf '\n**PASS=%s FAIL=%s** · DR_ID=%s · %s\n' "$PASSN" "$FAILN" "$DR_ID" "$(date -u +%FT%TZ)" >> "$REPORT"
 exit "$FAILN"

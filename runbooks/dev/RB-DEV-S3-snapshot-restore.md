@@ -17,6 +17,8 @@ source automation/scripts/dr-lib.sh && dr_init S3
 export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-r$(date -u +%Y%m%d%H%M)"
 ```
 
+**Step-by-step runner:** `./automation/scripts/dr-run.sh S3` executes the restore with live output, evidence per step, gates and `--resume` (step IDs follow [RB-UAT-S3](../uat/RB-UAT-S3-snapshot-restore.md); `--list` maps them). This table remains the authoritative manual procedure.
+
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Post in the team channel ([Investigating], DEV short form). `dr_mark T1`, `dr_mark T0 --at <impact>` | Engineer | 2 | Posted |

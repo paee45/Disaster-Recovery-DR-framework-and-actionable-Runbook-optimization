@@ -8,6 +8,8 @@ restarted automatically by **Stakater Reloader** (no DNS change).
 > v0.5: baseline-driven restore (`capture` → `plan` → restore → `harden` → `validate`/`validate-pg`), standalone stale-pod tool
 > `k8s-secret-consumers.sh`, **strict pinning** (no default profile/context; unpinned calls refused), recorded DR shell
 > `dr-session.sh` + `commands.jsonl` audit + continuous evidence sync to S3, pinning lint in CI. See [docs/12](docs/12-account-and-cluster-safety.md).
+> v0.6: **step-by-step runner** `dr-run.sh S3|S4` (runbook step IDs, live output, per-step evidence + timeline, gates, resume),
+> `SECRET_MODE=k8s` (plain Secret, every host key, change IDs + failback by ID), SSO or key login with browser wait.
 > Targets: **RPO 24 h** (RDS daily backup, 7-day retention), **RTO 30 min** (aim). No DR drills are scheduled.
 > Runbooks are ISMS documents (ISO/IEC 27001:2022), reviewed by the SRE lead and approved by the CTO. Fill in the placeholders (`{{…}}`, `TODO`) and `env/<env>.env`.
 
@@ -32,7 +34,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 | `env/*.env.example` | Per-environment variables (instance IDs, secrets, EKS context, targets) |
 | [`automation/`](automation/) | SSM Automation documents, scripts (cutover, Reloader wait, restore, fence, parity, evidence, KPIs, tracker generator), SQL, K8s manifests |
 | [`docs/`](docs/) | 00 strategy · 01 architecture · 02 runbook standards · 03 execution media/tooling · 04 RPO/RTO · 05 evidence/audit · 06 comms · 07 validation (no scheduled drills) · 08 capstone optimization · **09 ISO 27001 scope, control mapping & risk register** · **10 corrective action plan (UAT exercise 2026-08-04)** · 11 AWS CLI quick reference · **12 account & cluster safety (guardrails)** |
-| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 100 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
+| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 109 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
 | [`templates/`](templates/) | Comms (chat, leadership, vendor, customer/status page, planned drills), execution tracker, evidence manifest, drill report, PIR, runbook template |
 
 ## Ten rules this framework is built on
@@ -53,6 +55,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 cp env/uat.env.example env/uat.env && $EDITOR env/uat.env
 source env/uat.env && source automation/scripts/dr-lib.sh && dr_init S2
 ./automation/scripts/dr-preflight.sh replica                 # read-only checks
+./automation/scripts/dr-run.sh S3 --list                     # S3/S4 step by step: --dry-run, then run it (gates ask GO + names)
 python3 automation/scripts/runbook-to-tracker.py runbooks/uat/RB-UAT-S2-replica-promotion.md --expand -o tracker.csv
 ```
 

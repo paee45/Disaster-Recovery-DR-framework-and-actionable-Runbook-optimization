@@ -27,6 +27,15 @@ export OLD_DB="$PRIMARY_DB"                         # the instance being replace
 export RESTORED_DB="${PRIMARY_DB}-r$(date -u +%Y%m%d%H%M)"
 echo "OLD_DB=$OLD_DB  RESTORED_DB=$RESTORED_DB"
 ```
+**Step by step with the runner (recommended):** `./automation/scripts/dr-run.sh S3` runs this runbook in order with the same step IDs.
+For each step it shows the command, the live output (indented), ✅/❌ with the time taken, the timeline markers written and the evidence
+files created; it stops at every ⛳ gate for a typed `GO` + approver names, asks the inputs (T0, SNAPSHOT_ID, E2E reference) once,
+prints `dr_phase` time vs budget and syncs the evidence to S3 at each phase end. A failed step stops the run (or `[r]etry`/`[s]kip`);
+steps that depend on it are **blocked**, never run. Continue later with `--resume <DR_ID>`. `--list` shows the steps, `--dry-run` the commands,
+`--to <ID>` stops early (e.g. `--to P2-S05` = restore + verify, no cutover). Logs: `evidence/<DR_ID>/run.log`, `steps/<ID>.log`, `run-report.md`.
+Runner-only rows (not in the table below): `P0-S01` env check, `P0-S02` pre-flight, `P0-S03` instance names (= this section), `P3-G0` ⛳ cutover GO after P2-S05; the runner's `P3-S03` also runs the stale-consumer check (`dr-eks-rollout.sh check`, `restart-stale` if needed).
+The table stays the manual procedure: use it when you run the commands yourself.
+
 Use **CLI commands from this runbook only**, not the AWS Console (exercise finding: the CLI was faster and more consistent).
 Copy commands from the Git/wiki view, not from the form tool.
 

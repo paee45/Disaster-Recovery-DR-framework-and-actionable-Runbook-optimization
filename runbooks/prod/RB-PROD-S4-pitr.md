@@ -21,6 +21,8 @@ export OLD_DB=$PRIMARY_DB
 export RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 ```
 
+**Step-by-step runner:** `./automation/scripts/dr-run.sh S4` executes the restore with live output, evidence per step, gates and `--resume` (step IDs follow [RB-UAT-S4](../uat/RB-UAT-S4-pitr.md); `--list` maps them). In PROD every change step also asks for the typed `prod` confirmation. This table remains the authoritative manual procedure.
+
 ## Phase 1 — Assess, find the restore time, choose the mode (budget 20–30 min)
 
 | ID | Step | Owner | ⏱ | Expected / verify |
