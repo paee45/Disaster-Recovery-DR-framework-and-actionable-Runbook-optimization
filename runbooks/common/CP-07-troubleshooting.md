@@ -33,6 +33,9 @@ Look up the symptom and apply the fix. Record every use as a deviation (`dr_mark
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `REFUSED: Secret … is owned by ExternalSecret` (k8s mode) | The Secret is created by ESO, which would overwrite a direct change | Use `SECRET_MODE=eso`, or stop ESO sync for that Secret first (`--allow-eso-owned` only with ESO paused) |
+| `REFUSED: … was written for keys […], this call names […]` | Revert/failback with a different `K8S_HOST_KEY` list than the change used | Use the same key list as the change (see `dr-secret-cutover.sh history`) |
+| `NO CHANGE: every key already has the target value` | The endpoint was already set (re-run, or someone changed it) | Nothing to do; check `show` / `history` |
 | `TIMEOUT: K8s Secret … host != …` | ESO not syncing (controller down, IAM, wrong key) | `kubectl --context $EKS_CONTEXT -n $K8S_NS describe externalsecret $K8S_SECRET`; check the ESO controller logs; check that `K8S_HOST_KEY` matches the template key (e.g. `POSTGRES_DB_HOST`) |
 | A workload is `NOT reloaded … manual rollout restart` | Missing Reloader annotation, or Reloader down | The script already restarted it. Afterwards add `secret.reloader.stakater.com/reload: "<secret>"` to that workload (ticket) |
 | Pods crash-loop after the cutover | Wrong host/port, SG does not allow EKS → DB, or password mismatch | `kubectl --context $EKS_CONTEXT logs`; check the restored DB SGs (parity diff); `dr-secret-cutover.sh precheck` |

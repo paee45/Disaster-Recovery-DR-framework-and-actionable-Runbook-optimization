@@ -281,6 +281,17 @@ h14() { k patch secret app-db-direct --type merge -p '{"data":{"POSTGRES_DB_HOST
         k patch secret app-db-direct --type merge -p '{"data":{"POSTGRES_DB_HOST1":"'"$(printf "$IP_REPLICA" | base64)"'"}}' >/dev/null; return $rc; }
 tf H14 "rollback refuses when the Secret was changed outside the ledger" "changed outside the ledger" h14
 
+# read-only secret in k8s mode: its own Secret/host key; the primary keys must not move; no T6/T7 for it
+RO_ENV=(env SECRET_MODE=k8s K8S_SECRET=app-db-primary-stub K8S_HOST_KEY=X K8S_SECRET_RO=app-db-direct K8S_HOST_KEY_RO=POSTGRES_DB_HOST1 K8S_PORT_KEY= CUTOVER_SECRET=ro)
+h15() { k delete configmap dr-endpoint-ledger-app-db-direct --ignore-not-found >/dev/null
+        k patch secret app-db-direct --type merge -p '{"stringData":{"POSTGRES_DB_HOST1":"'"$IP_OLD"'","POSTGRES_DB_HOST2":"'"$IP_OLD"'"}}' >/dev/null
+        local t6; t6="$(grep -c '"marker":"T[67]"' "$DR_TIMELINE")"
+        "${RO_ENV[@]}" TARGET_DB="$REPLICA_DB" RESTART_UNANNOTATED=false "$S/dr-secret-cutover.sh" apply \
+        && [[ "$(dhosts)" == "$IP_REPLICA,$IP_OLD" ]] && [[ "$(grep -c '"marker":"T[67]"' "$DR_TIMELINE")" == "$t6" ]]; }
+t  H15 "CUTOVER_SECRET=ro: only the RO host key moves (HOST1), HOST2 untouched, no T6/T7"  h15
+tf H16 "revert with a different key list than the change used is refused"  "was written for keys" "${EPT[@]}" rollback --id DR-test-keys
+t  H17 "RO rollback (same key list) restores the RO key only"   bash -c "$(declare -f dhosts k); ${RO_ENV[*]} '$S/dr-secret-cutover.sh' rollback && [[ \$(dhosts) == $IP_OLD,$IP_OLD ]]"
+
 echo; echo "PASS=$PASSN FAIL=$FAILN  (report: $REPORT, evidence: $DR_EVIDENCE_DIR)"
 printf '\n**PASS=%s FAIL=%s** · DR_ID=%s · %s\n' "$PASSN" "$FAILN" "$DR_ID" "$(date -u +%FT%TZ)" >> "$REPORT"
 exit "$FAILN"

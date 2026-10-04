@@ -4,7 +4,7 @@
 |---|---|
 | Version / owner | **v1.1** / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Before → after | `app-pg-uat` (+ replica) → **`app-pg-uat-r<YYYYMMDDHHMM>`** (single-AZ) becomes primary |
-| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): secret update → ESO → **Reloader** restarts every pod using the DB secret |
+| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): `SECRET_MODE=k8s` patches **every host key** of the K8s Secret directly (no ESO) and records the change under the DR id → **Reloader** restarts every pod using the Secret |
 | Targets | RPO 24 h (daily automated snapshot, 7-day retention) · **RTO 30 min** |
 | Last exercise | **2026-08-04**: RTO **39 min 55 s (not met)**, RPO 17 h (met), DB 590 MB. Findings → [corrective action plan](../../docs/10-corrective-action-plan-2026-08-04.md) |
 | Also used for | Planned UAT data reset to a known snapshot; DR exercises (see §Exercise failback) |
@@ -54,7 +54,7 @@ Copy commands from the Git/wiki view, not from the form tool.
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P3-S01 | `dr_phase start cutover 5` · [CP-04](../common/CP-04-fencing-old-instance.md): the old instance is already stopped/unreachable in an exercise. In a real event: `./automation/scripts/dr-fence-instance.sh readonly $OLD_DB` | SRE | 1 | Fenced, or noted "stopped" |
-| P3-S02 | **Cutover:** `./automation/scripts/dr-secret-cutover.sh apply`. It updates `$SECRET_ID` host → ESO force-sync → checks `$K8S_HOST_KEY` in the K8s Secret → waits for **Reloader** to restart every consumer (manual restart fallback) → `T6`, `T7`. If `SECRET_ID_RO` is used: `SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` | SRE | 4 | `CUTOVER DONE`; every consumer `rolled out` |
+| P3-S02 | **Cutover:** `./automation/scripts/dr-secret-cutover.sh apply`. `SECRET_MODE=k8s`: precheck (app login on the new DB) → patches **all keys in `$K8S_HOST_KEY`** (e.g. `POSTGRES_DB_HOST1,POSTGRES_DB_HOST2`) in the K8s Secret in one patch and records old → new endpoint, old/new DB identifier and the change id (= `$DR_ID`) in the ledger → waits for **Reloader** to restart every annotated consumer (manual-restart fallback; unannotated ones are reported — `dr-eks-rollout.sh check` / `restart-stale`) → `T6`, `T7`. (`SECRET_MODE=eso` instead: writes `$SECRET_ID` in Secrets Manager → ESO force-sync → waits for the K8s Secret.) Read-only secret, if used: `CUTOVER_SECRET=ro TARGET_DB=$RESTORED_DB ./automation/scripts/dr-secret-cutover.sh apply` | SRE | 4 | `CUTOVER DONE`; every consumer `rolled out` |
 | P3-S03 | `./automation/scripts/dr-eks-rollout.sh resume-cronjobs` · `dr_phase end cutover 5` | SRE | — | CronJobs resumed |
 
 ## Phase 4 — Application verification (budget 5 min)
@@ -85,7 +85,7 @@ Returns UAT to the original instance after an exercise. It is safe because nothi
 | XF-S05 | Re-enable rotation if it was suspended; `./automation/scripts/dr-collect-evidence.sh` again (adds the failback records); fill in the [exercise report](../../templates/reports/drill-report.md) | SRE | 10 | Report draft |
 
 ## Troubleshooting
-See [CP-07 troubleshooting](../common/CP-07-troubleshooting.md) (restore stuck, missing SG, login failure after restore, pods not restarted, ESO not syncing).
+See [CP-07 troubleshooting](../common/CP-07-troubleshooting.md) (restore stuck, missing SG, login failure after restore, pods not restarted, ESO not syncing (eso mode)).
 
 ## Change log
 | Version | Date | Change | Trigger |

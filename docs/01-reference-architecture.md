@@ -42,7 +42,7 @@ keys `host`, `port`, `dbname`, `username`, `password` (and optionally `engine`, 
 
 | Component | Practice |
 |---|---|
-| Secret write | `dr-secret-cutover.sh apply` or SSM `DR-UpdateDbSecretEndpoint`: updates `host`/`port`/`dbInstanceIdentifier`, keeps the previous version as `AWSPREVIOUS`, never logs values |
+| Secret write | **`SECRET_MODE=k8s` (current default): `dr-secret-cutover.sh apply` patches every host key of the K8s Secret directly and records the change (ledger ConfigMap, change id = DR id); `SECRET_MODE=eso` (target): the rows below.** `dr-secret-cutover.sh apply` or SSM `DR-UpdateDbSecretEndpoint` (eso only): updates `host`/`port`/`dbInstanceIdentifier`, keeps the previous version as `AWSPREVIOUS`, never logs values |
 | Password trap | A restored DB (S3/S4) contains role passwords **as of the restore point**. `dr-secret-cutover.sh precheck` tests the login before the switch; `fix-password` resets the role to the current secret value |
 | Rotation | Suspend Secrets Manager rotation during the event (it would race with the cutover); re-enable it in CP-03. The RDS rotation Lambda connects to `host`, so after the cutover it rotates the new instance |
 | ESO | `refreshInterval: 1m`; the cutover forces a sync with the `force-sync` annotation and verifies `DB_HOST` in the K8s Secret |

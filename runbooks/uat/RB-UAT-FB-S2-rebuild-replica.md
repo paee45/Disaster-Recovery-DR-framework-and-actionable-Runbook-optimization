@@ -15,7 +15,7 @@ dr_set_target "$NEW_PRIMARY"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | New replica: `aws --profile $AWS_PROFILE --region $AWS_REGION rds create-db-instance-read-replica --db-instance-identifier app-pg-uat-replica2 --source-db-instance-identifier $NEW_PRIMARY --db-instance-class $DB_INSTANCE_CLASS --db-subnet-group-name $DB_SUBNET_GROUP --vpc-security-group-ids $DB_SG --db-parameter-group-name $DB_PARAM_GROUP --copy-tags-to-snapshot` | DBA | 5 (+ build) | `replicating` |
-| P1-S02 | RO secret → new replica: `TARGET_DB=app-pg-uat-replica2 SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` | Executor | 5 | Readers rolled by Reloader |
+| P1-S02 | RO secret → new replica: `CUTOVER_SECRET=ro TARGET_DB=app-pg-uat-replica2 ./automation/scripts/dr-secret-cutover.sh apply` (k8s mode; eso mode: `SECRET_ID=$SECRET_ID_RO`) | Executor | 5 | Readers rolled by Reloader |
 | P1-S03 | Pre-flight on the new pair: `PRIMARY_DB=$NEW_PRIMARY REPLICA_DB=app-pg-uat-replica2 ./automation/scripts/dr-preflight.sh replica` | Executor | 3 | PASS |
 | P2-S01 | [CP-03](../common/CP-03-restored-instance-config-parity.md) (parity, monitoring re-point, **re-enable rotation**, backup tag, **IaC adoption**) | SRE | 45 | `terraform plan` clean |
 | P2-S02 | Update `env/uat.env` (PRIMARY_DB / REPLICA_DB) + CMDB via a PR | SRE | 5 | Merged |

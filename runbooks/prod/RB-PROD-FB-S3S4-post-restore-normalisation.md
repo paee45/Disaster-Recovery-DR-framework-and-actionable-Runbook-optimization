@@ -21,7 +21,7 @@ dr_set_target "$NEW_PRIMARY"
 |---|---|---|---|---|
 | P1-S01 | `MultiAZ=true` on NEW_PRIMARY (set at restore; otherwise CP03-S03) | DBA | 1 | true |
 | P1-S02 | **New read replica**: `aws --profile $AWS_PROFILE --region $AWS_REGION rds create-db-instance-read-replica --db-instance-identifier ${NEW_PRIMARY}-replica --source-db-instance-identifier $NEW_PRIMARY --db-instance-class $DB_INSTANCE_CLASS --db-subnet-group-name $DB_SUBNET_GROUP --vpc-security-group-ids $DB_SG --db-parameter-group-name $DB_PARAM_GROUP --deletion-protection --enable-performance-insights --copy-tags-to-snapshot` | DBA | 5 (+ build) | `replicating`, lag ≈ 0 |
-| P1-S03 | RO secret → new replica: `TARGET_DB=${NEW_PRIMARY}-replica SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` (Reloader rolls the readers) | Executor | 5 | Readers on the new replica |
+| P1-S03 | RO secret → new replica: `CUTOVER_SECRET=ro TARGET_DB=${NEW_PRIMARY}-replica ./automation/scripts/dr-secret-cutover.sh apply` (k8s mode; eso mode: `SECRET_ID=$SECRET_ID_RO`) (Reloader rolls the readers) | Executor | 5 | Readers on the new replica |
 | P1-S04 | Pre-flight on the new pair: `PRIMARY_DB=$NEW_PRIMARY REPLICA_DB=${NEW_PRIMARY}-replica ./automation/scripts/dr-preflight.sh replica` | Executor | 3 | PASS |
 
 ## Phase 2 — Operational normalisation

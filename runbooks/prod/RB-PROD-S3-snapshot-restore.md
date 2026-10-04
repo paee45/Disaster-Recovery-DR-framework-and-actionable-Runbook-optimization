@@ -4,10 +4,10 @@
 |---|---|
 | Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · G1 data-loss acceptance: **CTO** (data loss is certain) |
 | Before → after | `app-pg-prod` (+ replica) → new instance **`app-pg-prod-r<YYYYMMDDHHMM>`** (Multi-AZ) becomes primary |
-| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) secret cutover → ESO → Reloader |
+| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) endpoint cutover (K8s Secret patched directly in `SECRET_MODE=k8s`; Secrets Manager + ESO in `eso` mode) → **Reloader** |
 | RPO | Target **24 h** = incident time − `SnapshotCreateTime` of the daily automated snapshot (kept **7 days**) |
 | RTO | Target 30 min — ⚠ **at risk**: restore time scales with DB size and is not yet measured (risk R3) + parity + cutover + warm-up |
-| Automation | SSM `DR-RdsRestoreFromSnapshot` (restore → wait → G3 approval → `DR-UpdateDbSecretEndpoint`) |
+| Automation | SSM `DR-RdsRestoreFromSnapshot` (restore → wait → G3 approval → `DR-UpdateDbSecretEndpoint`; the SSM chain writes Secrets Manager = **`eso` mode**. In `k8s` mode run the scripts of this runbook: `dr-restore.sh` + `dr-secret-cutover.sh`) |
 
 **Use when (and only when PITR cannot do it better):**
 - the instance and its automated backups are gone (deleted without retained backups, account/region issue), or
@@ -52,7 +52,7 @@ export RESTORED_DB="${PRIMARY_DB}-r$(date -u +%Y%m%d%H%M)"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P3-S01 | **Fence OLD_DB** ([CP-04](../common/CP-04-fencing-old-instance.md)): snapshot it first (CP04-S01, it is the only copy of the post-snapshot writes), then F1 read-only (F2 after reconciliation extraction) | DBA | 3 | Fenced |
-| P3-S02 | **Old replica**: it still follows OLD_DB (stale/bad data). Make sure no reads go there: CP01-S08 points `$SECRET_ID_RO` at RESTORED_DB | Executor | 3 | 0 sessions on the old replica |
+| P3-S02 | **Old replica**: it still follows OLD_DB (stale/bad data). Make sure no reads go there: CP01-S08 points the read-only secret (`$K8S_SECRET_RO` / `$SECRET_ID_RO`) at RESTORED_DB | Executor | 3 | 0 sessions on the old replica |
 | P3-S03 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S09 (**password check is critical after a restore**), cutover gate = **G3**, `T6`, `T7` | Executor + DBA | 10 | All consumers on RESTORED_DB |
 
 ## Phase 4 — Verify & stabilise

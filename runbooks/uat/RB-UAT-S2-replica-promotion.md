@@ -4,7 +4,7 @@
 |---|---|
 | Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Before → after | `app-pg-uat` (single-AZ, lost) + `app-pg-uat-replica` → **`app-pg-uat-replica` = standalone primary** (single-AZ, as UAT standard) |
-| Endpoint | **Changes** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) → ESO → Reloader |
+| Endpoint | **Changes** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): K8s Secret patched directly (`SECRET_MODE=k8s`; Secrets Manager + ESO in `eso` mode) → **Reloader** |
 | Targets | RPO target 24 h (expected = replica lag) · RTO target 30 min |
 | Approvals | 1 (SSM `MinRequiredApprovals=1`) |
 | Comms | Internal chat + UAT users / implementation projects (email) |
@@ -33,7 +33,7 @@ dr_set_target "$REPLICA_DB"
 | P2-G2 ⛳ | Point of no return (SRE on-call): approve in SSM or proceed manually | SRE on-call | 1 | Recorded |
 | P2-S04 ⚠ | Promote: SSM `DR-RdsPromoteReplica` (`MinRequiredApprovals=1`) **or** `dr_mark T4; aws --profile $AWS_PROFILE --region $AWS_REGION rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor | 1 | API 200 |
 | P2-S05 | `./automation/scripts/dr-verify.sh wait-promoted` → `dr_mark T5` | Executor | 5–15 | PROMOTED |
-| P3-S01 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S09 (incl. `$SECRET_ID_RO` → new primary) → `T6`, `T7` | Executor | 10 | Consumers on the new primary |
+| P3-S01 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S09 (incl. the read-only secret → new primary: k8s `CUTOVER_SECRET=ro`, eso `SECRET_ID=$SECRET_ID_RO`) → `T6`, `T7` | Executor | 10 | Consumers on the new primary |
 | P4-S01 | [CP-02](../common/CP-02-post-recovery-verification.md) S01, S03–S07 (synthetics, or the QA smoke suite) → `T9`, `T10`; [Services Restored] to the UAT users | QA lead + DBA | 20 | Pass |
 | P4-S02 | [CP-03](../common/CP-03-restored-instance-config-parity.md) S01, S02, S04 (no Multi-AZ in UAT) | DBA | 15 | Parity OK |
 | P4-S03 | [CP-05](../common/CP-05-evidence-and-closure.md); raise [RB-UAT-FB-S2](RB-UAT-FB-S2-rebuild-replica.md) (within 5 business days); [CP-06](../common/CP-06-post-incident-review.md) PIR ≤ 10 business days | Scribe / IC | 15 | Done |

@@ -13,7 +13,8 @@
 #   failback <id>     : (k8s) restore the endpoint that was in place BEFORE change <id> (see `history`) → wait rollouts
 #   history | show    : (k8s) ledger of changes / current endpoint + last change id
 # Env: TARGET_DB, EKS_CONTEXT, K8S_NS, K8S_SECRET, K8S_HOST_KEY, [K8S_PORT_KEY], SECRET_MODE, CUTOVER_ID,
-#      eso: SECRET_ID (K8S_SECRET_RO used when SECRET_ID==SECRET_ID_RO) · k8s: K8S_USER_KEY/K8S_PASSWORD_KEY
+#      eso: SECRET_ID (K8S_SECRET_RO used when SECRET_ID==SECRET_ID_RO) · k8s read-only secret: CUTOVER_SECRET=ro
+#      (uses K8S_SECRET_RO, K8S_HOST_KEY_RO [default K8S_HOST_KEY], K8S_PORT_KEY_RO; no T6/T7 markers) · k8s: K8S_USER_KEY/K8S_PASSWORD_KEY
 #      (default POSTGRES_DB_USER/POSTGRES_DB_PASSWORD) · fix-password: MASTER_SECRET_ID. Never prints or stores passwords.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +25,11 @@ dr_guard || exit 1
 SECRET_MODE="${SECRET_MODE:-eso}"; [[ "$SECRET_MODE" =~ ^(k8s|eso)$ ]] || { echo "SECRET_MODE must be k8s or eso"; exit 2; }
 CMD="${1:-}"
 
-if [[ -n "${SECRET_ID_RO:-}" && "${SECRET_ID:-}" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
+RO=0
+if [[ "$SECRET_MODE" == k8s && "${CUTOVER_SECRET:-}" == ro ]]; then   # k8s mode, read-only secret: its own K8s Secret + host keys
+  K8S_SECRET="${K8S_SECRET_RO:?K8S_SECRET_RO is not set in env/<env>.env}"; K8S_HOST_KEY="${K8S_HOST_KEY_RO:-${K8S_HOST_KEY:-DB_HOST}}"
+  K8S_PORT_KEY="${K8S_PORT_KEY_RO:-${K8S_PORT_KEY:-}}"; export K8S_SECRET K8S_HOST_KEY K8S_PORT_KEY; RO=1
+elif [[ -n "${SECRET_ID_RO:-}" && "${SECRET_ID:-}" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
 : "${K8S_SECRET:?}"
 [[ "$SECRET_MODE" == k8s ]] || : "${SECRET_ID:?SECRET_ID required for SECRET_MODE=eso}"
 SAFE_ID="${SECRET_ID:-k8s}"; SAFE_ID="${SAFE_ID//\//_}"
@@ -98,9 +103,9 @@ apply_k8s() {
   "${EP[@]}" set --host "$NEW_HOST" ${K8S_PORT_KEY:+--port "${NEW_PORT:-5432}"} --db-id "$TARGET_DB" --from-db-id "${OLD_DB:-}" --id "$id" \
     | tee "$DR_EVIDENCE_DIR/k8s/endpoint-change-${id}.txt"
   dr_mark "SECRET_UPDATED:${K8S_NS}/${K8S_SECRET}" "id=${id} keys=${K8S_HOST_KEY} host=${NEW_HOST} db=${TARGET_DB}"
-  dr_mark T6 "k8s secret ${K8S_SECRET} → ${TARGET_DB} (id ${id})"
+  (( RO )) || dr_mark T6 "k8s secret ${K8S_SECRET} → ${TARGET_DB} (id ${id})"
   "$HERE/dr-eks-rollout.sh" wait "$K8S_SECRET"
-  dr_mark T7 "consumers of ${K8S_SECRET} rolled"
+  (( RO )) || dr_mark T7 "consumers of ${K8S_SECRET} rolled"
   echo "CUTOVER DONE: $K8S_NS/$K8S_SECRET → $TARGET_DB ($NEW_HOST) id=$id. Undo: $0 rollback · later failback: $0 failback $id"
 }
 

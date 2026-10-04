@@ -5,7 +5,7 @@
 | Version / owner | v1.0-draft / `{{TEAM}}` · Reviewed: SRE lead · Approved: CTO · Gate approver: Team lead |
 | Topology | **Single primary only** (no Multi-AZ, no replica). Snapshot/PITR restore is the **only** recovery path in DEV |
 | Before → after | `app-pg-dev` → **`app-pg-dev-r<YYYYMMDDHHMM>`** becomes primary |
-| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) → ESO → Reloader |
+| Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): endpoint written into the K8s Secret (`SECRET_MODE=k8s`; or via Secrets Manager + ESO in `eso` mode) → **Reloader** restarts the pods |
 | RPO / RTO targets | 24 h (daily automated snapshot, 7-day retention) / 30 min (aim) |
 | Also used for | DEV data refresh / reset |
 
@@ -26,7 +26,7 @@ export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-r$(date -u +%Y%m%d%H%M)"
 | P2-S02 | `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (progress + elapsed time; records `T5`), then `./automation/scripts/dr-restore.sh harden "$RESTORED_DB"` (converge to the baseline + `validate`); `dr_set_target "$RESTORED_DB"`; `dr_mark T5` | Engineer | size | available |
 | P2-S03 | `./automation/scripts/dr-restore.sh validate "$RESTORED_DB"` (all settings vs baseline) | Engineer | 2 | `VALIDATED` |
 | P3-S01 | [CP-04](../common/CP-04-fencing-old-instance.md) F1 on OLD_DB (if it is alive) | Engineer | 2 | Fenced |
-| P3-S02 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S07, S09 (password check, secret update, ESO force-sync, **Reloader rollouts**) → `T6`, `T7` | Engineer | 10 | Pods on RESTORED_DB |
+| P3-S02 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S07, S09 (password check, **endpoint update** — k8s mode: every host key patched in the K8s Secret + change recorded; eso mode: Secrets Manager + ESO sync — **Reloader rollouts**) → `T6`, `T7` | Engineer | 10 | Pods on RESTORED_DB |
 | P4-S01 | [CP-02](../common/CP-02-post-recovery-verification.md) S01, S03, S04 → `T9`/`T10`; post [Services Restored] in the team channel | Engineer | 10 | OK |
 | P4-S02 | `./automation/scripts/dr-collect-evidence.sh` (30-day retention prefix); record the restore duration (feeds the RTO model) | Engineer | 5 | Uploaded |
 | P4-S03 | Raise [RB-DEV-FB-S3S4](RB-DEV-FB-S3S4-post-restore-cleanup.md) | Engineer | 1 | Ticket |

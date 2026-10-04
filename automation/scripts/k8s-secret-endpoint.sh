@@ -123,6 +123,14 @@ change() {
   echo "APPLIED: Secret $NS/$SECRET → $(jq -r 'to_entries[0].value' <<<"$to") (id $id). Reloader restarts the annotated workloads."
 }
 
+# the ledger entry being reverted must have been written with the SAME key list as this call (-k) — otherwise a revert
+# would silently change keys the caller did not name (or leave some out)
+same_keys() { # <entry-json>
+  [[ "$FORCE" == 1 ]] && return 0
+  local have want; have="$(printf '%s\n' "${HK[@]}" | sort | paste -sd, -)"; want="$(jq -r '.keys | keys | sort | join(",")' <<<"$1")"
+  [[ "$have" == "$want" ]] || { echo "REFUSED: that change #$(jq .seq <<<"$1") ($(jq -r .id <<<"$1")) was written for keys [$want], this call names [$have] — use the same -k/K8S_HOST_KEY (or --force)" >&2; exit 2; }
+}
+
 all_keys_to() { local h="$1" o="{}" k; for k in "${HK[@]}"; do o="$(jq -c --arg k "$k" --arg v "$h" '. + {($k): $v}' <<<"$o")"; done; echo "$o"; }
 
 case "$CMD" in
@@ -144,6 +152,7 @@ case "$CMD" in
   rollback)
     [[ -n "$ID" ]] || { echo "usage: rollback --id ID" >&2; exit 2; }
     last="$(entries | jq -c 'last // empty')"; [[ -n "$last" ]] || { echo "ERROR: ledger $LEDGER is empty — nothing to roll back" >&2; exit 2; }
+    same_keys "$last"
     s="$(secret_json)"
     for k in "${HK[@]}"; do
       want="$(jq -r --arg k "$k" '.keys[$k].to // empty' <<<"$last")"; have="$(value_of "$s" "$k")"
@@ -156,6 +165,7 @@ case "$CMD" in
     [[ -n "$REF" && -n "$ID" ]] || { echo "usage: failback --to <change-id> --id ID" >&2; exit 2; }
     ref="$(entries | jq -c --arg r "$REF" '[.[] | select(.id == $r)] | first // empty')"
     [[ -n "$ref" ]] || { echo "ERROR: no change '$REF' in $LEDGER — see: $0 ... history" >&2; exit 2; }
+    same_keys "$ref"
     change failback "$ID" "$REF" "$(jq -c '.keys | with_entries(.value = .value.from)' <<<"$ref")" \
       "$(jq -r '.port.from // empty' <<<"$ref")" "$(jq -r .fromDb <<<"$ref")" ""
     ;;

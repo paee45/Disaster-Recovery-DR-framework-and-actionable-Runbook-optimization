@@ -15,7 +15,7 @@
 | `scripts/dr-collect-evidence.sh` | CP-05 | CloudTrail/RDS/secret-metadata evidence, KPIs, SHA-256 manifest → S3 Object Lock |
 | `scripts/dr-rto-rpo-calc.py` | CP-05 | KPIs per scenario from `timeline.jsonl` |
 | `scripts/runbook-to-tracker.py` | Before execution | Generates the sheet tracker (CSV) from any runbook (`--expand` inlines CP steps) |
-| `ssm/DR-UpdateDbSecretEndpoint.yaml` | CP-01 | Secret host/port/id update, keeping AWSPREVIOUS for rollback |
+| `ssm/DR-UpdateDbSecretEndpoint.yaml` | CP-01 (`SECRET_MODE=eso` only) | Secrets Manager host/port/id update, keeping AWSPREVIOUS for rollback. `k8s` mode has no SSM document yet: use `dr-secret-cutover.sh` |
 | `ssm/DR-RdsPromoteReplica.yaml` | S2 | Pre-check → G2 → promote → wait standalone → G3 → secret |
 | `ssm/DR-RdsRestoreFromSnapshot.yaml` | S3 | Restore (hardened) → wait → G3 → secret |
 | `ssm/DR-RdsRestoreToPointInTime.yaml` | S4 | PITR (hardened, `latest` or timestamp, deleted-source aware) → wait → G3 → secret |
