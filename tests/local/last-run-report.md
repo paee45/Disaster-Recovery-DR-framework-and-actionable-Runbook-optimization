@@ -87,18 +87,27 @@
 | H02 | refuses to patch an ESO-owned Secret (ESO would revert it) | PASS | logs/H02.log |
 | H03 | refuses an ID with spaces / bad characters | PASS | logs/H03.log |
 | H04 | preflight (SECRET_MODE=k8s): host keys present, not ESO-owned | PASS | logs/H04.log |
-| H05 | cutover #1 (id DR-20261004-1013-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
+| H05 | cutover #1 (id DR-20261004-1136-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
 | H06 | ledger entry #1: id, old→new endpoint per key, old/new DB identifier | PASS | logs/H06.log |
 | H07 | Reloader restarted app-d; app-e (no annotation) SKIPPED | PASS | logs/H07.log |
 | H08 | stale check finds app-e (HOST2), restart-stale → both apps on restored | PASS | logs/H08.log |
 | H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | PASS | logs/H09.log |
-| H10 | cutover #2 (id DR-20261004-1013-local-S2): → promoted replica | PASS | logs/H10.log |
-| H11 | failback to the endpoint before #1 (id DR-20261004-1013-local-FB-S3S4 → ref DR-20261004-1013-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
+| H10 | cutover #2 (id DR-20261004-1136-local-S2): → promoted replica | PASS | logs/H10.log |
+| H11 | failback to the endpoint before #1 (id DR-20261004-1136-local-FB-S3S4 → ref DR-20261004-1136-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
 | H12 | history: #1 cutover, #2 cutover, #3 failback (ref #1) — who/when/from→to | PASS | logs/H12.log |
 | H13 | rollback undoes the latest change (failback) → replica again | PASS | logs/H13.log |
 | H14 | rollback refuses when the Secret was changed outside the ledger | PASS | logs/H14.log |
 | H15 | CUTOVER_SECRET=ro: only the RO host key moves (HOST1), HOST2 untouched, no T6/T7 | PASS | logs/H15.log |
 | H16 | revert with a different key list than the change used is refused | PASS | logs/H16.log |
 | H17 | RO rollback (same key list) restores the RO key only | PASS | logs/H17.log |
+| J01 | --list: S3 = 20 steps, S4 = 22 steps (IDs as in the runbooks), no AWS access needed | PASS | logs/J01.log |
+| J02 | --dry-run prints every step + command and creates nothing (no evidence folder) | PASS | logs/J02.log |
+| J03 | DR_RUN_GATES=auto is refused outside the local test bed | PASS | logs/J03.log |
+| J04 | S3 end to end: 19 PASS + fence N/A, T0…T10, VALIDATED, both host keys → restored, approvals, step logs | PASS | logs/J04.log |
+| J05 | a failed step BLOCKS what depends on it: bad snapshot → no restore, no cutover (--on-fail continue) | PASS | logs/J05.log |
+| J06 | S4 (mode A): NO at the cutover gate stops the run (exit 4), Secret untouched, decision recorded | PASS | logs/J06.log |
+| J07 | --resume continues after the gate: passed steps not repeated (one T4), cutover + T10 done | PASS | logs/J07.log |
+| J08 | a second run with the same DR_ID without --resume is refused | PASS | logs/J08.log |
+| J09 | no DR_ID given: a new DR-<date>-local-S3 id + its own evidence folder | PASS | logs/J09.log |
 
-**PASS=100 FAIL=0** · DR_ID=DR-localtest-20261004100743 · 2026-10-04T10:14:21Z
+**PASS=109 FAIL=0** · DR_ID=DR-localtest-20261004113026 · 2026-10-04T11:38:57Z
