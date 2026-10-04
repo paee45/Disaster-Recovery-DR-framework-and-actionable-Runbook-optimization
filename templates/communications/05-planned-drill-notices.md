@@ -31,7 +31,7 @@ Contact during the window: {{phone/email}}.
 ### C. Internal (chat)
 ```
 [DRILL] — THIS IS AN EXERCISE
-📅 {{ENV}} DR drill {{DR_ID}} — {{date}} {{hh:mm}} UTC — RB-DR-RDS-001 v{{x}} ({{planned switchover | unplanned simulation via FIS}})
+📅 {{ENV}} DR drill {{DR_ID}} — {{date}} {{hh:mm}} UTC — RB-{{ENV}}-{{S2|S3|S4}} v{{x}} ({{planned drill | unplanned simulation}})
 Roles: IC @{{}} · Exec @{{}} · DBA @{{}} · Comms @{{}} · Scribe @{{}} · Observers: @{{auditor/GRC}}
 Change: {{CHG}} · Abort criteria: customer SLO alarm {{name}} / IC call · Freeze: deploys {{window}}
 [DRILL] — THIS IS AN EXERCISE

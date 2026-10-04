@@ -1,60 +1,86 @@
 #!/usr/bin/env bash
-# dr-preflight.sh — Phase 1 automated pre-flight. Prints PASS/WARN/FAIL per check; exit 1 on any FAIL.
-# Usage (from runbook): dr_run preflight ./automation/scripts/dr-preflight.sh
+# dr-preflight.sh <mode> — automated pre-flight. PASS/WARN/FAIL per check; exit 1 on any FAIL.
+#   replica : S2 (UAT/PROD) — replica health, lag vs RPO, LSN/heartbeat, creds, EKS/ESO/Reloader
+#   restore : S3/S4 — restore window, snapshots, config inputs, EKS/ESO/Reloader
 set -uo pipefail
-: "${DR_REGION:?}" "${DR_DB:?}" "${PRIMARY_DB:?}" "${SECRET_ID:?}" "${EKS_DR:?}" "${K8S_NS:?}" "${DR_DSN:?run dr_init first}"
-RPO_SECONDS="${RPO_SECONDS:-300}"
-SSM_DOC="${SSM_DOC:-DR-RdsPostgresRegionalFailover}"
-EXPECTED_SSM_VERSION="${EXPECTED_SSM_VERSION:-}"
+MODE="${1:?usage: dr-preflight.sh replica|restore}"
+: "${PRIMARY_DB:?}" "${SECRET_ID:?}" "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${K8S_SECRET:?}"
+RPO_TARGET_S="${RPO_TARGET_S:-300}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dr-lib.sh
+source "$HERE/dr-lib.sh"
 
 fails=0
 pass() { printf 'PASS  %s\n' "$*"; }
 warn() { printf 'WARN  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*"; fails=$((fails+1)); }
 
-# 1. Replica status and topology
-read -r status source <<<"$(aws rds describe-db-instances --region "$DR_REGION" --db-instance-identifier "$DR_DB" \
-  --query 'DBInstances[0].[DBInstanceStatus,ReadReplicaSourceDBInstanceIdentifier]' --output text)"
-[[ "$status" == "available" ]] && pass "replica status=$status" || fail "replica status=$status"
-[[ "$source" == *"$PRIMARY_DB"* ]] && pass "replica source=$source" || fail "replica source='$source' (expected $PRIMARY_DB)"
-repl_state="$(aws rds describe-db-instances --region "$DR_REGION" --db-instance-identifier "$DR_DB" \
-  --query 'DBInstances[0].StatusInfos[?StatusType==`read replication`].Status | [0]' --output text)"
-[[ "$repl_state" == "replicating" ]] && pass "replication state=$repl_state" || warn "replication state=$repl_state (expected during a primary outage: error/stopped)"
+check_primary() {
+  local st; st="$(aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" --query 'DBInstances[0].DBInstanceStatus' --output text 2>&1)"
+  echo "INFO  primary $PRIMARY_DB status=$st"
+}
 
-# 2. CloudWatch ReplicaLag, max over last 15 min
-lag="$(aws cloudwatch get-metric-statistics --region "$DR_REGION" --namespace AWS/RDS --metric-name ReplicaLag \
-  --dimensions Name=DBInstanceIdentifier,Value="$DR_DB" \
-  --start-time "$(date -u -d '-15 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum \
-  --query 'max(Datapoints[].Maximum)' --output text)"
-if [[ "$lag" == "None" || -z "$lag" ]]; then warn "ReplicaLag: no datapoints (metric gap is common when the primary is down)";
-elif (( ${lag%.*} <= RPO_SECONDS )); then pass "ReplicaLag max15m=${lag}s <= RPO ${RPO_SECONDS}s";
-else fail "ReplicaLag max15m=${lag}s > RPO ${RPO_SECONDS}s — estimated data loss exceeds RPO; exec approval required at G1"; fi
+check_replica() {
+  : "${REPLICA_DB:?REPLICA_DB empty — S2 is not applicable in this environment}"
+  read -r status source <<<"$(aws rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
+    --query 'DBInstances[0].[DBInstanceStatus,ReadReplicaSourceDBInstanceIdentifier]' --output text)"
+  [[ "$status" == "available" ]] && pass "replica status=$status" || fail "replica status=$status"
+  [[ "$source" == *"$PRIMARY_DB"* ]] && pass "replica source=$source" || fail "replica source='$source' (expected $PRIMARY_DB)"
+  local repl; repl="$(aws rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
+    --query 'DBInstances[0].StatusInfos[?StatusType==`read replication`].Status | [0]' --output text)"
+  [[ "$repl" == "replicating" ]] && pass "replication=$repl" || warn "replication=$repl (expected while the primary is down)"
 
-# 3. SQL on replica (also proves the replica secret + credentials work)
-if out="$(psql "$DR_DSN" -XAtq -F' | ' -f "$(dirname "$0")/../sql/10-preflight-replica.sql" 2>&1)"; then
-  echo "$out" | sed 's/^/      /'
-  [[ "$(psql "$DR_DSN" -XAtqc 'select pg_is_in_recovery()')" == "t" ]] && pass "replica in recovery (not yet promoted)" \
-    || warn "replica NOT in recovery — already promoted?"
-else
-  fail "cannot query replica with secret ${SECRET_ID}@${DR_REGION}: ${out}"
-fi
+  local lag; lag="$(aws cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name ReplicaLag \
+    --dimensions Name=DBInstanceIdentifier,Value="$REPLICA_DB" \
+    --start-time "$(date -u -d '-15 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum \
+    --query 'max(Datapoints[].Maximum)' --output text)"
+  if [[ "$lag" == "None" || -z "$lag" ]]; then warn "ReplicaLag: no datapoints (common when the primary is down) — rely on SQL/heartbeat"
+  elif (( ${lag%.*} <= RPO_TARGET_S )); then pass "ReplicaLag max15m=${lag}s <= RPO ${RPO_TARGET_S}s"
+  else fail "ReplicaLag max15m=${lag}s > RPO ${RPO_TARGET_S}s — exec approval required at G1"; fi
 
-# 4. DR EKS: API reachable, ExternalSecret ready, critical deployments present
-if kubectl --context "$EKS_DR" -n "$K8S_NS" get ns "$K8S_NS" >/dev/null 2>&1; then
-  pass "EKS $EKS_DR API reachable"
-  es="$(kubectl --context "$EKS_DR" -n "$K8S_NS" get externalsecret db-creds -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
-  [[ "$es" == "True" ]] && pass "ExternalSecret db-creds Ready" || fail "ExternalSecret db-creds Ready='$es'"
-  n="$(kubectl --context "$EKS_DR" -n "$K8S_NS" get deploy -l "${DR_SELECTOR:-dr.example.com/tier}" --no-headers 2>/dev/null | wc -l)"
-  (( n > 0 )) && pass "$n DR-labelled deployments present" || fail "no DR-labelled deployments in $EKS_DR/$K8S_NS"
-else
-  fail "EKS $EKS_DR API not reachable (check kubeconfig context / access entry for DRExecutorRole)"
-fi
+  local dsn; dsn="$(dr_dsn "$REPLICA_DB")"
+  if out="$(psql "$dsn" -XAtq -F' | ' -f "$HERE/../sql/10-preflight-replica.sql" 2>&1)"; then
+    echo "$out" | sed 's/^/      /'; pass "app credentials from $SECRET_ID work on the replica"
+  else
+    fail "cannot query replica with $SECRET_ID: $out"
+  fi
+}
 
-# 5. SSM document present in DR region and version pinned
-ver="$(aws ssm describe-document --region "$DR_REGION" --name "$SSM_DOC" --query 'Document.DefaultVersion' --output text 2>/dev/null)"
-if [[ -z "$ver" || "$ver" == "None" ]]; then fail "SSM doc $SSM_DOC missing in $DR_REGION"
-elif [[ -n "$EXPECTED_SSM_VERSION" && "$ver" != "$EXPECTED_SSM_VERSION" ]]; then warn "SSM doc version $ver != runbook pin $EXPECTED_SSM_VERSION"
-else pass "SSM doc $SSM_DOC v$ver"; fi
+check_restore() {
+  local win; win="$(aws rds describe-db-instance-automated-backups --db-instance-identifier "$PRIMARY_DB" \
+    --query 'DBInstanceAutomatedBackups[0].RestoreWindow' --output json 2>/dev/null)"
+  if [[ -n "$win" && "$win" != "null" ]]; then pass "PITR window: $(jq -c . <<<"$win")"; else warn "no automated backups / PITR window for $PRIMARY_DB → S3 snapshot only"; fi
+  local n; n="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --query 'length(DBSnapshots)' --output text 2>/dev/null)"
+  (( ${n:-0} > 0 )) && pass "$n snapshots available for $PRIMARY_DB" || warn "no snapshots listed for $PRIMARY_DB (check AWS Backup vault / cross-account copies)"
+  for v in DB_SUBNET_GROUP DB_SG DB_PARAM_GROUP DB_INSTANCE_CLASS; do
+    [[ -n "${!v:-}" ]] && pass "restore input $v=${!v}" || fail "restore input $v not set in env profile"
+  done
+  aws rds describe-db-parameter-groups --db-parameter-group-name "${DB_PARAM_GROUP:-x}" >/dev/null 2>&1 \
+    && pass "parameter group exists" || fail "parameter group ${DB_PARAM_GROUP:-} not found"
+}
+
+check_k8s() {
+  local K="kubectl --context $EKS_CONTEXT -n $K8S_NS"
+  if ! $K get ns "$K8S_NS" >/dev/null 2>&1; then fail "EKS $EKS_CONTEXT API not reachable"; return; fi
+  pass "EKS $EKS_CONTEXT reachable"
+  local es; es="$($K get externalsecret "$K8S_SECRET" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+  [[ "$es" == "True" ]] && pass "ExternalSecret $K8S_SECRET Ready" || fail "ExternalSecret $K8S_SECRET Ready='$es'"
+  local rl; rl="$(kubectl --context "$EKS_CONTEXT" get deploy -A -o json 2>/dev/null \
+    | jq '[.items[] | select(.metadata.name | test("reloader")) | (.status.availableReplicas // 0)] | add // 0')"
+  (( ${rl:-0} >= 1 )) && pass "Reloader available replicas=${rl}" || fail "Reloader not running — cutover will need manual restarts (dr-eks-rollout.sh restart)"
+  "$HERE/dr-eks-rollout.sh" inventory | sed 's/^/      /'
+  if "$HERE/dr-eks-rollout.sh" inventory | grep -q 'reloader=NO'; then warn "some consumers lack the Reloader annotation — restart manually in CP01-S09"; else pass "all consumers Reloader-annotated"; fi
+}
+
+check_primary
+case "$MODE" in
+  replica) check_replica ;;
+  restore) check_restore ;;
+  *) echo "usage: $0 replica|restore"; exit 2 ;;
+esac
+check_k8s
+aws secretsmanager describe-secret --secret-id "$SECRET_ID" --query '{rotation:RotationEnabled,stages:VersionIdsToStages}' --output json \
+  | sed 's/^/      /'
 
 echo "----"
-(( fails == 0 )) && { echo "PRE-FLIGHT: PASS"; exit 0; } || { echo "PRE-FLIGHT: ${fails} FAIL(s) — IC waiver required to proceed"; exit 1; }
+(( fails == 0 )) && { echo "PRE-FLIGHT: PASS"; exit 0; } || { echo "PRE-FLIGHT: ${fails} FAIL(s) — waiver required to proceed"; exit 1; }

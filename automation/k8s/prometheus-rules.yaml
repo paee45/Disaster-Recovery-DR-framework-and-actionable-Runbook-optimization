@@ -9,21 +9,28 @@ spec:
     - name: dr-rpo
       rules:
         - alert: DRReplicaLagAboveHalfRPO
-          expr: max_over_time(aws_rds_replica_lag_maximum{dbinstance_identifier="app-pg-prod-euc1"}[5m]) > 150
+          expr: max_over_time(aws_rds_replica_lag_maximum{dbinstance_identifier="app-pg-prod-replica"}[5m]) > 150
           for: 5m
-          labels: { severity: page, runbook: RB-DR-RDS-001 }
+          labels: { severity: page, runbook: RB-PROD-S2 }
           annotations:
             summary: "Cross-region replica lag > 50% of RPO (300s)"
             description: "A failover now would lose ~{{ $value }}s of data. Investigate long transactions / WAL backlog."
         - alert: DRHeartbeatStale
           expr: time() - pg_dr_heartbeat_ts_seconds{role="replica"} > 120
           for: 2m
-          labels: { severity: page, runbook: RB-DR-RDS-001 }
+          labels: { severity: page, runbook: RB-PROD-S2 }
           annotations:
-            summary: "DR replica heartbeat older than 2 minutes (true RPO exposure)"
+            summary: "Replica heartbeat older than 2 minutes (true RPO exposure for S2)"
+            description: "pg_dr_heartbeat_ts_seconds = custom postgres_exporter query: SELECT extract(epoch FROM ts) FROM dr.heartbeat"
         - alert: DRExternalSecretNotReady
           expr: externalsecret_status_condition{name="db-creds",condition="Ready",status="True"} == 0
           for: 10m
           labels: { severity: ticket }
           annotations:
-            summary: "db-creds ExternalSecret not Ready in {{ $labels.cluster }} — failover would leave pods without credentials"
+            summary: "db-creds ExternalSecret not Ready in {{ $labels.cluster }} — a DR cutover would not reach the pods"
+        - alert: DRReloaderDown
+          expr: sum(kube_deployment_status_replicas_available{deployment=~".*reloader.*"}) < 1
+          for: 10m
+          labels: { severity: ticket }
+          annotations:
+            summary: "Stakater Reloader unavailable — DB endpoint cutovers would need manual rollout restarts"

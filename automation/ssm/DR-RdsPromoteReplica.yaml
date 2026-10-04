@@ -1,0 +1,138 @@
+description: |
+  ## DR-RdsPromoteReplica  (S2 — UAT/PROD)
+  Pre-check → gate G2 (point of no return) → promote read replica → wait until standalone →
+  gate G3 (cutover; executor runs `dr-secret-cutover.sh precheck` meanwhile) → DR-UpdateDbSecretEndpoint.
+  After it finishes, the executor runs CP01-S06/S07 (ESO force-sync, Reloader rollout wait) — or simply
+  `dr-eks-rollout.sh wait`, since the secret is already updated.
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: AWS::IAM::Role::Arn
+  ReplicaDbInstanceId:
+    type: String
+  SecretId:
+    type: String
+  DrId:
+    type: String
+  BackupRetentionDays:
+    type: Integer
+    default: 7
+  RpoSeconds:
+    type: Integer
+    default: 300
+  Approvers:
+    type: StringList
+  MinRequiredApprovals:
+    type: Integer
+    default: 2
+    description: PROD 2 (four-eyes), UAT 1
+mainSteps:
+  - name: PreCheck
+    action: aws:executeScript
+    timeoutSeconds: 120
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        db: '{{ ReplicaDbInstanceId }}'
+        rpo: '{{ RpoSeconds }}'
+      Script: |
+        import boto3, datetime
+        def handler(event, context):
+            rds = boto3.client('rds'); cw = boto3.client('cloudwatch')
+            i = rds.describe_db_instances(DBInstanceIdentifier=event['db'])['DBInstances'][0]
+            if i['DBInstanceStatus'] != 'available':
+                raise Exception(f"replica status {i['DBInstanceStatus']} != available")
+            source = i.get('ReadReplicaSourceDBInstanceIdentifier')
+            if not source:
+                raise Exception('instance is not a read replica (already promoted?)')
+            now = datetime.datetime.now(datetime.timezone.utc)
+            dps = cw.get_metric_statistics(Namespace='AWS/RDS', MetricName='ReplicaLag',
+                    Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': event['db']}],
+                    StartTime=now - datetime.timedelta(minutes=15), EndTime=now, Period=60,
+                    Statistics=['Maximum'])['Datapoints']
+            lag = int(max([d['Maximum'] for d in dps], default=-1))
+            return {'source': source, 'maxLag15m': lag, 'lagWithinRpo': 0 <= lag <= int(event['rpo'])}
+    outputs:
+      - Name: Source
+        Selector: $.Payload.source
+        Type: String
+      - Name: MaxLag15m
+        Selector: $.Payload.maxLag15m
+        Type: Integer
+      - Name: LagWithinRpo
+        Selector: $.Payload.lagWithinRpo
+        Type: Boolean
+
+  - name: GateG2PointOfNoReturn
+    action: aws:approve
+    timeoutSeconds: 3600
+    onFailure: Abort
+    inputs:
+      Message: |
+        [{{ DrId }}] G2 POINT OF NO RETURN: promote {{ ReplicaDbInstanceId }} (source {{ PreCheck.Source }}).
+        ReplicaLag max 15m = {{ PreCheck.MaxLag15m }}s (-1 = no data), within RPO = {{ PreCheck.LagWithinRpo }}.
+        Confirm fencing (CP-04) and the final LSN/heartbeat capture before approving.
+      MinRequiredApprovals: '{{ MinRequiredApprovals }}'
+      Approvers: '{{ Approvers }}'
+
+  - name: PromoteReplica
+    action: aws:executeAwsApi
+    onFailure: Abort
+    inputs:
+      Service: rds
+      Api: PromoteReadReplica
+      DBInstanceIdentifier: '{{ ReplicaDbInstanceId }}'
+      BackupRetentionPeriod: '{{ BackupRetentionDays }}'
+
+  - name: WaitUntilStandalone
+    action: aws:executeScript
+    timeoutSeconds: 1800
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        db: '{{ ReplicaDbInstanceId }}'
+      Script: |
+        import boto3, time
+        def handler(event, context):
+            # Status alone is not enough: right after the call the instance can still be 'available' with a source set.
+            rds = boto3.client('rds')
+            while True:
+                i = rds.describe_db_instances(DBInstanceIdentifier=event['db'])['DBInstances'][0]
+                if i['DBInstanceStatus'] == 'available' and not i.get('ReadReplicaSourceDBInstanceIdentifier'):
+                    return {'endpoint': i['Endpoint']['Address']}
+                time.sleep(15)
+    outputs:
+      - Name: Endpoint
+        Selector: $.Payload.endpoint
+        Type: String
+
+  - name: GateG3Cutover
+    action: aws:approve
+    timeoutSeconds: 3600
+    onFailure: Abort
+    inputs:
+      Message: |
+        [{{ DrId }}] G3 CUTOVER: {{ ReplicaDbInstanceId }} is standalone at {{ WaitUntilStandalone.Endpoint }}.
+        Approve to update secret {{ SecretId }} → ESO → Reloader rollouts. Run `dr-secret-cutover.sh precheck` first.
+      MinRequiredApprovals: 1
+      Approvers: '{{ Approvers }}'
+
+  - name: UpdateSecret
+    action: aws:executeAutomation
+    onFailure: Abort
+    isEnd: true
+    inputs:
+      DocumentName: DR-UpdateDbSecretEndpoint
+      RuntimeParameters:
+        AutomationAssumeRole: '{{ AutomationAssumeRole }}'
+        SecretId: '{{ SecretId }}'
+        DbInstanceId: '{{ ReplicaDbInstanceId }}'
+        DrId: '{{ DrId }}'
+outputs:
+  - PreCheck.MaxLag15m
+  - WaitUntilStandalone.Endpoint

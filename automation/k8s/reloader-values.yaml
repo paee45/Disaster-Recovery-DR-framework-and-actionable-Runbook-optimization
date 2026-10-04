@@ -1,0 +1,10 @@
+# Stakater Reloader — Helm values (chart: stakater/reloader). Reloader is on the critical path of every S2/S3/S4 cutover.
+reloader:
+  reloadStrategy: annotations     # with Argo CD / Flux: patches a pod-template annotation instead of an env var (no GitOps drift)
+  watchGlobally: false            # only namespaces listed below / with the label → smaller blast radius
+  namespaceSelector: "reloader=enabled"
+  ignoreConfigMaps: true          # DB cutover only needs Secrets; reduces noise
+  logFormat: json                 # rollout events land in the evidence/log pipeline
+  enableHA: true                  # leader election, 2 replicas — a dead Reloader = manual restarts during DR
+  deployment:
+    replicas: 2                   # dr-preflight.sh checks available replicas of the deployment named *reloader*

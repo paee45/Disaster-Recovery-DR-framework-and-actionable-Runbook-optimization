@@ -1,35 +1,41 @@
-# Deployment conventions that dr-eks-rollout.sh, Reloader and the runbook rely on.
+# Conventions that the DR scripts, Reloader and the runbooks rely on.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: app-api
-  namespace: app
+  namespace: app                               # namespace labelled reloader=enabled
   labels:
-    dr.example.com/tier: critical              # selected by DR_SELECTOR
-    dr.example.com/restart-order: "2"          # 1 = pgbouncer/proxies, 2 = APIs, 3 = workers/consumers
+    dr.example.com/db-consumer: "true"
+    dr.example.com/restart-order: "2"          # 1 = PgBouncer/poolers, 2 = APIs, 3 = workers/consumers
   annotations:
-    secret.reloader.stakater.com/reload: "db-creds"   # Stakater Reloader: rolling restart when the Secret changes
-    dr.example.com/prod-replicas: "6"          # capacity to scale to in the DR region (dr-eks-rollout.sh scale)
+    secret.reloader.stakater.com/reload: "db-creds"   # rolling restart when the DB secret (endpoint) changes
 spec:
-  replicas: 1                                  # warm standby in the DR region (GitOps overlay); 6 in primary
+  replicas: 6
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 25% }   # cutover rollout without capacity loss
   selector:
     matchLabels: { app: app-api }
   template:
     metadata:
       labels: { app: app-api }
     spec:
+      topologySpreadConstraints:               # spread across AZs → DB AZ after a Multi-AZ failover (S1) does not matter
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: app-api } }
       containers:
         - name: api
-          image: 111122223333.dkr.ecr.eu-central-1.amazonaws.com/app-api:1.2.3   # ECR cross-region replication
+          image: 111122223333.dkr.ecr.eu-west-1.amazonaws.com/app-api:1.2.3
           envFrom:
-            - secretRef: { name: db-creds }
+            - secretRef: { name: db-creds }    # DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME
           env:
-            - name: JAVA_TOOL_OPTIONS          # JVM: do not cache DNS forever (stable CNAME must be re-resolved)
+            - name: JAVA_TOOL_OPTIONS          # S1: the endpoint stays the same but its IP changes → no infinite DNS caching
               value: "-Dnetworkaddress.cache.ttl=30 -Dnetworkaddress.cache.negative.ttl=5"
-            - name: DB_POOL_MAX_LIFETIME_MS    # e.g. HikariCP maxLifetime: pools recycle onto the new primary
+            - name: DB_POOL_MAX_LIFETIME_MS    # e.g. HikariCP maxLifetime: pools recycle after an S1 failover
               value: "300000"
-          readinessProbe:                      # MUST fail when the DB is unreachable or read-only,
-            httpGet: { path: /healthz/ready, port: 8080 }   # e.g. runs "SELECT NOT pg_is_in_recovery()"
+          readinessProbe:                      # MUST fail when the DB is unreachable or read-only
+            httpGet: { path: /healthz/ready, port: 8080 }
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:                       # must NOT depend on the DB (avoid restart storms during failover)

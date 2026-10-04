@@ -10,4 +10,4 @@ CREATE TABLE IF NOT EXISTS dr.heartbeat (
 --   INSERT INTO dr.heartbeat(id, ts) VALUES (1, clock_timestamp())
 --   ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts
 --   RETURNING ts;
--- Least privilege: GRANT USAGE ON SCHEMA dr TO dr_heartbeat; GRANT INSERT, UPDATE, SELECT ON dr.heartbeat TO dr_heartbeat;
+-- Least privilege: GRANT USAGE ON SCHEMA dr TO app_user; GRANT INSERT, UPDATE, SELECT ON dr.heartbeat TO app_user;  -- writer uses the app secret (follows cutovers)

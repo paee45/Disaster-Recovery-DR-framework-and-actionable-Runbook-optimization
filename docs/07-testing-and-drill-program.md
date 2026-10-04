@@ -1,53 +1,62 @@
 # 07 — Testing & Drill Program
 
-## 1. Drill ladder (increasing realism)
+## 1. Drill matrix (environment × scenario)
 
-| Level | Type | What happens | Env | Cadence (T1) |
-|---|---|---|---|---|
-| L1 | **Tabletop** | Walk through the runbook verbally against a scenario; validate roles, gates, comms | — | Quarterly / for every new on-call member |
-| L2 | **Component test** | Promote a *disposable* replica (create replica → promote → verify → delete); ESO/Reloader restart test | UAT | Monthly (automated, scheduled) |
-| L3 | **Planned switchover** | Full runbook, zero data loss, with comms and evidence | UAT → PROD | UAT quarterly; PROD annually (in a maintenance window) |
-| L4 | **Unplanned simulation (game day)** | Inject failure with AWS FIS (network disruption of DB subnets, AZ power interruption scenario, Aurora failover action), executors not told the details | UAT; PROD for T0 with high maturity | Semi-annual |
-| L5 | **Class B/C restore** | PITR into a new instance, restore from the cross-account Vault-Locked backup into a clean account | UAT / isolated account | Semi-annual |
+| Scenario | DEV | UAT | PROD |
+|---|---|---|---|
+| **S1** Multi-AZ failover | n/a | n/a (no Multi-AZ: see gap below) | **Semi-annual**, maintenance window: `aws rds reboot-db-instance --force-failover` (≈ 1–2 min of write outage), then run RB-PROD-S1 Phase 2 |
+| **S2** Replica promotion | n/a | **Quarterly**, full runbook incl. FB-S2 (planned mode: drain → lag 0 → promote) | Annual tabletop + validated by UAT. A real PROD drill only with a disposable replica (§2 L2) |
+| **S3** Snapshot restore | **Monthly automated** (restore → verify → cutover on a DEV namespace → cleanup) | **Quarterly** incl. cutover + FB-S3S4 | **Quarterly restore test** into an isolated account/VPC (no cutover); the cross-account Vault Lock copy at least annually |
+| **S4** PITR | **Monthly automated** (both modes alternately) | **Quarterly** (alternate mode A / mode B) | **Semi-annual** side restore (mode B rehearsal, no cutover) + measure the restore time |
+| CP-01 secret cutover + Reloader | Every DEV drill | Every UAT drill | Implicitly in S2/S3/S4 tests; plus the **monthly inventory check** (0 unannotated consumers) |
 
-> **The automated L2 test gives the most value for the least effort.** A scheduled pipeline creates a temporary
-> cross-region replica, promotes it, runs `dr-verify.sh`, records the promotion time and deletes the replica.
-> This continuously measures `T5 − T4` and catches IAM/parameter-group/KMS drift long before a real event.
+> **UAT gap for S1:** UAT has no Multi-AZ, so app behaviour during a Multi-AZ failover (DNS caching, pool recovery) is only
+> exercised in PROD. Mitigation options (choose one, backlog P12): enable Multi-AZ on UAT for a drill window each quarter,
+> or keep the semi-annual PROD maintenance-window S1 drill and treat its result as the S1 baseline.
 
-## 2. AWS FIS ideas for game days
+## 2. Drill ladder (increasing realism)
 
-| Scenario | FIS action / approach |
+| Level | Type | What happens |
+|---|---|---|
+| L1 | **Tabletop** | Walk through the env/scenario runbook against a scenario card; validate roles, gates, comms |
+| L2 | **Component test (automated)** | Scheduled pipeline: restore/promote a **disposable** instance → `dr-verify.sh db` → measure `T5 − T4` → delete. Also an ESO/Reloader test: bump a dummy key in a test secret → verify rollout |
+| L3 | **Planned scenario drill** | Full runbook incl. cutover, comms, evidence, FB runbook |
+| L4 | **Unplanned simulation (game day)** | AWS FIS, or an injected "bad migration", with executors not briefed on the details |
+| L5 | **Security restore** | Restore from the cross-account Vault-Locked backup into a clean account; rotated credentials |
+
+## 3. Fault injection ideas
+
+| Scenario | Injection |
 |---|---|
-| Primary DB unreachable from app | `aws:network:disrupt-connectivity` on the DB subnets (scope `all`) in Region A |
-| Aurora writer failure | `aws:rds:failover-db-cluster` |
-| RDS instance reboot with failover | `aws:rds:reboot-db-instances` (`forceFailover=true`) for the in-region HA baseline |
-| EKS node loss | `aws:eks:terminate-nodegroup-instances` |
-| Pod-level chaos | `aws:eks:pod-*` actions (e.g. pod network latency/blackhole) |
-| AZ impairment | FIS scenario library "AZ Availability: Power Interruption" |
+| S1 | FIS `aws:rds:reboot-db-instances` with `forceFailover=true` (PROD maintenance window) |
+| S2 | Make the primary unreachable from the app/replica path (FIS `aws:network:disrupt-connectivity` on the DB subnets in UAT), or stop the UAT primary (`stop-db-instance` is not allowed while it has a read replica; use the network disruption) |
+| S4 | A scripted "bad migration" against a seeded UAT table (e.g. `UPDATE … SET price = 0`), timestamp unknown to the executors |
+| CP-01 | Remove the Reloader annotation from one test workload: the pre-flight inventory must catch it |
 
-Always set **stop conditions** (a CloudWatch alarm on the customer-facing SLO) and run under a change ticket.
+Always use **stop conditions** (a CloudWatch alarm on the customer-facing SLO) and a change ticket.
 
-## 3. Drill scoring (put this in every drill report)
+## 4. Scoring (every drill report)
 
 | KPI | Target | Source |
 |---|---|---|
-| Business RTO (`T9 − T0`) | ≤ tier RTO | timeline |
-| RPO actual | ≤ tier RPO | heartbeat |
-| Decision time (`T2 − T1`) | ≤ 15 min | timeline |
-| Manual steps executed | ↓ each drill | runbook tracker |
-| Runbook deviations | 0 *unrecorded*. Every deviation becomes a ticket | PIR |
-| Steps with missing evidence | 0 | manifest check |
-| Comms on time (% sent ≤ committed time) | 100 % | comms log |
-| Time to first customer comms | ≤ 30 min | comms log |
+| Business RTO (`T9 − T0`) | ≤ env/scenario target | timeline |
+| RPO actual | ≤ target | KPI report |
+| Decision time (`T2 − T1`) | ≤ 15 min (PROD) | timeline |
+| Cutover time (`T7 − T6`) | ≤ 10 min | timeline |
+| Consumers not reloaded automatically | 0 | `dr-eks-rollout.sh wait` output |
+| Parity diffs after restore | 0 | `rds-config-parity.sh` |
+| Missing timeline markers | 0 | KPI report |
+| Comms on time | 100 % | comms log |
+| Deviations without a ticket | 0 | PIR |
 
-## 4. DR maturity model (use it to place the current state and the capstone target)
+## 5. DR maturity model
 
 | Level | Name | Characteristics |
 |---|---|---|
-| 1 | Ad-hoc | Wiki page, tribal knowledge, never tested, RTO unknown |
-| 2 | Documented | Step-by-step runbook, tested once, manual secret edits and restarts, sheet tracking |
-| 3 | Repeatable | Standard template, gates, roles, scheduled UAT drills, measured RTO/RPO, comms templates |
-| 4 | Automated | Runbook-as-code, ESO/Reloader, evidence auto-collected, drills in PROD, KPIs trending |
-| 5 | Resilient by design | Continuous automated DR validation (L2 daily), game days with FIS, RTO from SLOs, ARC-driven traffic control, chaos culture |
+| 1 | Ad-hoc | One wiki page; manual console restore; manual secret edits; teams restart pods themselves; RTO unknown |
+| 2 | Documented | Step-by-step runbook (generic), tested once, sheet tracking |
+| 3 | Repeatable | Env/scenario runbooks, gates, roles, scheduled UAT drills, measured RTO/RPO, comms templates |
+| 4 | Automated | SSM docs, scripted cutover + Reloader verification, evidence auto-collected, DEV monthly restore tests, KPI trend |
+| 5 | Resilient by design | Continuous L2 tests, FIS game days, cross-region protection, RTO model per DB size, zero manual secret handling |
 
-Typical capstone goal: **Level 2 → Level 4** for the RDS runbook.
+Typical capstone goal: **Level 2 → Level 4**.

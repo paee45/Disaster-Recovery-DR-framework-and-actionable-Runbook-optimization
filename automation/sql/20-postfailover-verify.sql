@@ -1,4 +1,4 @@
--- 20-postfailover-verify.sql — run on the NEW PRIMARY (P4-S01). Every line prints OK/FAIL.
+-- 20-postfailover-verify.sql — run on the current/new PRIMARY (CP02-S01). Every line prints OK/FAIL.
 \set ON_ERROR_STOP on
 SELECT CASE WHEN NOT pg_is_in_recovery() THEN 'OK   not in recovery' ELSE 'FAIL still in recovery' END;
 SELECT CASE WHEN current_setting('default_transaction_read_only') = 'off'

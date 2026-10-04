@@ -8,8 +8,8 @@
 **Sender:** Comms lead / Integration owner · **Approver:** IC + Service Owner · **DEV:** not sent · **UAT:** only if partner integration tests are affected
 **Rule:** tell partners exactly **what action they need to take** (pause, retry, replay, allow-list new IPs). Share no internal root cause.
 
-> Pre-requisite (do this BEFORE an incident): partner contact list per env with 24×7 contacts, the Region B egress IPs/NAT EIPs
-> already allow-listed by partners, and partner SFTP/API endpoints that use stable DNS names rather than regional ones.
+> Pre-requisite (do this BEFORE an incident): partner contact list per env with 24×7 contacts; agreed replay/resend
+> procedures and idempotency keys for every integration (needed after a data restore, S3/S4).
 
 ---
 
@@ -26,8 +26,9 @@ Next update: {{hh:mm}} UTC. Contact: {{integration on-call email / phone}} (ref 
 
 ### 2. [Failover Initiated]
 ```
-Update {{hh:mm}} UTC: we are moving {{SERVICE}} to our secondary site. Service endpoints and hostnames do NOT change.
-{{If applicable: Traffic will originate from these IPs: {{list}} (already shared on {{date}}) — please confirm they are allowed.}}
+Update {{hh:mm}} UTC: we are recovering {{SERVICE}}'s database. Service endpoints and hostnames do NOT change.
+{{S3/S4 data restore: our data will be restored to {{hh:mm}} UTC. Data you sent us after that time will need to be
+re-sent — we will confirm the exact window.}}
 Requested action: {{continue pausing | no action}}. Expected restoration: {{hh:mm}} UTC.
 ```
 
@@ -48,10 +49,10 @@ Following the disruption on {{date}} (ref {{ref}}), reconciliation is complete: 
 
 ### AWS Support case (copy-paste)
 ```
-Severity: {{Business-critical system down}} · Service: RDS (PostgreSQL) · Region: {{eu-west-1}}
+Severity: {{Production system down | Business-critical system down}} · Service: RDS (PostgreSQL) · Region: {{eu-west-1}}
 Account: {{id}} · Resource: arn:aws:rds:{{region}}:{{acct}}:db:{{PRIMARY_DB}}
-Issue: Primary instance unreachable since {{T0}} UTC; Multi-AZ failover {{not triggered / stuck}}. Executing cross-region
-DR to {{DR_REGION}}. Ask: (1) ETA for instance/regional recovery, (2) any risk to promoting cross-region replica {{DR_DB}},
-(3) preserve primary storage for later data reconciliation.
+Issue: Primary instance unreachable since {{T0}} UTC; Multi-AZ failover {{not triggered / stuck / n/a}}. Planning
+{{replica promotion of <replica> | PITR to <ts> | snapshot restore}}. Ask: (1) ETA for instance recovery, (2) any risk to the
+planned recovery action, (3) cause of the failover/outage (RDS event: {{message}}), (4) restore throughput if S3/S4.
 Contact: {{IC name/phone}} · Bridge: {{link}}
 ```

@@ -5,7 +5,8 @@ for that reader.
 
 ## 1. Mandatory anatomy
 
-Every DR runbook (template: [`templates/runbook-template.md`](../templates/runbook-template.md)) has these sections, in this order:
+Every DR runbook (template: [`templates/runbook-template.md`](../templates/runbook-template.md)) has these sections, in this order.
+Repeated procedures (secret cutover, verification, parity, fencing, evidence, PIR) live once in `runbooks/common/CP-0x` and are referenced by ID:
 
 | # | Section | Purpose |
 |---|---|---|
@@ -26,14 +27,14 @@ Every DR runbook (template: [`templates/runbook-template.md`](../templates/runbo
 Each step is one row or block containing:
 
 ```
-[P2-S03] Promote cross-region replica                      ⏱ budget 10 min   👤 Executor   ⚠ IRREVERSIBLE
-  Pre-condition : Gate G2 approved (IC + Service Owner), fencing P2-S01..S02 done or waived (record why)
-  Action        : automation  ▸ SSM step "PromoteReplica"   |  manual ▸ aws rds promote-read-replica ...
+[P2-S05] Promote read replica                              ⏱ budget 1 min    👤 Executor   ⚠ IRREVERSIBLE
+  Pre-condition : Gate G2 approved (IC + DBA), fencing (CP-04) done or waived (record why)
+  Action        : automation  ▸ SSM DR-RdsPromoteReplica step "PromoteReplica"  |  manual ▸ aws rds promote-read-replica ...
   Expected      : DBInstanceStatus transitions modifying → available; pg_is_in_recovery() = false
-  Verify        : ./automation/scripts/dr-verify.sh db
+  Verify        : ./automation/scripts/dr-verify.sh wait-promoted
   If fails      : retry once after 2 min; then escalate DBA + AWS Support (Sev "Business-critical system down")
-  Evidence      : auto (CloudTrail PromoteReadReplica, describe-db-instances JSON, timeline event P2-S03)
-  Timeline mark : dr_mark P2-S03 start|end
+  Evidence      : auto (CloudTrail PromoteReadReplica, describe-db-instances JSON, timeline event)
+  Timeline mark : dr_mark T4 (start) / T5 (writable)
 ```
 
 Writing rules:
@@ -51,14 +52,14 @@ Writing rules:
 
 | Gate | Position | Decision | Who |
 |---|---|---|---|
-| **G1 — Declare DR** | End of Phase 1 | Fail over vs. wait for in-region recovery | IC + Service Owner (+ exec approver if data loss > RPO) |
-| **G2 — Point of no return** | Before promotion | Fencing status accepted, data-loss estimate accepted | IC + DBA |
-| **G3 — Open traffic** | Before routing users to Region B | DB writable, app healthy, smoke tests passed | IC + App owner |
-| **G4 — Declare restored** | End of Phase 4 | Synthetic business transactions pass, error rate within SLO | IC |
-| **G5 — Failback approval** | Phase 5 start (separate change) | Region A healthy ≥ 24 h, resync complete, maintenance window agreed | Change Advisory Board / Service Owner |
+| **G1 — Declare & choose** | End of Phase 1 | Scenario (S2/S3/S4, mode A/B) + snapshot/restore time + data-loss estimate accepted | Env approvers ([00 §3](00-dr-strategy-and-principles.md)) |
+| **G2 — Point of no return** | Before `promote-read-replica` (S2) | Fencing status accepted, final LSN/heartbeat captured | IC + DBA |
+| **G3 — Cutover** | Before the secret update (S2/S3/S4) | New DB validated (restore point, parity, password pre-check), old instance fenced or planned | IC (+ App owner) |
+| **G4 — Declare restored** | After verification (CP-02) | Synthetic business transactions pass, error rate within SLO | IC |
+| **FB-G0 — Failback model** | Start of FB runbook (separate change) | Forward-fix vs return-to-original; maintenance window if downtime | Service Owner + DBA |
 
-Implement gates as `aws:approve` steps (SSM Automation) or manual-approval blocks (ARC Region switch / your
-orchestrator) so the approver identity and timestamp are recorded automatically.
+Implement gates as `aws:approve` steps (SSM Automation) or as `DECISION:` messages captured by the incident tool,
+so the approver identity and timestamp are recorded automatically.
 
 ## 4. Roles (incident command model)
 
@@ -77,6 +78,7 @@ Rotate roles in drills. Each role needs at least 2 trained people (no single poi
 
 ## 5. Lifecycle and governance
 
+- **One runbook per environment × scenario** (DEV/UAT/PROD × S1–S4 + FB). Env differences (approvers, Multi-AZ steps, comms, targets) are explicit, not "if PROD then…" prose.
 - **Source of truth:** Markdown in Git, with PR review by SRE + DBA + App owner. Version bump with each merged change (`vMAJOR.MINOR`).
 - **Linked automation:** the runbook header pins the SSM document version and script git SHA. CI checks that they match.
 - **Freshness SLO:** a T0/T1 runbook drilled > 90 days ago (UAT) or > 365 days (PROD) is red on the DR dashboard.

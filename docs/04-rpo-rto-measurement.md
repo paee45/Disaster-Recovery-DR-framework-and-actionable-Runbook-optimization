@@ -1,111 +1,82 @@
 # 04 — RPO & RTO Measurement Framework
 
-## 1. Canonical timeline (every event is machine-recorded)
+## 1. Canonical timeline (machine-recorded)
 
-All events are appended to `timeline.jsonl` by `dr_mark` ([`automation/scripts/dr-lib.sh`](../automation/scripts/dr-lib.sh)),
-by SSM step outputs, or by the incident platform. **Use UTC ISO-8601 only.**
+Events go to `timeline.jsonl` via `dr_mark` ([`dr-lib.sh`](../automation/scripts/dr-lib.sh)); the scripts mark T6/T7 themselves. **UTC ISO-8601 only.**
 
-| Marker | Event | Source of the timestamp |
+| Marker | Event | Source | S1 | S2 | S3/S4 |
+|---|---|---|---|---|---|
+| **T0** | Impact start (or first bad change for data incidents) | Synthetic/5xx metric, deploy/migration log. Back-filled with `--at` | ✔ | ✔ | ✔ |
+| T1 | Incident declared | Incident tool | ✔ | ✔ | ✔ |
+| **T2** | Gate G1 GO (scenario + data loss accepted) | `DECISION:` / SSM approval | — | ✔ | ✔ |
+| DAMAGE_STOPPED | Offending job/deploy stopped | Engineer | — | — | S4 |
+| FENCE | Old instance fenced (level F1/F2/F3) | `dr-fence-instance.sh` | — | ✔ | ✔ |
+| **T4** | DB recovery started (failover start / promote / restore API call) | RDS event / CloudTrail | ✔ | ✔ | ✔ |
+| **T5** | New primary writable | RDS event (S1), `wait-promoted`, `wait db-instance-available` | ✔ | ✔ | ✔ |
+| **T6** | Secret updated (endpoint cutover) | `dr-secret-cutover.sh apply` (auto) | — | ✔ | ✔ |
+| **T7** | All consumers rolled by Reloader (or manual restart) | `dr-eks-rollout.sh wait` (auto) | (restart only if needed) | ✔ | ✔ |
+| **T9** | **Service restored**: the first of 3 consecutive green synthetic business transactions | Synthetic monitor | ✔ | ✔ | ✔ |
+| T10 | Declared restored (G4) | Incident tool | ✔ | ✔ | ✔ |
+
+## 2. RTO
+
+| Metric | Formula | Typical driver |
 |---|---|---|
-| **T0** | Impact start (first failed customer request / synthetic check) | Synthetic monitor / ALB 5xx metric. Back-filled from metrics, **not** from when the alarm was noticed |
-| T_det | Detection (first alarm fired) | Alarm state-change timestamp |
-| T_ack | On-call acknowledged | Paging tool |
-| **T1** | DR assessment declared (SEV1) | Incident tool |
-| **T2** | Gate G1 = GO | `aws:approve` / incident tool |
-| T3 | Fencing complete | `dr_mark` |
-| **T4** | Promotion started (API call) | CloudTrail `PromoteReadReplica` / `FailoverGlobalCluster` `eventTime` |
-| **T5** | DB writable (`pg_is_in_recovery() = false`, write probe OK) | `dr-verify.sh db` |
-| T6 | DNS/secret switched | CloudTrail `ChangeResourceRecordSets`, `PutSecretValue` |
-| T7 | All critical Deployments `rollout status` complete | `dr-eks-rollout.sh` |
-| T8 | Traffic routed to Region B (Gate G3) | ARC `UpdateRoutingControlState` / R53 change |
-| **T9** | **Service restored**: synthetic business transaction green for 3 consecutive runs | Synthetic monitor |
-| T10 | Declared stable (Gate G4) | Incident tool |
+| **Business RTO** (reported vs target) | `T9 − T0` | Everything below |
+| Time to declare | `T1 − T0` | Alerting, on-call |
+| Decision time | `T2 − T1` | Clarity of gates/approvers. Often the largest share |
+| DB recovery time | `T5 − T4` | S1 ≈ 1–2 min; S2 promotion ≈ minutes; **S3/S4 ∝ DB size** (+ WAL replay for PITR) |
+| Cutover time | `T7 − T6` | ESO sync + Reloader rollouts (pod start time × waves) |
+| Validation time | `T9 − T7` | Smoke tests, warm-up (S3/S4 lazy loading) |
 
-## 2. RTO: definitions
+**Build an RTO model per environment** from drills and update it after each one:
+`RTO_est(S3/S4) = decision + restore_minutes_per_100GB × size/100 + parity(10) + warm-up + cutover + validation`.
+If `RTO_est` > target for PROD S3/S4 → backlog item (smaller DB/archiving, faster storage class, or prefer S2 where valid).
 
-| Metric | Formula | Use |
-|---|---|---|
-| **Business RTO (reported against SLA)** | `T9 − T0` | The number that is compared to the RTO target |
-| Detection time (MTTD) | `T_det − T0` | Alerting quality |
-| Decision time | `T2 − T1` | Governance / clarity of gates (often the biggest share) |
-| Technical failover time | `T5 − T4` | DB tech choice (RDS vs Aurora) |
-| App recovery time | `T9 − T5` | Secret sync, rollouts, pools, DNS caching |
-| Runbook execution time | `T10 − T2` | Automation level |
+## 3. RPO per scenario
 
-> **Optimization insight:** in most first-baseline drills, *decision time* and *app recovery time* are larger
-> than the DB promotion itself. Break RTO down into these parts before you optimise anything.
+| Scenario | RPO formula | How to measure | Markers |
+|---|---|---|---|
+| **S1** Multi-AZ | **0** (synchronous standby) | RDS guarantees committed data | `RPO_ZERO` |
+| **S2** Replica promotion | last primary commit − last replicated commit | **Heartbeat** (below) + replica LSN capture before promotion | `RPO_LAST_REPLICATED`, `RPO_LAST_PRIMARY_COMMIT` |
+| **S3** Snapshot | loss_end − `SnapshotCreateTime` | Snapshot metadata | `RPO_SNAPSHOT` |
+| **S4** PITR | loss_end − `restore-time` | The chosen restore time | `RPO_RESTORE_TS` |
 
-## 3. RPO: definitions and how to measure it precisely
+`loss_end` = the latest of `T0`, `DAMAGE_STOPPED` and `FENCE`. Writes the old primary accepted after the restore point are
+lost **unless reconciled** (`30-reconciliation-hints.sql`). For data-corruption incidents some of that loss is intentional
+(the bad change), so report both the "RPO window" and the "records reconciled".
 
-`RPO_actual = T_failure_commit − T_last_replicated_commit`
+### Heartbeat (S2, UAT/PROD)
+`automation/k8s/heartbeat-writer.yaml` writes `dr.heartbeat.ts` every second through the app secret and logs every commit.
+- On the promoted DB: `SELECT ts FROM dr.heartbeat WHERE id = 1` → `RPO_LAST_REPLICATED`
+- From the writer logs: the last `heartbeat_commit` before the outage → `RPO_LAST_PRIMARY_COMMIT`
 
-where `T_failure_commit` is the time the primary stopped accepting commits. Measure it with **three independent methods**
-and report the worst one:
+### Replica position at promotion (S2)
+`automation/sql/10-preflight-replica.sql` captures `pg_last_wal_receive_lsn()`, `pg_last_wal_replay_lsn()` and
+`pg_last_xact_replay_timestamp()` right before the promotion. This is the reconciliation cutoff and audit evidence.
 
-### Method 1 — Heartbeat table (most precise, recommended)
-A tiny job (K8s CronJob or `pg_cron`) writes to the primary every second:
-```sql
--- automation/sql/00-heartbeat.sql
-INSERT INTO dr.heartbeat(id, ts) VALUES (1, clock_timestamp())
-ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts;
-```
-After promotion, on the new primary:
-```sql
-SELECT ts AS last_replicated_commit FROM dr.heartbeat WHERE id = 1;
-```
-`RPO_actual = (last successful heartbeat write logged by the writer job) − dr.heartbeat.ts on the new primary`.
-The writer job logs every successful commit, so the "failure" side comes from its logs (CloudWatch Logs / Loki).
-
-### Method 2 — Replica replay timestamp (at the moment of promotion)
-Run on the replica **immediately before** promotion (`automation/sql/10-preflight-replica.sql`):
-```sql
-SELECT now() AS observed_at,
-       pg_last_wal_receive_lsn()  AS receive_lsn,
-       pg_last_wal_replay_lsn()   AS replay_lsn,
-       pg_last_xact_replay_timestamp() AS last_replayed_commit,
-       now() - pg_last_xact_replay_timestamp() AS replay_delay;
-```
-Note: `replay_delay` grows when the primary is idle. That is why Method 1 is preferred.
-
-### Method 3 — CloudWatch metrics (trend and alerting)
-| Engine | Metric | Meaning |
-|---|---|---|
-| RDS PG replica | `ReplicaLag` (seconds, on the replica) | Approximate replication delay |
-| RDS PG primary | `OldestReplicationSlotLag`, `TransactionLogsDiskUsage` | WAL backlog risk |
-| Aurora Global | `AuroraGlobalDBReplicationLag` (ms), `AuroraGlobalDBRPOLag` (ms) | Storage-level lag / RPO lag |
-
-Alarm: `ReplicaLag > 0.5 × RPO for 5 min` → page. A replica that lags beyond RPO is a **live RPO breach risk**,
-not just a warning.
-
-```bash
-aws cloudwatch get-metric-statistics --region eu-central-1 \
-  --namespace AWS/RDS --metric-name ReplicaLag \
-  --dimensions Name=DBInstanceIdentifier,Value=app-pg-prod-euc1 \
-  --start-time "$(date -u -d '-30 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
-  --period 60 --statistics Maximum
-```
-
-### Data-loss inventory (when RPO > 0)
-Record the **last replayed LSN** on the replica at promotion. When Region A comes back, run a
-logical diff or use the WAL beyond that LSN on the old primary to identify lost transactions
-(Phase 5, reconciliation). Never delete the old primary until the business has signed off on
-reconciliation. Take a manual snapshot first.
+### Alarms that protect RPO
+| Metric | Alarm |
+|---|---|
+| `ReplicaLag` (replica, seconds) | > 50 % of RPO for 5 min → page |
+| Heartbeat age on replica | > 120 s → page |
+| `TransactionLogsDiskUsage`, `OldestReplicationSlotLag` (primary) | WAL backlog growth |
+| AWS Backup job failures / missing daily snapshot | Ticket (S3 RPO at risk) |
+| `LatestRestorableTime` older than 15 min | Page (S4 RPO at risk) |
 
 ## 4. Automated calculation
 
-[`automation/scripts/dr-rto-rpo-calc.py`](../automation/scripts/dr-rto-rpo-calc.py) reads `timeline.jsonl` and
-outputs `rto-rpo-report.json` plus a Markdown summary, which go into the evidence bundle and the drill report.
+`dr-rto-rpo-calc.py timeline.jsonl --rto-target-min $RTO_TARGET_MIN --rpo-target-s $RPO_TARGET_S` → `rto-rpo-report.json|md`.
+It picks the RPO method from the markers present and lists the missing markers (each one is a runbook-execution defect).
 
 ## 5. Evidence query set
 
-| What | Command / query |
+| What | Command |
 |---|---|
-| Promotion API call | `aws cloudtrail lookup-events --region eu-central-1 --lookup-attributes AttributeKey=EventName,AttributeValue=PromoteReadReplica` |
-| Aurora failover | `... AttributeValue=FailoverGlobalCluster` (or `SwitchoverGlobalCluster`) |
-| DNS change | `aws cloudtrail lookup-events --region us-east-1 --lookup-attributes AttributeKey=EventName,AttributeValue=ChangeResourceRecordSets` (Route 53 is a global service, so its events are logged in us-east-1) |
-| Secret change | `... AttributeValue=PutSecretValue` in the DR region |
-| RDS events | `aws rds describe-events --region eu-central-1 --source-type db-instance --source-identifier app-pg-prod-euc1 --duration 360` |
-| Lag history | CloudWatch `ReplicaLag` / `AuroraGlobalDBRPOLag` (above) |
-| Rollouts | `kubectl rollout status` / `kubectl get events --sort-by=.lastTimestamp` |
-| Prometheus (if used) | `max_over_time(pg_replication_lag_seconds{instance="app-pg-prod-euc1"}[30m])`, `kube_deployment_status_replicas_available{namespace="app"}` |
-| Logs Insights: first DB error in app | `fields @timestamp, @message \| filter @message like /could not connect\|read-only transaction/ \| sort @timestamp asc \| limit 1` |
+| Recovery API calls | `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=PromoteReadReplica` (also `RestoreDBInstanceFromDBSnapshot`, `RestoreDBInstanceToPointInTime`, `RebootDBInstance`) |
+| Secret cutover | `... AttributeValue=PutSecretValue` / `UpdateSecretVersionStage`; `aws secretsmanager describe-secret --secret-id $SECRET_ID --query VersionIdsToStages` |
+| RDS events (S1 failover reason/time) | `aws rds describe-events --source-type db-instance --source-identifier $PRIMARY_DB --duration 1440` |
+| Lag history | `aws cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name ReplicaLag --dimensions Name=DBInstanceIdentifier,Value=$REPLICA_DB ...` |
+| Restore window | `aws rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` |
+| Rollouts | `k8s/rollout-status-*.txt`, `kubectl get events --sort-by=.lastTimestamp`, Reloader logs (JSON) |
+| First DB error in app logs (T0 back-fill) | Logs Insights: `fields @timestamp, @message \| filter @message like /could not connect\|read-only transaction\|terminating connection/ \| sort @timestamp asc \| limit 1` |

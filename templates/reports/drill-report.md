@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Environment / type | {{UAT/PROD}} / {{L3 planned switchover · L4 unplanned simulation}} |
-| Runbook / automation | RB-DR-RDS-001 v{{x}} · SSM v{{y}} · git {{sha}} |
+| Environment / scenario / type | {{DEV/UAT/PROD}} / {{S1–S4, mode}} / {{L2 automated · L3 planned · L4 game day}} |
+| Runbook / automation | RB-{{ENV}}-{{scenario}} v{{x}} (+ FB runbook) · SSM v{{y}} · git {{sha}} |
 | Date / window | {{date}} {{hh:mm}}–{{hh:mm}} UTC · Change {{CHG}} |
 | Roles | IC {{}} · Exec {{}} · DBA {{}} · Comms {{}} · Scribe {{}} · Observers {{GRC/auditor}} |
 | Scenario | {{e.g. FIS network disruption of DB subnets in eu-west-1, executors not briefed}} |
@@ -15,7 +15,9 @@
 | Business RTO (T9−T0) | | | | |
 | RPO actual | | | | |
 | Decision time (T2−T1) | | | ≤ 15 min | |
-| DB promotion (T5−T4) | | | — | |
+| DB recovery (T5−T4) | | | model | |
+| Cutover (T7−T6) + consumers not auto-reloaded | | | ≤ 10 min / 0 | |
+| Parity diffs after restore | | | 0 | |
 | App recovery (T9−T5) | | | | |
 | Manual steps executed | | | ↓ | |
 | Time to first customer comms | | | ≤ 30 min | |

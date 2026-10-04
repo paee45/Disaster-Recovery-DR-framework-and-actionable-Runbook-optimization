@@ -1,4 +1,4 @@
--- 15-planned-drain.sql — PLANNED switchover only (P2-S04), run on the current PRIMARY.
+-- 15-planned-drain.sql — PLANNED promotion only (drills, FB-S2 option B), run on the current PRIMARY.
 -- 1) Block new writes at DB level (belt and braces, in addition to scaling writers to 0):
 --      ALTER DATABASE app SET default_transaction_read_only = on;
 --      SELECT pg_terminate_backend(pid) FROM pg_stat_activity

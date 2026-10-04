@@ -1,11 +1,16 @@
-# RPO heartbeat writer — runs ONLY in the active region (GitOps overlay sets replicas=0 in the passive region).
-# Logs each committed timestamp; the last logged value after an outage = RPO_LAST_PRIMARY_COMMIT.
+# RPO heartbeat writer (UAT/PROD). Uses the SAME db-creds secret as the app, so after a cutover Reloader moves it to the
+# new primary automatically. Logs each committed timestamp; the last logged value before an outage = RPO_LAST_PRIMARY_COMMIT.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dr-heartbeat-writer
   namespace: app
-  labels: { app: dr-heartbeat-writer }
+  labels:
+    app: dr-heartbeat-writer
+    dr.example.com/db-consumer: "true"
+    dr.example.com/restart-order: "3"
+  annotations:
+    secret.reloader.stakater.com/reload: "db-creds"
 spec:
   replicas: 1
   selector:
@@ -18,7 +23,7 @@ spec:
         - name: writer
           image: postgres:16-alpine
           envFrom:
-            - secretRef: { name: db-heartbeat-creds }   # dedicated low-privilege user (see 00-heartbeat.sql)
+            - secretRef: { name: db-creds }      # app user needs INSERT/UPDATE/SELECT on dr.heartbeat (00-heartbeat.sql)
           command: ["/bin/sh", "-c"]
           args:
             - |

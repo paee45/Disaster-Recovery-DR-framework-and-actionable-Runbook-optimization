@@ -2,22 +2,36 @@
 
 | Path | Used in | Purpose |
 |---|---|---|
-| `scripts/dr-lib.sh` | All phases | `dr_init`, `dr_mark` (timeline), `dr_run` (evidence capture), `DR_DSN` |
-| `scripts/dr-preflight.sh` | P1-S06 | Replica status/lag, SQL LSNs, secret auth, DR EKS + ESO, SSM doc version |
-| `ssm/DR-RdsPostgresRegionalFailover.yaml` | P2 | Pre-check → `aws:approve` G2 → promote → wait standalone → CNAME → INSYNC |
-| `scripts/dr-verify.sh` | P2-S07, P4 | `wait-promoted`, `db`, `app` probes |
-| `scripts/r53-cname-batch.sh` | P2-S08 (manual) | Route 53 UPSERT change batch |
-| `scripts/dr-secret-set-host.sh` | P3-S02 (legacy) | Rewrite `host` in secret (replica-secret aware) |
-| `scripts/dr-eks-rollout.sh` | P3-S03/S04 | Scale to prod capacity; ordered rollout restart |
-| `scripts/dr-collect-evidence.sh` | P4-S07 | CloudTrail/RDS/R53/CW evidence, manifest + sha256, upload to Object Lock bucket |
-| `scripts/dr-rto-rpo-calc.py` | P4-S07 | KPIs from `timeline.jsonl` |
-| `sql/*.sql` | P1, P2, P4, P5 | Heartbeat, replica pre-flight, planned drain, post-failover verify, reconciliation |
-| `k8s/*.yaml` | Steady state | ESO, Deployment DR conventions + Reloader, heartbeat writer, Prometheus alerts |
+| `scripts/dr-lib.sh` | All | `dr_init <scenario>`, `dr_mark` (timeline), `dr_run` (evidence capture), `dr_set_target`, `dr_dsn` |
+| `scripts/dr-preflight.sh replica\|restore` | S2 / S3-S4 Phase 1 | Replica health/lag/LSN, PITR window, snapshots, restore inputs, EKS/ESO/Reloader, consumer inventory |
+| `scripts/dr-restore.sh` | S3/S4 | `list-snapshots`, `snapshot`, `pitr` with explicit hardening flags (`DRY_RUN=1` supported) |
+| `scripts/dr-verify.sh` | S2, CP-02/04 | `wait-promoted`, `db`, `connections` (TARGET vs OLD), `app` |
+| `scripts/dr-fence-instance.sh` | CP-04 | `readonly` (F1), `quarantine` (F2), `restore` |
+| `scripts/dr-secret-cutover.sh` | **CP-01** | `precheck`, `fix-password`, `apply` (secret → ESO → Reloader wait), `rollback` |
+| `scripts/dr-eks-rollout.sh` | CP-01, S1 | `inventory`, `snapshot-generations`, `wait` (verifies the Reloader bump, falls back to a restart), `restart`, `suspend/resume-cronjobs` |
+| `scripts/rds-config-parity.sh [--alarms]` | CP-03 | Config + alarm diff between the old and new instance |
+| `scripts/dr-collect-evidence.sh` | CP-05 | CloudTrail/RDS/secret-metadata evidence, KPIs, SHA-256 manifest → S3 Object Lock |
+| `scripts/dr-rto-rpo-calc.py` | CP-05 | KPIs per scenario from `timeline.jsonl` |
+| `scripts/runbook-to-tracker.py` | Before execution | Generates the sheet tracker (CSV) from any runbook (`--expand` inlines CP steps) |
+| `ssm/DR-UpdateDbSecretEndpoint.yaml` | CP-01 | Secret host/port/id update, keeping AWSPREVIOUS for rollback |
+| `ssm/DR-RdsPromoteReplica.yaml` | S2 | Pre-check → G2 → promote → wait standalone → G3 → secret |
+| `ssm/DR-RdsRestoreFromSnapshot.yaml` | S3 | Restore (hardened) → wait → G3 → secret |
+| `ssm/DR-RdsRestoreToPointInTime.yaml` | S4 | PITR (hardened, `latest` or timestamp, deleted-source aware) → wait → G3 → secret |
+| `sql/` | Various | 00 heartbeat · 05 restore-point check · 06 warm-up · 10 replica LSN capture · 15 planned drain · 20 post-recovery verify · 30 reconciliation |
+| `k8s/` | Steady state | ExternalSecrets (rw + ro), Reloader Helm values, Deployment conventions, heartbeat writer, Prometheus alerts |
 
-Deploy the SSM document to **both** regions with IaC:
+Deploy the SSM documents with IaC (create `DR-UpdateDbSecretEndpoint` first, because the others call it):
 ```bash
-aws ssm create-document --region eu-central-1 --name DR-RdsPostgresRegionalFailover \
-  --document-type Automation --document-format YAML --content file://automation/ssm/DR-RdsPostgresRegionalFailover.yaml
+for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFromSnapshot DR-RdsRestoreToPointInTime; do
+  aws ssm create-document --name "$d" --document-type Automation --document-format YAML --content "file://automation/ssm/$d.yaml"
+done
 ```
-Recommended CI: `shellcheck scripts/*.sh`, `yamllint`, `cfn-lint`-style schema check of the SSM doc, and a monthly L2 drill
-(disposable replica → promote → verify → delete) to measure promotion time and catch drift.
+
+**IAM for the executor role (minimum):** `rds:Describe*`, `rds:PromoteReadReplica`, `rds:RestoreDBInstanceFromDBSnapshot`,
+`rds:RestoreDBInstanceToPointInTime`, `rds:ModifyDBInstance`, `rds:CreateDBSnapshot`, `rds:CreateDBInstanceReadReplica`,
+`rds:AddTagsToResource`, `secretsmanager:GetSecretValue|DescribeSecret|PutSecretValue|UpdateSecretVersionStage|CancelRotateSecret|RotateSecret`
+(scoped to `<env>/app/*`), `cloudwatch:GetMetricStatistics|DescribeAlarms`, `cloudtrail:LookupEvents`, `ssm:StartAutomationExecution`,
+`s3:PutObject` on the evidence bucket, plus K8s RBAC: get/list/patch on deployments, statefulsets, daemonsets, cronjobs and externalsecrets in the app namespace.
+
+**CI:** `shellcheck -x scripts/*.sh`, `yamllint`, a Python compile check, and `runbook-to-tracker.py` on every runbook (fails if a step table is malformed).
+Schedule a monthly DEV restore test (S3/S4 with `DRY_RUN=0`, followed by cleanup) to measure restore time and catch drift.

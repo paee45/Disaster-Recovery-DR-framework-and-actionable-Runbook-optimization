@@ -4,88 +4,69 @@
 
 | Term | Definition used in this framework |
 |---|---|
-| **Disaster** | An event where the in-region HA mechanisms (Multi-AZ, pod rescheduling, node replacement) cannot restore service within RTO. Examples: region-wide impairment, account compromise, or logical data corruption/ransomware. |
-| **Failover** | A planned or unplanned move of the write role and traffic to the DR region. |
-| **Switchover** | A *planned* failover with zero data loss (replication drained first). Used for drills and failback. |
-| **Failback** | Returning to the original primary region after recovery. This is a separate, planned change. |
-| **RPO** | The maximum acceptable data loss, measured in time (see [`04`](04-rpo-rto-measurement.md) for the exact formula). |
-| **RTO** | The maximum acceptable time from **impact start** to **business service restored** (verified by a synthetic transaction). |
-| **MTD** | Maximum Tolerable Downtime. The business limit. RTO must be below MTD with margin. |
+| **Disaster / DR event** | Any database event where normal operation cannot continue without a recovery action: instance/AZ loss, unrecoverable storage, data corruption, accidental deletion, security compromise |
+| **Recovery scenario** | One of **S1** Multi-AZ automatic failover, **S2** read-replica promotion, **S3** snapshot restore, **S4** point-in-time restore (PITR). See the [runbook catalogue](../runbooks/README.md) |
+| **Cutover** | Pointing the applications at the new primary by **updating the endpoint in the Secrets Manager secret**. External Secrets Operator syncs it into Kubernetes and Stakater Reloader rolls the pods. **No DNS change** |
+| **Failback / normalisation** | The planned work after recovery that returns to the standard topology (Multi-AZ + replica), config parity, IaC and monitoring. Always a separate change |
+| **RPO** | The maximum acceptable data loss, measured in time ([04](04-rpo-rto-measurement.md) gives the formula per scenario) |
+| **RTO** | The maximum acceptable time from **impact start (T0)** to **business service restored (T9)**, verified by synthetic business transactions |
 
-**Three failure classes need three different recoveries.** A runbook that only covers class A gives a false sense of safety.
+## 2. Environment topology & recovery options
 
-| Class | Example | Right recovery | Wrong recovery |
+| | DEV | UAT | PROD |
 |---|---|---|---|
-| A. Infrastructure loss | Region/AZ impairment, network partition | Promote the cross-region replica or fail over the Aurora global cluster | — |
-| B. Logical corruption | Bad migration, `DELETE` without `WHERE`, app bug | PITR to a new instance, then a selective data repair | Failover (the replica already holds the corruption) |
-| C. Security event | Ransomware, compromised credentials, malicious deletion | Restore from an **isolated, cross-account, Vault-Locked** AWS Backup copy into a clean account | Failover within the same compromised account |
+| RDS PostgreSQL topology | **Single primary** | **Primary + read replica**, no Multi-AZ | **Multi-AZ primary + read replica** |
+| S1 Multi-AZ auto failover | — | — (an AZ failure = primary down → S2/S4) | ✔ automatic, endpoint unchanged |
+| S2 Replica promotion | — | ✔ | ✔ |
+| S3 Snapshot restore | ✔ (the only path besides S4) | ✔ | ✔ |
+| S4 PITR (full cutover or surgical repair) | ✔ | ✔ | ✔ |
+| Example targets (`TODO(capstone)`: agree with the business) | RTO 8 h / RPO 24 h | RTO 4 h / RPO 1 h | RTO 1 h / RPO 5 min (S2), ≤ 15 min (S4), 0 (S1) |
+| Purpose in the DR programme | Test the **automation** (scripts, SSM, Reloader) | **Rehearse** every PROD runbook (except S1) | Real recovery + scheduled game days |
 
-## 2. Service tiering and targets
+### Failure class → scenario
 
-`TODO(capstone)`: replace these with targets the business has agreed and signed off.
-
-| Tier | Example | RPO | RTO | DR pattern (AWS) | Drill cadence |
-|---|---|---|---|---|---|
-| **T0 – Mission critical** | Payments, order capture | ≤ 1 min | ≤ 15–30 min | Aurora Global Database + warm-standby EKS, ARC routing | Quarterly switchover (UAT), semi-annual (PROD) |
-| **T1 – Business critical** | Core SaaS app (this capstone) | ≤ 5 min | ≤ 1 h | RDS PG cross-region read replica **or** Aurora Global, warm-standby EKS | Quarterly UAT, annual PROD |
-| **T2 – Important** | Reporting, internal tools | ≤ 1 h | ≤ 8 h | Pilot light: cross-region automated-backup replication, EKS from GitOps on demand | Semi-annual |
-| **T3 – Deferrable** | Sandboxes | ≤ 24 h | ≤ 72 h | Backup & restore (AWS Backup cross-region copy) | Annual restore test |
-
-> **Rule:** never publish an RTO that has not been *measured* in a drill. Publish the measured p90 across the last
-> three drills. Do not publish the design target.
-
-## 3. Environment DR matrix (DEV / UAT / PROD)
-
-| Aspect | DEV | UAT / Staging | PROD |
+| Failure | Example | Scenario | Why not the others |
 |---|---|---|---|
-| DR posture | None, or backup & restore | **Mirror of PROD DR topology**, so drills here are meaningful | Full tier-defined posture |
-| Purpose of DR in this env | Developer testing of automation code | **Rehearsal ground**. Every runbook change is drilled here first | Real recovery and scheduled game days |
-| Who can declare | Team lead | SRE on-call | Incident Commander + Service Owner (T0/T1 also need an exec approver) |
-| Change control | None | Standard change | Pre-approved **emergency change** referenced by the runbook ID |
-| Communications | Team chat only | Chat + email to UAT users / QA / implementation consultants | Full matrix ([`06`](06-communications.md)) |
-| Evidence retention | 30 days | 1 year | 7 years (Object Lock *compliance* mode, or as policy requires) |
-| Customer notice for drills | No | Notify customers who use UAT (e.g. implementation projects) ≥ 5 business days ahead | Per contract/SLA, typically ≥ 10 business days for a planned switchover |
+| Primary host/AZ failure | Hardware, AZ power, OS patch failover | **S1** (PROD), **S2** (UAT, or PROD if S1 fails) | — |
+| Primary unrecoverable / storage | Storage-full that cannot be fixed fast, both AZs impaired | **S2**, else **S4** latest-restorable | — |
+| **Logical corruption** | Bad migration, `DELETE` without `WHERE`, app bug | **S4** (surgical or full) | S1/S2 replicate the damage |
+| Accidental deletion of the instance | `delete-db-instance` | **S4** from retained automated backups, else **S3** final snapshot | — |
+| **Security / ransomware** | Compromised credentials, malicious drop/encrypt | **S3** from an isolated cross-account AWS Backup copy (Vault Lock) into a clean account; Security IR lead is IC | Same-account backups may be tampered with |
+| Need an older state than retention | Audit, a late-discovered corruption | **S3** (manual/AWS Backup snapshot) | PITR window exceeded |
 
-## 4. Decision authority (who can press the button)
+## 3. Decision authority
 
 ```
-                 Detect (alarm / customer report)
-                              │
-                 ┌────────────▼────────────┐
-                 │ On-call SRE triage      │  ≤ 10 min
-                 │ Is in-region HA enough? │──Yes──► normal incident process
-                 └────────────┬────────────┘
-                              │ No / unknown
-                 ┌────────────▼────────────┐
-                 │ Incident Commander      │  Declares "DR Assessment" (SEV1)
-                 │ opens bridge + channel  │  Starts the RTO clock (T1)
-                 └────────────┬────────────┘
-                              │
-            ┌─────────────────▼─────────────────────┐
-            │ GO / NO-GO gate (Gate G1)             │
-            │ Inputs: AWS Health, ARC, replica lag, │
-            │ estimated data loss, ETA from AWS     │
-            │ Decision makers: IC + Service Owner   │
-            │ (+ exec approver for T0/T1 if data    │
-            │ loss > 0 is accepted)                 │
-            └───────┬─────────────────────┬─────────┘
-                 GO │                     │ NO-GO (wait for in-region recovery,
-                    ▼                     ▼  re-evaluate every 15 min)
-            Execute RB-DR-RDS-001    Keep "DR Assessment" active
+ Detect (alarm / customer report / RDS event)
+          │
+ On-call triage (≤ 10 min) ── Multi-AZ failover in progress? ──yes──► RB-PROD-S1 (time box 5 min)
+          │ no / time box exceeded
+ Incident Commander declares SEV, opens channel + bridge  (T1)
+          │
+ Scenario choice via the decision tree (runbooks/README.md §2) ── DECISION recorded
+          │
+ Gate G1 (approvers per env, below) — accepts the data-loss estimate
+          │
+ Execute the env-specific runbook; gates G2 (point of no return), G3 (cutover), G4 (restored)
 ```
 
-**Decision rule of thumb (put the agreed version in the runbook):**
+| Env | Declares | G1 approvers | Data loss > RPO accepted by |
+|---|---|---|---|
+| DEV | Engineer | Team lead | Team lead |
+| UAT | SRE on-call | SRE on-call + QA lead | QA lead / project lead |
+| PROD | Incident Commander | IC + Service Owner (2 approvals in SSM) | **Exec approver** (business decision) |
 
-- AWS ETA unknown **or** ETA > (RTO − failover duration measured in drills) → **GO**.
-- Expected data loss (replica lag) > RPO → escalate to the exec approver. Accepting data loss is a **business** decision, not an engineering one.
-- **Pre-authorise** the decision for T0/T1. If the IC cannot reach the approver within 15 min, the IC can proceed. Record this in the DR policy.
+**Pre-authorise** the PROD decision: if the approver cannot be reached within 15 min, the IC may proceed. Record this in the DR policy.
 
-## 5. Core principles (architecture and operations)
+## 4. Core principles
 
-1. **Static stability.** The DR region must not need the failed region for anything: control-plane calls, IAM Identity Center, CI/CD, container registry (use ECR cross-region replication), secrets (replica secrets), KMS (multi-Region keys), DNS (Route 53 data plane, or ARC routing controls).
-2. **Data-plane over control-plane.** Prefer recovery actions that use data-plane operations (ARC routing control state, Route 53 health-check driven records) over control-plane calls, which can be impaired during regional events.
-3. **Pre-provision, don't create.** EKS cluster, node groups (scaled-down), IAM roles, security groups, parameter groups and replica secrets already exist in the DR region. Manage them with IaC and check for drift weekly.
-4. **One source of truth for the runbook.** Keep it in Git (versioned and reviewed). Mirror read-only copies to (a) the incident tool and (b) an offline PDF in the DR region's S3 bucket and with each IC.
-5. **Automate the boring, gate the irreversible.** Promotion, DNS cut-over and fencing are irreversible or high-blast-radius. Each needs a human approval step, even when everything else is automated.
-6. **Least privilege, with break-glass.** A dedicated `DRExecutorRole` in each account (MFA, session-recorded, alerting on assume). Do not use personal admin.
-7. **Treat drills as production changes.** They need change tickets, comms, evidence and a PIR. Drills that "don't count" create runbooks that don't work.
+1. **Recover the business service, not the database.** Done = a synthetic business transaction passes.
+2. **Choose the scenario by the failure class, not by habit.** Never promote a replica for a data problem.
+3. **One cutover mechanism everywhere:** secret update → ESO → Reloader. It is the same in DEV, UAT and PROD, so DEV/UAT drills exercise the exact PROD path.
+4. **Fence the old instance.** With secret-based cutover, stray writers (unrolled pods, CronJobs, scripts) can keep writing to the old DB.
+5. **Restores are never "as-is".** Pass hardening flags explicitly and run the parity check (SGs, parameter group, Multi-AZ, backups, tags, alarms, IaC).
+6. **Decide with humans, execute with code.** Irreversible steps have gates with recorded approvers (SSM `aws:approve`).
+7. **Every step writes a timestamp, and evidence is a by-product.** RTO/RPO are computed, not reconstructed.
+8. **Every recovery has a normalisation runbook.** The incident is not over until the DR posture (Multi-AZ + replica in PROD) is restored.
+9. **An untested runbook does not exist.** Each env/scenario pair has a drill cadence ([07](07-testing-and-drill-program.md)).
+10. **Every execution improves the runbook.** Deviations become tickets; the runbook version and change log reference the PIR.

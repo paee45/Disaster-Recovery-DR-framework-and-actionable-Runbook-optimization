@@ -1,4 +1,4 @@
--- 10-preflight-replica.sql — run on the DR REPLICA (P1-S06 and P2-S05, the final capture before promotion).
+-- 10-preflight-replica.sql — run on the READ REPLICA (S2 pre-flight and the final capture right before promotion).
 -- Output is the RPO evidence: last received/replayed LSN and last replayed commit timestamp.
 SELECT 'observed_at',          clock_timestamp()::text;
 SELECT 'in_recovery',          pg_is_in_recovery()::text;

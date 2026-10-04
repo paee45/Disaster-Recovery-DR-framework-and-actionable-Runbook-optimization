@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# dr-lib.sh — shared helpers for DR runbooks. Source it, do not execute it.
-#   source automation/scripts/dr-lib.sh && dr_init
+# dr-lib.sh — shared helpers for all RDS DR runbooks. Source it, do not execute it.
+#   source env/<env>.env && source automation/scripts/dr-lib.sh && dr_init <SCENARIO>
+#   dr_set_target <db-instance-id>      # the instance that is / becomes the primary
 # Requires: aws cli v2, jq, psql, kubectl. All timestamps are UTC ISO-8601.
 
-: "${DR_ID:?set DR_ID (see runbook env block)}"
-: "${DR_REGION:?set DR_REGION}"
-: "${DR_DB:?set DR_DB}"
-
-DR_EVIDENCE_DIR="${DR_EVIDENCE_DIR:-$(pwd)/evidence/${DR_ID}}"
-DR_TIMELINE="${DR_EVIDENCE_DIR}/timeline.jsonl"
+: "${DR_ENV:?source env/<env>.env first}"
+: "${SECRET_ID:?SECRET_ID missing in env profile}"
 
 _dr_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 _dr_actor() { aws sts get-caller-identity --query Arn --output text 2>/dev/null || echo "unknown"; }
 
-# dr_init — create evidence dirs, record start, export DR_DSN for the DR instance endpoint.
+# dr_init <scenario> — S1|S2|S3|S4|FB-S1|FB-S2|FB-S3S4. Creates the evidence dir and starts the timeline.
 dr_init() {
+  export DR_SCENARIO="${1:?scenario, e.g. S2}"
+  export DR_ID="${DR_ID:-DR-$(date -u +%Y%m%d-%H%M)-${DR_ENV}-${DR_SCENARIO}}"
+  export DR_EVIDENCE_DIR="${DR_EVIDENCE_DIR:-$(pwd)/evidence/${DR_ID}}"
+  export DR_TIMELINE="${DR_EVIDENCE_DIR}/timeline.jsonl"
   mkdir -p "${DR_EVIDENCE_DIR}"/{approvals,db,aws,k8s,app,comms}
   DR_ACTOR="$(_dr_actor)"; export DR_ACTOR
-  dr_mark RUNBOOK_START "runbook=RB-DR-RDS-001 git=$(git rev-parse --short HEAD 2>/dev/null || echo n/a) mode=${DR_MODE:-unplanned}"
-  dr_set_dsn
+  export OLD_DB="${OLD_DB:-$PRIMARY_DB}"
+  dr_mark RUNBOOK_START "scenario=${DR_SCENARIO} env=${DR_ENV} git=$(git rev-parse --short HEAD 2>/dev/null || echo n/a) mode=${DR_MODE:-unplanned}"
+  echo "DR_ID=${DR_ID}  evidence=${DR_EVIDENCE_DIR}"
 }
 
-# dr_mark <marker> [note] [--at <iso-ts>] — append a timeline event (T0..T10, step ids, decisions).
+# dr_mark <marker> [note...] [--at <iso-ts>] — append a timeline event (T0..T10, step ids, decisions).
 dr_mark() {
   local marker="$1"; shift || true
   local note="" at=""
@@ -32,13 +34,14 @@ dr_mark() {
     esac
   done
   jq -cn --arg ts "${at:-$(_dr_now)}" --arg recorded "$(_dr_now)" --arg m "$marker" \
-        --arg note "$note" --arg actor "${DR_ACTOR:-unknown}" --arg env "${DR_ENV:-unknown}" --arg id "$DR_ID" \
-        '{ts:$ts, recorded_at:$recorded, marker:$m, note:$note, actor:$actor, env:$env, dr_id:$id}' \
-    >> "${DR_TIMELINE}"
+        --arg note "$note" --arg actor "${DR_ACTOR:-unknown}" --arg env "${DR_ENV}" \
+        --arg id "${DR_ID:-unset}" --arg sc "${DR_SCENARIO:-unset}" \
+        '{ts:$ts, recorded_at:$recorded, marker:$m, note:$note, actor:$actor, env:$env, dr_id:$id, scenario:$sc}' \
+    >> "${DR_TIMELINE:?run dr_init first}"
   echo "[timeline] ${at:-$(_dr_now)} ${marker} ${note}"
 }
 
-# dr_run <name> <cmd...> — run a command, tee stdout+stderr into evidence, mark start/end + exit code.
+# dr_run <name> <cmd...> — run a command, tee output into evidence, mark start/end + exit code.
 dr_run() {
   local name="$1"; shift
   local out="${DR_EVIDENCE_DIR}/${name}.txt"
@@ -49,14 +52,31 @@ dr_run() {
   return "${rc}"
 }
 
-# dr_set_dsn — build libpq conninfo for the DR *instance* endpoint (not the CNAME, which may still point to Region A).
-dr_set_dsn() {
-  local endpoint secret
-  endpoint="$(aws rds describe-db-instances --region "$DR_REGION" --db-instance-identifier "$DR_DB" \
-              --query 'DBInstances[0].Endpoint.Address' --output text)"
-  secret="$(aws secretsmanager get-secret-value --region "$DR_REGION" --secret-id "${SECRET_ID}" \
-              --query SecretString --output text)"
+# dr_endpoint <db-id> — print "address port" of an instance (empty if it does not exist).
+dr_endpoint() {
+  aws rds describe-db-instances --db-instance-identifier "$1" \
+    --query 'DBInstances[0].[Endpoint.Address,Endpoint.Port]' --output text 2>/dev/null
+}
+
+# dr_dsn <db-id> — libpq conninfo for an instance endpoint using the APP credentials from $SECRET_ID.
+dr_dsn() {
+  local addr port secret
+  read -r addr port <<<"$(dr_endpoint "$1")"
+  [[ -z "$addr" || "$addr" == "None" ]] && return 1
+  secret="$(aws secretsmanager get-secret-value --secret-id "${SECRET_ID}" --query SecretString --output text)"
   PGUSER="$(jq -r .username <<<"$secret")"; PGPASSWORD="$(jq -r .password <<<"$secret")"
   export PGUSER PGPASSWORD
-  export DR_DSN="host=${endpoint} port=5432 dbname=${DB_NAME:-app} sslmode=verify-full sslrootcert=${PGSSLROOTCERT:-$HOME/.postgresql/global-bundle.pem} connect_timeout=5 application_name=dr-runbook"
+  echo "host=${addr} port=${port:-5432} dbname=${DB_NAME:-app} sslmode=verify-full sslrootcert=${PGSSLROOTCERT:-$HOME/.postgresql/global-bundle.pem} connect_timeout=5 application_name=dr-runbook"
+}
+
+# dr_set_target <db-id> — export TARGET_DB/TARGET_DSN and (if reachable) OLD_DSN.
+dr_set_target() {
+  export TARGET_DB="${1:?db instance id}"
+  TARGET_DSN="$(dr_dsn "$TARGET_DB")" || echo "WARN: $TARGET_DB not found yet (restore in progress?) — re-run dr_set_target when available"
+  export TARGET_DSN
+  if [[ -n "${OLD_DB:-}" && "$OLD_DB" != "$TARGET_DB" ]]; then
+    OLD_DSN="$(dr_dsn "$OLD_DB" 2>/dev/null)" || OLD_DSN=""
+    export OLD_DSN
+  fi
+  dr_mark TARGET_SET "target=${TARGET_DB} old=${OLD_DB:-none}"
 }

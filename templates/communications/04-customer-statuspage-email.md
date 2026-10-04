@@ -23,6 +23,12 @@ service. We will provide an update by {{hh:mm}} UTC.
 ```
 **Email subject:** `[{{ENV}}] {{SERVICE}} service disruption — we are investigating`
 
+### 1b. S1 — brief automatic failover (PROD), only if customer-visible (> 2 min or reported)
+```
+Resolved — Between {{hh:mm}} and {{hh:mm}} UTC some requests to {{SERVICE}} failed during an automatic switch to
+redundant database infrastructure. Service recovered automatically; no data was affected. We apologise for the disruption.
+```
+
 ### 2. [Failover Initiated]
 ```
 Identified — We have identified an infrastructure issue affecting {{SERVICE}} and are moving the service to our

@@ -1,0 +1,112 @@
+description: |
+  ## DR-RdsRestoreToPointInTime  (S4 — DEV/UAT/PROD)
+  PITR into a NEW instance with explicit hardening (RestoreTime ISO-8601, or 'latest') → wait available →
+  gate G3 → DR-UpdateDbSecretEndpoint. For S4 mode B (surgical repair) stop after WaitAvailable (reject G3).
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: AWS::IAM::Role::Arn
+  SourceDbInstanceId:
+    type: String
+  TargetDbInstanceId:
+    type: String
+    description: e.g. app-pg-prod-p202610041015
+  RestoreTime:
+    type: String
+    description: ISO-8601 UTC (e.g. 2026-10-04T10:15:41Z) or 'latest'
+  DbInstanceClass:
+    type: String
+  DbSubnetGroupName:
+    type: String
+  VpcSecurityGroupIds:
+    type: StringList
+  DbParameterGroupName:
+    type: String
+  MultiAZ:
+    type: Boolean
+    default: false
+  DeletionProtection:
+    type: Boolean
+    default: true
+  SecretId:
+    type: String
+  DrId:
+    type: String
+  Approvers:
+    type: StringList
+  MinRequiredApprovals:
+    type: Integer
+    default: 1
+mainSteps:
+  - name: Restore
+    action: aws:executeScript
+    timeoutSeconds: 300
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        src: '{{ SourceDbInstanceId }}'
+        dst: '{{ TargetDbInstanceId }}'
+        ts: '{{ RestoreTime }}'
+        cls: '{{ DbInstanceClass }}'
+        subnets: '{{ DbSubnetGroupName }}'
+        sgs: '{{ VpcSecurityGroupIds }}'
+        pg: '{{ DbParameterGroupName }}'
+        maz: '{{ MultiAZ }}'
+        dp: '{{ DeletionProtection }}'
+        dr_id: '{{ DrId }}'
+      Script: |
+        import boto3, datetime
+        def handler(e, context):
+            rds = boto3.client('rds')
+            args = dict(TargetDBInstanceIdentifier=e['dst'], DBInstanceClass=e['cls'], DBSubnetGroupName=e['subnets'],
+                        VpcSecurityGroupIds=e['sgs'], DBParameterGroupName=e['pg'], MultiAZ=bool(e['maz']),
+                        DeletionProtection=bool(e['dp']), PubliclyAccessible=False, CopyTagsToSnapshot=True,
+                        EnableCloudwatchLogsExports=['postgresql', 'upgrade'],
+                        Tags=[{'Key': 'dr-restore', 'Value': e['dr_id']}])
+            try:
+                rds.describe_db_instances(DBInstanceIdentifier=e['src'])
+                args['SourceDBInstanceIdentifier'] = e['src']
+            except rds.exceptions.DBInstanceNotFoundFault:   # deleted source: use retained automated backups
+                ab = rds.describe_db_instance_automated_backups(DBInstanceIdentifier=e['src'])['DBInstanceAutomatedBackups'][0]
+                args['SourceDbiResourceId'] = ab['DbiResourceId']
+            if e['ts'] == 'latest':
+                args['UseLatestRestorableTime'] = True
+            else:
+                args['RestoreTime'] = datetime.datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
+            r = rds.restore_db_instance_to_point_in_time(**args)['DBInstance']
+            return {'id': r['DBInstanceIdentifier'], 'status': r['DBInstanceStatus']}
+  - name: WaitAvailable
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 21600
+    onFailure: Abort
+    inputs:
+      Service: rds
+      Api: DescribeDBInstances
+      DBInstanceIdentifier: '{{ TargetDbInstanceId }}'
+      PropertySelector: $.DBInstances[0].DBInstanceStatus
+      DesiredValues: [available]
+  - name: GateG3Cutover
+    action: aws:approve
+    timeoutSeconds: 14400
+    onFailure: Abort
+    inputs:
+      Message: |
+        [{{ DrId }}] G3 CUTOVER: {{ TargetDbInstanceId }} restored to {{ RestoreTime }} from {{ SourceDbInstanceId }}.
+        Mode B (surgical repair)? REJECT this gate. Mode A: restore-point check, parity, warm-up,
+        `dr-secret-cutover.sh precheck`, fence old instance — then approve.
+      MinRequiredApprovals: '{{ MinRequiredApprovals }}'
+      Approvers: '{{ Approvers }}'
+  - name: UpdateSecret
+    action: aws:executeAutomation
+    onFailure: Abort
+    isEnd: true
+    inputs:
+      DocumentName: DR-UpdateDbSecretEndpoint
+      RuntimeParameters:
+        AutomationAssumeRole: '{{ AutomationAssumeRole }}'
+        SecretId: '{{ SecretId }}'
+        DbInstanceId: '{{ TargetDbInstanceId }}'
+        DrId: '{{ DrId }}'

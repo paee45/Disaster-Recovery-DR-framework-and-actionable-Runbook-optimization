@@ -1,6 +1,6 @@
--- 30-reconciliation-hints.sql — Phase 5 (P5-S02). Run on the OLD primary, started ISOLATED
--- (fenced SG, or restored from the pre-failback snapshot). Purpose: find writes that never reached the DR side.
--- :cutoff = last replicated heartbeat ts recorded on the new primary (RPO_LAST_REPLICATED).
+-- 30-reconciliation-hints.sql — S2 FB P2-S02 / S3-S4 reconciliation. Run on the OLD primary (fenced) or its snapshot restore
+-- Purpose: find writes on the old primary after the cutoff that never reached the new primary.
+-- :cutoff = S2: RPO_LAST_REPLICATED heartbeat ts; S3: snapshot create time; S4: RESTORE_TS.
 --   psql "$OLD_DSN" -v cutoff="'2026-10-04T10:15:42.123Z'" -f 30-reconciliation-hints.sql
 SELECT 'old_primary_last_heartbeat', ts FROM dr.heartbeat WHERE id = 1;
 

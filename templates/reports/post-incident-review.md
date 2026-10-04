@@ -22,12 +22,18 @@
 - Contributing (detection, decision, tooling, runbook, people, vendor):
 
 ## 5. DR execution assessment
-| Phase | Planned budget | Actual | Gap reason |
+Scenario: {{S1|S2|S3|S4 (mode)}} · Runbook: RB-{{ENV}}-{{…}} v{{x}} · FB runbook: {{…}}
+
+| Segment | Planned budget | Actual | Gap reason |
 |---|---|---|---|
-| P1 Pre-flight + G1 | 15 | | |
-| P2 DB failover | 15 | | |
-| P3 Compute | 10 | | |
-| P4 Verify → T9 | 15 | | |
+| Declare (T0→T1) | | | |
+| Decision incl. scenario choice (T1→T2) | | | |
+| DB recovery: failover/promote/restore (T4→T5) | | | |
+| Secret cutover + Reloader rollouts (T6→T7) | | | |
+| Validation to restored (T7→T9) | | | |
+| Consumers not auto-reloaded / parity diffs / fencing waivers | | | |
+
+Scenario-specific questions: see [CP-06](../../runbooks/common/CP-06-post-incident-review.md).
 
 ## 6. Communications assessment
 | Audience | First message (min after T0) | Updates on time (%) | Issues |

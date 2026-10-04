@@ -1,0 +1,89 @@
+description: |
+  ## DR-RdsRestoreFromSnapshot  (S3 — DEV/UAT/PROD)
+  Restore a snapshot into a NEW instance with explicit hardening → wait available →
+  gate G3 (validate data, parity, password precheck, fence old instance) → DR-UpdateDbSecretEndpoint.
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: AWS::IAM::Role::Arn
+  SnapshotId:
+    type: String
+  TargetDbInstanceId:
+    type: String
+    description: e.g. app-pg-prod-r202610041015
+  DbInstanceClass:
+    type: String
+  DbSubnetGroupName:
+    type: String
+  VpcSecurityGroupIds:
+    type: StringList
+  DbParameterGroupName:
+    type: String
+  MultiAZ:
+    type: Boolean
+    default: false
+  DeletionProtection:
+    type: Boolean
+    default: true
+  SecretId:
+    type: String
+  DrId:
+    type: String
+  Approvers:
+    type: StringList
+  MinRequiredApprovals:
+    type: Integer
+    default: 1
+mainSteps:
+  - name: Restore
+    action: aws:executeAwsApi
+    onFailure: Abort
+    inputs:
+      Service: rds
+      Api: RestoreDBInstanceFromDBSnapshot
+      DBInstanceIdentifier: '{{ TargetDbInstanceId }}'
+      DBSnapshotIdentifier: '{{ SnapshotId }}'
+      DBInstanceClass: '{{ DbInstanceClass }}'
+      DBSubnetGroupName: '{{ DbSubnetGroupName }}'
+      VpcSecurityGroupIds: '{{ VpcSecurityGroupIds }}'
+      DBParameterGroupName: '{{ DbParameterGroupName }}'
+      MultiAZ: '{{ MultiAZ }}'
+      PubliclyAccessible: false
+      DeletionProtection: '{{ DeletionProtection }}'
+      CopyTagsToSnapshot: true
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+      Tags:
+        - Key: dr-restore
+          Value: '{{ DrId }}'
+  - name: WaitAvailable
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 21600
+    onFailure: Abort
+    inputs:
+      Service: rds
+      Api: DescribeDBInstances
+      DBInstanceIdentifier: '{{ TargetDbInstanceId }}'
+      PropertySelector: $.DBInstances[0].DBInstanceStatus
+      DesiredValues: [available]
+  - name: GateG3Cutover
+    action: aws:approve
+    timeoutSeconds: 14400
+    onFailure: Abort
+    inputs:
+      Message: |
+        [{{ DrId }}] G3 CUTOVER: {{ TargetDbInstanceId }} restored from {{ SnapshotId }}.
+        Before approving: restore-point check (05), parity (CP-03), warm-up, `dr-secret-cutover.sh precheck`, fence old instance (CP-04).
+      MinRequiredApprovals: '{{ MinRequiredApprovals }}'
+      Approvers: '{{ Approvers }}'
+  - name: UpdateSecret
+    action: aws:executeAutomation
+    onFailure: Abort
+    isEnd: true
+    inputs:
+      DocumentName: DR-UpdateDbSecretEndpoint
+      RuntimeParameters:
+        AutomationAssumeRole: '{{ AutomationAssumeRole }}'
+        SecretId: '{{ SecretId }}'
+        DbInstanceId: '{{ TargetDbInstanceId }}'
+        DrId: '{{ DrId }}'
