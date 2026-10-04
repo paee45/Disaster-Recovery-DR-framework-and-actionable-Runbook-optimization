@@ -34,3 +34,14 @@ spec:
           labels: { severity: ticket }
           annotations:
             summary: "Stakater Reloader unavailable — DB endpoint cutovers would need manual rollout restarts"
+        - alert: DRReloaderReloadFailed
+          expr: sum by (namespace) (increase(reloader_reload_executed_total{success="false"}[10m])) > 0
+          labels: { severity: page }
+          annotations:
+            summary: "Reloader failed to restart workloads in {{ $labels.namespace }} — pods may still use the OLD DB endpoint (run k8s-secret-consumers.sh check)"
+        - alert: DRReloaderReloadExecuted
+          expr: sum by (namespace) (increase(reloader_reload_executed_total{success="true"}[5m])) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "Reloader restarted workloads in {{ $labels.namespace }} after a Secret change (expected during a DR cutover; unexpected otherwise)"
+            description: "Needs enableMetricsByNamespace: true in reloader-values.yaml for the namespace label."

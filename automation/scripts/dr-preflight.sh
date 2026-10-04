@@ -74,8 +74,18 @@ check_k8s() {
   local K="kubectl --context $EKS_CONTEXT -n $K8S_NS"
   if ! $K get ns "$K8S_NS" >/dev/null 2>&1; then fail "EKS $EKS_CONTEXT API not reachable"; return; fi
   pass "EKS $EKS_CONTEXT reachable"
-  local es; es="$($K get externalsecret "$K8S_SECRET" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
-  [[ "$es" == "True" ]] && pass "ExternalSecret $K8S_SECRET Ready" || fail "ExternalSecret $K8S_SECRET Ready='$es'"
+  if [[ "${SECRET_MODE:-eso}" == k8s ]]; then
+    local sj k missing="" owner
+    sj="$($K get secret "$K8S_SECRET" -o json 2>/dev/null)" || { fail "Secret $K8S_SECRET not found"; return; }
+    IFS=',' read -ra _keys <<<"${K8S_HOST_KEY:-DB_HOST}"
+    for k in "${_keys[@]}"; do jq -e --arg k "$k" '.data[$k]' <<<"$sj" >/dev/null || missing+="$k "; done
+    [[ -z "$missing" ]] && pass "Secret $K8S_SECRET has host keys ${K8S_HOST_KEY:-DB_HOST} (SECRET_MODE=k8s)" || fail "Secret $K8S_SECRET lacks keys: $missing"
+    owner="$(jq -r '[.metadata.ownerReferences[]? | select(.kind=="ExternalSecret") | .name] | join(",")' <<<"$sj")"
+    [[ -z "$owner" ]] && pass "Secret $K8S_SECRET not managed by ESO (direct update is safe)" || fail "Secret $K8S_SECRET is owned by ExternalSecret $owner — use SECRET_MODE=eso"
+  else
+    local es; es="$($K get externalsecret "$K8S_SECRET" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+    [[ "$es" == "True" ]] && pass "ExternalSecret $K8S_SECRET Ready" || fail "ExternalSecret $K8S_SECRET Ready='$es'"
+  fi
   local rl; rl="$(kubectl --context "$EKS_CONTEXT" get deploy -A -o json 2>/dev/null \
     | jq '[.items[] | select(.metadata.name | test("reloader")) | (.status.availableReplicas // 0)] | add // 0')"
   (( ${rl:-0} >= 1 )) && pass "Reloader available replicas=${rl}" || fail "Reloader not running — cutover will need manual restarts (dr-eks-rollout.sh restart)"

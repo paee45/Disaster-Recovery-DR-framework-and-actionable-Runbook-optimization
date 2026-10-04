@@ -4,7 +4,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 
 | Level | What | Changes anything real? | Command |
 |---|---|---|---|
-| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~75 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 86 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
@@ -53,6 +53,7 @@ What is covered:
 | E. Fencing | F1 read-only + F2 quarantine SG + un-fence; CronJob suspend/resume |
 | F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` from the baseline, harden → VALIDATED |
 | G. Evidence | **recorded session** `dr-session.sh` (transcript + history, password redacted, refusal visible, synced to S3), **`commands.jsonl` audit** (secret-string redacted, refusals logged), phase timers + **sync at phase end**, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
+| H. `SECRET_MODE=k8s` | plain Secret `app-db-direct` with **two host keys** (`POSTGRES_DB_HOST1` → app-d, annotated; `POSTGRES_DB_HOST2` → app-e, not annotated): show; refuses an ESO-owned Secret and a bad ID; pre-flight; cutover #1 → **both keys** = restored + annotations; ledger entry (id, old→new per key, old/new DB id); Reloader restarts app-d, app-e reported then restarted by `restart-stale`; **Reloader alert webhook received**; cutover #2 → replica; **`failback <id of #1>`** → both keys + both apps back on the old primary; `history` shows 3 entries; `rollback` undoes the failback; rollback refused when the Secret was changed outside the ledger |
 
 Mock limitations (documented, not hidden): moto keeps the replica link after promotion (patched in `moto_launcher.py`, the mock is fixed, not the scripts); no real replication lag/WAL; CloudTrail lookups return nothing; SSM documents are stored but not executed.
 

@@ -32,7 +32,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 | `env/*.env.example` | Per-environment variables (instance IDs, secrets, EKS context, targets) |
 | [`automation/`](automation/) | SSM Automation documents, scripts (cutover, Reloader wait, restore, fence, parity, evidence, KPIs, tracker generator), SQL, K8s manifests |
 | [`docs/`](docs/) | 00 strategy · 01 architecture · 02 runbook standards · 03 execution media/tooling · 04 RPO/RTO · 05 evidence/audit · 06 comms · 07 validation (no scheduled drills) · 08 capstone optimization · **09 ISO 27001 scope, control mapping & risk register** · **10 corrective action plan (UAT exercise 2026-08-04)** · 11 AWS CLI quick reference · **12 account & cluster safety (guardrails)** |
-| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; ~75 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
+| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 86 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
 | [`templates/`](templates/) | Comms (chat, leadership, vendor, customer/status page, planned drills), execution tracker, evidence manifest, drill report, PIR, runbook template |
 
 ## Ten rules this framework is built on
@@ -55,3 +55,12 @@ source env/uat.env && source automation/scripts/dr-lib.sh && dr_init S2
 ./automation/scripts/dr-preflight.sh replica                 # read-only checks
 python3 automation/scripts/runbook-to-tracker.py runbooks/uat/RB-UAT-S2-replica-promotion.md --expand -o tracker.csv
 ```
+
+## To-do / improvements (tracked, not yet done)
+| # | Item | Why | Now |
+|---|---|---|---|
+| 1 | **Adopt ESO for the DB secret** (`SECRET_MODE=eso`): Secrets Manager as the source of truth, ExternalSecret template mapping `host` → `POSTGRES_DB_HOST1`, `POSTGRES_DB_HOST2` | One audited source (CloudTrail), rotation support, no secret values in cluster manifests | `SECRET_MODE=k8s`: direct patch of the K8s Secret + ledger ConfigMap (`k8s-secret-endpoint.sh`) |
+| 2 | ESO mode: failback by change ID (custom Secrets Manager staging labels `DR-<id>` per version, or ledger as in k8s mode) | Today ESO mode only steps back one version (`AWSPREVIOUS`) | Use k8s mode, or `apply` with `TARGET_DB=<original>` |
+| 3 | Reloader alerts to the incident channel (Slack/Teams webhook Secret `reloader-alerts`) in UAT/PROD | Reloader has no UI | Example in `automation/k8s/reloader-values.yaml`; tested locally with a webhook sink |
+| 4 | Reloader metrics scraped (`serviceMonitor`) + `DRReloaderReloadFailed` alert routed | Detect a failed reload without looking | Rules in `automation/k8s/prometheus-rules.yaml` |
+| 5 | Annotate every DB consumer for Reloader (app-e style workloads) | Unannotated consumers keep the old endpoint | `k8s-secret-consumers.sh check` / `restart-stale` finds and restarts them |

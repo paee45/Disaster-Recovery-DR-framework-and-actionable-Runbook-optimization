@@ -8,3 +8,20 @@ reloader:
   enableHA: true                  # leader election, 2 replicas — a dead Reloader = manual restarts during DR
   deployment:
     replicas: 2                   # dr-preflight.sh checks available replicas of the deployment named *reloader*
+  # ── Notification: Reloader has NO UI. Every reload can post an alert to a chat webhook, and metrics go to Prometheus.
+  #    Keep the webhook URL in a Secret (not in Git): kubectl -n reloader create secret generic reloader-alerts \
+  #      --from-literal=on=true --from-literal=sink=slack --from-literal=url=https://hooks.slack.com/services/... \
+  #      --from-literal=info="cluster=eks-uat env=uat"
+  #    ALERT_SINK: slack | teams | gchat | (unset = raw text webhook). Message: "Reloader detected changes in <secret>…
+  #    Hence reloaded <deployment> in namespace <ns>" + ALERT_ADDITIONAL_INFO.
+  #    Then uncomment (Reloader will not start if the Secret is missing — create it first):
+  # deployment:
+  #   env:
+  #     existing:
+  #       reloader-alerts:
+  #         ALERT_ON_RELOAD: "on"
+  #         ALERT_SINK: "sink"
+  #         ALERT_WEBHOOK_URL: "url"
+  #         ALERT_ADDITIONAL_INFO: "info"
+  enableMetricsByNamespace: true  # reloader_reload_executed_total{success,namespace} → alert rule in prometheus-rules.yaml
+  # serviceMonitor: { enabled: true }   # if you run the Prometheus Operator

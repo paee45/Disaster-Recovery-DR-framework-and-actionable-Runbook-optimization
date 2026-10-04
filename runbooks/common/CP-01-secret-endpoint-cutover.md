@@ -1,10 +1,36 @@
-# CP-01 — Secret Endpoint Cutover (Secrets Manager → ESO → Reloader)
+# CP-01 — Secret Endpoint Cutover (K8s Secret or Secrets Manager → Reloader)
 
 **Used by:** S2, S3, S4 (all envs), and FB runbooks that change the instance identifier. **Not used by S1** (the Multi-AZ endpoint does not change).
 **Automation:** `automation/scripts/dr-secret-cutover.sh` or SSM `DR-UpdateDbSecretEndpoint`.
 **Budget:** 10 min (PROD), up to the slowest Deployment's rollout time.
 
-## How the chain works
+## Two modes — pick per environment (`SECRET_MODE` in `env/<env>.env`)
+
+| | `SECRET_MODE=k8s` — **simple, current default** | `SECRET_MODE=eso` — **target (to-do)** |
+|---|---|---|
+| Source of truth | The Kubernetes Secret itself | Secrets Manager secret (`SECRET_ID`) |
+| How the endpoint changes | `k8s-secret-endpoint.sh` patches **every** host key in `K8S_HOST_KEY` (e.g. `POSTGRES_DB_HOST1,POSTGRES_DB_HOST2`) to the same endpoint in **one** patch | `put-secret-value`, then ESO syncs the K8s Secret (its template must map `host` to every host key) |
+| Record of previous endpoint | **Ledger ConfigMap** `dr-endpoint-ledger-<secret>`: one entry per change with its **ID**, old→new value per key, old/new **DB identifier**, who/when; plus annotations on the Secret | Secrets Manager versions (`AWSPREVIOUS` = one step back only) + evidence |
+| Undo / failback | `rollback` (undo the latest change) or **`failback <id>`** (endpoint in place before any earlier change) | `rollback` (one step) or `apply` with `TARGET_DB=<original>` |
+| Extra components | none (kubectl only) | ESO + IAM for ESO |
+| Caveat | Not for a Secret owned by an ExternalSecret (ESO would revert it) — the tool **refuses** that | Rotation must be suspended during the cutover |
+
+**Change IDs (reference for failback):** every change carries an ID = the DR id of the event, format
+`DR-<yyyymmdd>-<hhmm>-<env>-<scenario>` (UTC), e.g. `DR-20261004-0930-uat-S3`; a failback gets its own id
+(`DR-20261005-1000-uat-FB-S3S4`) and references the change it reverses (`ref`). Several DRs/failbacks in a row are
+fine: `dr-secret-cutover.sh history` lists them all, and `failback <id>` jumps back to the state before any of them.
+Optional `DR_TICKET=INC-1234` is stored in each entry.
+
+```bash
+./automation/scripts/dr-secret-cutover.sh show       # current endpoint per key + last change id / DB id
+./automation/scripts/dr-secret-cutover.sh history    # #1 CUTOVER DR-…-S3  app-pg-uat → app-pg-uat-r2026…  POSTGRES_DB_HOST1=… by …
+#2 …
+./automation/scripts/dr-secret-cutover.sh failback DR-20261004-0930-uat-S3      # back to the endpoint before that change
+```
+The same is available without the DR scripts (manual use, any secret):
+`automation/scripts/k8s-secret-endpoint.sh --context $EKS_CONTEXT -n $K8S_NS -s $K8S_SECRET -k $K8S_HOST_KEY {show|history|set|rollback|failback}`.
+
+## How the chain works (SECRET_MODE=eso; in k8s mode the first two boxes are replaced by one direct patch)
 
 ```
  put-secret-value (host=<TARGET_DB endpoint>)          Secrets Manager: new version = AWSCURRENT
@@ -51,9 +77,22 @@
 
 Only valid while OLD_DB is still intact and writable, i.e. **before** writes have landed on TARGET_DB that you would lose.
 ```bash
-./automation/scripts/dr-secret-cutover.sh rollback     # moves AWSCURRENT back to the saved previous VersionId,
-                                                       # force-syncs ESO; Reloader rolls the pods again
+./automation/scripts/dr-secret-cutover.sh rollback     # k8s: undo the latest ledger change (refused if the Secret was
+                                                       #      changed outside the ledger since — check `show`)
+                                                       # eso: AWSCURRENT back to the saved VersionId + ESO force-sync
+./automation/scripts/dr-secret-cutover.sh failback <change-id>   # k8s: endpoint in place BEFORE that change (any depth)
 ```
+
+## Notification — did Reloader restart the pods?
+Reloader has **no UI**. Three ways to see what it did:
+1. **Chat alert per reload** (recommended): `ALERT_ON_RELOAD=true` + `ALERT_SINK=slack|teams|gchat` + webhook URL in a
+   Secret (see `automation/k8s/reloader-values.yaml`). Message: *"Reloader detected changes in secret app-db-direct… Hence
+   reloaded app-d in namespace app"* + cluster info. Post it to the incident channel during DR.
+2. **Metrics**: `reloader_reload_executed_total{success, namespace}` → alerts `DRReloaderReloadFailed` (page) and
+   `DRReloaderReloadExecuted` (info) in `automation/k8s/prometheus-rules.yaml`.
+3. **Our own report** (evidence): `dr-eks-rollout.sh wait` writes `reload-report-<secret>.txt` (RELOADED / RELOADER
+   FAILED → manual restart / UNANNOTATED → SKIPPED), and `k8s-secret-consumers.sh check` lists pods still on the old secret.
+
 Equivalent manual command:
 `aws --profile $AWS_PROFILE --region $AWS_REGION secretsmanager update-secret-version-stage --secret-id $SECRET_ID --version-stage AWSCURRENT --move-to-version-id <prev> --remove-from-version-id <new>`
 

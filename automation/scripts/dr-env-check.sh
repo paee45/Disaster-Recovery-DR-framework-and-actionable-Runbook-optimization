@@ -21,6 +21,7 @@ for v in "${req[@]}"; do
   else ok "$v=$val"; fi
 done
 [[ -n "${K8S_HOST_KEY:-}" ]] && ok "K8S_HOST_KEY=$K8S_HOST_KEY" || warn "K8S_HOST_KEY not set (default DB_HOST)"
+[[ "${SECRET_MODE:-eso}" =~ ^(k8s|eso)$ ]] && ok "SECRET_MODE=${SECRET_MODE:-eso}" || bad "SECRET_MODE must be k8s or eso"
 [[ -n "${VERIFY_TABLES:-}" ]] && ok "VERIFY_TABLES set" || warn "VERIFY_TABLES empty — compare-counts unavailable"
 
 if [[ -z "${AWS_PROFILE:-}" || -z "${EKS_CONTEXT:-}" ]]; then echo "ENV CHECK: FAIL — AWS_PROFILE and EKS_CONTEXT are mandatory"; exit 1; fi

@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-e
+  namespace: app
+  labels:
+    app: app-e
+    dr.example.com/db-consumer: "true"
+    dr.example.com/restart-order: "3"
+  # NO Reloader annotation on purpose: must be found by k8s-secret-consumers.sh check
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-e } }
+  template:
+    metadata:
+      labels: { app: app-e }
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom: [ { secretRef: { name: app-db-direct } } ]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # reads POSTGRES_DB_HOST2 ONCE at start (like a real app); session visible as application_name=direct-e
+              echo "start host=$POSTGRES_DB_HOST2"
+              while true; do
+                PGPASSWORD="$POSTGRES_DB_PASSWORD" psql "host=$POSTGRES_DB_HOST2 port=$POSTGRES_DB_PORT dbname=$POSTGRES_DB_NAME user=$POSTGRES_DB_USER sslmode=disable connect_timeout=3 application_name=direct-e" \
+                  -XAtqc "select pg_sleep(30)" >/dev/null 2>&1 || { echo "db error on $POSTGRES_DB_HOST2"; sleep 2; }
+              done
+          resources: { requests: { cpu: 5m, memory: 16Mi } }

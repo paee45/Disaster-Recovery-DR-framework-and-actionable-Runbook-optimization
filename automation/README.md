@@ -9,6 +9,7 @@
 | `scripts/dr-fence-instance.sh` | CP-04 | `readonly` (F1), `quarantine` (F2), `restore` |
 | `scripts/dr-secret-cutover.sh` | **CP-01** | `precheck`, `fix-password`, `apply` (secret → ESO → Reloader wait), `rollback` |
 | `scripts/dr-eks-rollout.sh` | CP-01, S1 | `inventory`, `snapshot-generations`, `wait` (verifies the Reloader bump, falls back to a restart), `restart`, `check`, `restart-stale`, `suspend/resume-cronjobs` |
+| `scripts/k8s-secret-endpoint.sh` | CP-01 (`SECRET_MODE=k8s`, manual tool) | Standalone: `show`, `history`, `set` (every host key → same endpoint, one patch), `rollback` (undo last), `failback --to <id>`. Ledger ConfigMap `dr-endpoint-ledger-<secret>` records each change ID, old→new per key and old/new DB identifier. Refuses ESO-owned Secrets |
 | `scripts/k8s-secret-consumers.sh` | CP-01 (manual tool) | Standalone: `list`, `check` (STALE = pods older than the Secret change), `restart` (only STALE, in restart-order), `restart-one`. `--context` mandatory, `--expect-env` checks the cluster identity |
 | `scripts/rds-config-parity.sh [--alarms]` | CP-03 | Config + alarm diff between the old and new instance |
 | `scripts/dr-collect-evidence.sh` | CP-05 | CloudTrail/RDS/secret-metadata evidence, KPIs, SHA-256 manifest → S3 Object Lock |

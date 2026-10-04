@@ -172,7 +172,11 @@ eso_install() { helm --kube-context dr-local upgrade --install external-secrets 
   --set-string "extraEnv[1].name=AWS_STS_ENDPOINT,extraEnv[1].value=http://$IP_LS:4566" --wait --timeout 10m >/dev/null; }
 eso_install
 helm --kube-context dr-local upgrade --install reloader stakater/reloader -n reloader --create-namespace \
-  -f "$ROOT/automation/k8s/reloader-values.yaml" --wait --timeout 10m >/dev/null
+  -f "$ROOT/automation/k8s/reloader-values.yaml" \
+  --set-string reloader.deployment.env.secret.ALERT_ON_RELOAD=true \
+  --set-string reloader.deployment.env.secret.ALERT_WEBHOOK_URL=http://reloader-alert-sink.reloader.svc:8080/ \
+  --set-string reloader.deployment.env.secret.ALERT_ADDITIONAL_INFO="cluster=dr-local env=local" \
+  --wait --timeout 10m >/dev/null      # alerts → test sink (tests/local/k8s/33-reloader-alert-sink.yaml)
 helm --kube-context dr-local list -A
 
 log "cluster identity, ESO store, sample apps"

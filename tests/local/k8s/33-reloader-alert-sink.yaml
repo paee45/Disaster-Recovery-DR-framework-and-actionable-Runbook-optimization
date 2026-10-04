@@ -1,0 +1,32 @@
+# Receives Reloader's "reloaded" alerts (ALERT_ON_RELOAD=true, ALERT_WEBHOOK_URL → this service) and prints each
+# request to its log, standing in for a Slack/Teams/Google Chat webhook in the local test.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: reloader-alert-sink, namespace: reloader, labels: { app: reloader-alert-sink } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: reloader-alert-sink } }
+  template:
+    metadata: { labels: { app: reloader-alert-sink } }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: sink
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' | nc -l -p 8080 -w 5
+                echo; echo "--- end of request"
+              done
+          ports: [ { containerPort: 8080 } ]
+          resources: { requests: { cpu: 5m, memory: 8Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: reloader-alert-sink, namespace: reloader }
+spec:
+  selector: { app: reloader-alert-sink }
+  ports: [ { port: 8080, targetPort: 8080 } ]

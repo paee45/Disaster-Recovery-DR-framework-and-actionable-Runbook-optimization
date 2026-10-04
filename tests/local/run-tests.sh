@@ -187,6 +187,54 @@ g04() { for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFro
 t  G04 "SSM Automation documents accepted (create-document)"            g04
 t  G05 "tracker CSV generated for every runbook"                        bash -c "for f in '$ROOT'/runbooks/*/RB-*.md; do python3 '$S/runbook-to-tracker.py' \"\$f\" -o /dev/null || exit 1; done"
 
+echo "=== H. SECRET_MODE=k8s: plain Secret with TWO host keys, ledger IDs, failback by ID, Reloader alert"
+IP_REPLICA=172.30.0.22
+EPT=("$S/k8s-secret-endpoint.sh" --context dr-local -n app -s app-db-direct -k "POSTGRES_DB_HOST1,POSTGRES_DB_HOST2" --expect-env local)
+dhosts() { k get secret app-db-direct -o json | jq -r '[.data.POSTGRES_DB_HOST1, .data.POSTGRES_DB_HOST2] | map(@base64d) | join(",")'; }
+dsessions() { PGPASSWORD=masterpw psql "host=$1 dbname=app user=postgres sslmode=disable" -XAtqc \
+  "select coalesce(string_agg(distinct application_name, ',' order by application_name),'') from pg_stat_activity where application_name like 'direct-%'"; }
+wait_dsessions() { local _; for _ in $(seq 1 45); do [[ "$(dsessions "$1")" == "$2" ]] && return 0; sleep 2; done; echo "direct sessions on $1: '$(dsessions "$1")' expected '$2'"; return 1; }
+KMODE=(env SECRET_MODE=k8s K8S_SECRET=app-db-direct "K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2" K8S_PORT_KEY=POSTGRES_DB_PORT OLD_DB="$PRIMARY_DB")
+C1="DR-$(date -u +%Y%m%d-%H%M)-local-S3"; C2="DR-$(date -u +%Y%m%d-%H%M)-local-S2"; FB="DR-$(date -u +%Y%m%d-%H%M)-local-FB-S3S4"
+t  H01 "show: both host keys = old primary, not managed by ESO"         bash -c "'${EPT[0]}' ${EPT[*]:1} show | tee /dev/stderr | grep -q 'not managed by ESO' && [[ \$(command kubectl --context dr-local -n app get secret app-db-direct -o json | jq -r '[.data.POSTGRES_DB_HOST1,.data.POSTGRES_DB_HOST2]|map(@base64d)|join(\",\")') == $IP_OLD,$IP_OLD ]]"
+tf H02 "refuses to patch an ESO-owned Secret (ESO would revert it)"     "owned by ExternalSecret" "$S/k8s-secret-endpoint.sh" --context dr-local -n app -s "$K8S_SECRET" -k "$K8S_HOST_KEY" set --host 1.2.3.4 --db-id x --id DR-test-eso
+tf H03 "refuses an ID with spaces / bad characters"                      "must match" "${EPT[@]}" set --host 1.2.3.4 --db-id x --id "bad id"
+t  H04 "preflight (SECRET_MODE=k8s): host keys present, not ESO-owned"   bash -c "env SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2 '$S/dr-preflight.sh' restore | grep -q 'not managed by ESO'"
+dr_set_target "$RESTORED_DB" >/dev/null 2>&1
+h05() { "${KMODE[@]}" CUTOVER_ID="$C1" TARGET_DB="$RESTORED_DB" RESTART_UNANNOTATED=false "$S/dr-secret-cutover.sh" apply \
+        && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]] \
+        && [[ "$(k get secret app-db-direct -o jsonpath='{.metadata.annotations.dr\.example\.com/cutover-id}')" == "$C1" ]] \
+        && [[ "$(k get secret app-db-direct -o jsonpath='{.metadata.annotations.dr\.example\.com/endpoint-db-id}')" == "$RESTORED_DB" ]]; }
+t  H05 "cutover #1 (id $C1): BOTH keys → restored, annotations cutover-id + db-id" h05
+h06() { local e; e="$(k get configmap dr-endpoint-ledger-app-db-direct -o json | jq -c '[.data[] | fromjson] | sort_by(.seq) | last')"; echo "$e"
+        jq -e --arg id "$C1" --arg o "$IP_OLD" --arg n "$IP_RESTORED" --arg fdb "$PRIMARY_DB" --arg tdb "$RESTORED_DB" \
+          '.id == $id and .type == "cutover" and .fromDb == $fdb and .toDb == $tdb and .keys.POSTGRES_DB_HOST1.from == $o
+           and .keys.POSTGRES_DB_HOST2.to == $n and .port.to == "5432"' <<<"$e"; }
+t  H06 "ledger entry #1: id, old→new endpoint per key, old/new DB identifier" h06
+t  H07 "Reloader restarted app-d; app-e (no annotation) SKIPPED"          bash -c "grep -q 'deployment/app-d: RELOADED' '$DR_EVIDENCE_DIR/k8s/reload-report-app-db-direct.txt' && grep -q 'deployment/app-e: UNANNOTATED → SKIPPED' '$DR_EVIDENCE_DIR/k8s/reload-report-app-db-direct.txt'"
+h08() { local out rc; out="$("$S/k8s-secret-consumers.sh" --context dr-local -n app -s app-db-direct check)"; rc=$?; echo "$out"
+        (( rc != 0 )) && grep -qE '^STALE +deployment/app-e' <<<"$out" \
+        && "$S/k8s-secret-consumers.sh" --context dr-local -n app -s app-db-direct restart | tee /dev/stderr | grep -q '^restarted=1' \
+        && wait_dsessions "$IP_RESTORED" direct-d,direct-e; }
+t  H08 "stale check finds app-e (HOST2), restart-stale → both apps on restored" h08
+h09() { local l; for _ in $(seq 1 20); do l="$(k -n reloader logs deploy/reloader-alert-sink --tail=200 2>/dev/null)"; grep -q 'app-d' <<<"$l" && break; sleep 3; done
+        echo "$l" | tail -15; grep -q 'app-db-direct' <<<"$l" && grep -q 'app-d' <<<"$l" && grep -q 'cluster=dr-local' <<<"$l"; }
+t  H09 "Reloader ALERT webhook received the reload (secret, app-d, cluster info)" h09
+t  H10 "cutover #2 (id $C2): → promoted replica"                         bash -c "$(declare -f dhosts k); ${KMODE[*]} CUTOVER_ID=$C2 TARGET_DB=$REPLICA_DB '$S/dr-secret-cutover.sh' apply && [[ \$(dhosts) == $IP_REPLICA,$IP_REPLICA ]]"
+h11() { "${KMODE[@]}" CUTOVER_ID="$FB" "$S/dr-secret-cutover.sh" failback "$C1" && [[ "$(dhosts)" == "$IP_OLD,$IP_OLD" ]] \
+        && wait_dsessions "$IP_OLD" direct-d,direct-e; }
+t  H11 "failback to the endpoint before #1 (id $FB → ref $C1): both keys + both apps on old primary" h11
+h12() { "${KMODE[@]}" "$S/dr-secret-cutover.sh" history | tee /dev/stderr > "$LOGS/H12.hist"
+        [[ $(wc -l < "$LOGS/H12.hist") == 3 ]] && grep -q "CUTOVER  $C1" "$LOGS/H12.hist" && grep -q "CUTOVER  $C2" "$LOGS/H12.hist" \
+        && grep -q "FAILBACK  $FB  (ref $C1)" "$LOGS/H12.hist" \
+        && grep -q "CUTOVER  $C2  $RESTORED_DB → $REPLICA_DB" "$LOGS/H12.hist"; }   # "from" = what the Secret pointed at, not OLD_DB
+t  H12 "history: #1 cutover, #2 cutover, #3 failback (ref #1) — who/when/from→to" h12
+t  H13 "rollback undoes the latest change (failback) → replica again"   bash -c "$(declare -f dhosts k); ${KMODE[*]} CUTOVER_ID=$FB-undo '$S/dr-secret-cutover.sh' rollback && [[ \$(dhosts) == $IP_REPLICA,$IP_REPLICA ]]"
+h14() { k patch secret app-db-direct --type merge -p '{"data":{"POSTGRES_DB_HOST1":"'"$(printf 9.9.9.9 | base64)"'"}}' >/dev/null
+        "${EPT[@]}" rollback --id DR-test-refuse; local rc=$?
+        k patch secret app-db-direct --type merge -p '{"data":{"POSTGRES_DB_HOST1":"'"$(printf "$IP_REPLICA" | base64)"'"}}' >/dev/null; return $rc; }
+tf H14 "rollback refuses when the Secret was changed outside the ledger" "changed outside the ledger" h14
+
 echo; echo "PASS=$PASSN FAIL=$FAILN  (report: $REPORT, evidence: $DR_EVIDENCE_DIR)"
 printf '\n**PASS=%s FAIL=%s** · DR_ID=%s · %s\n' "$PASSN" "$FAILN" "$DR_ID" "$(date -u +%FT%TZ)" >> "$REPORT"
 exit "$FAILN"
