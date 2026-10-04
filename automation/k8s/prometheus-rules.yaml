@@ -1,0 +1,29 @@
+# Alerts that protect RPO and DR readiness (Prometheus Operator; metrics via YACE/CloudWatch exporter + postgres_exporter).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dr-readiness
+  namespace: monitoring
+spec:
+  groups:
+    - name: dr-rpo
+      rules:
+        - alert: DRReplicaLagAboveHalfRPO
+          expr: max_over_time(aws_rds_replica_lag_maximum{dbinstance_identifier="app-pg-prod-euc1"}[5m]) > 150
+          for: 5m
+          labels: { severity: page, runbook: RB-DR-RDS-001 }
+          annotations:
+            summary: "Cross-region replica lag > 50% of RPO (300s)"
+            description: "A failover now would lose ~{{ $value }}s of data. Investigate long transactions / WAL backlog."
+        - alert: DRHeartbeatStale
+          expr: time() - pg_dr_heartbeat_ts_seconds{role="replica"} > 120
+          for: 2m
+          labels: { severity: page, runbook: RB-DR-RDS-001 }
+          annotations:
+            summary: "DR replica heartbeat older than 2 minutes (true RPO exposure)"
+        - alert: DRExternalSecretNotReady
+          expr: externalsecret_status_condition{name="db-creds",condition="Ready",status="True"} == 0
+          for: 10m
+          labels: { severity: ticket }
+          annotations:
+            summary: "db-creds ExternalSecret not Ready in {{ $labels.cluster }} — failover would leave pods without credentials"

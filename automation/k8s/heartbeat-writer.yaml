@@ -1,0 +1,35 @@
+# RPO heartbeat writer — runs ONLY in the active region (GitOps overlay sets replicas=0 in the passive region).
+# Logs each committed timestamp; the last logged value after an outage = RPO_LAST_PRIMARY_COMMIT.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dr-heartbeat-writer
+  namespace: app
+  labels: { app: dr-heartbeat-writer }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: dr-heartbeat-writer }
+  template:
+    metadata:
+      labels: { app: dr-heartbeat-writer }
+    spec:
+      containers:
+        - name: writer
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: { name: db-heartbeat-creds }   # dedicated low-privilege user (see 00-heartbeat.sql)
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export PGHOST=$DB_HOST PGUSER=$DB_USER PGPASSWORD=$DB_PASSWORD PGDATABASE=$DB_NAME PGCONNECT_TIMEOUT=3 PGSSLMODE=require
+              while true; do
+                ts=$(psql -XAtqc "INSERT INTO dr.heartbeat(id, ts) VALUES (1, clock_timestamp())
+                     ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts RETURNING ts" 2>&1) \
+                  && echo "{\"heartbeat_commit\":\"$ts\"}" \
+                  || echo "{\"heartbeat_error\":\"$(echo $ts | tr -d '\"')\"}"
+                sleep 1
+              done
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
