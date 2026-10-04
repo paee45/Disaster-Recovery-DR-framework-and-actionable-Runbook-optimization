@@ -5,10 +5,19 @@
 | A03 | unknown kube context is refused | PASS | logs/A03.log |
 | A04 | decoy context (other cluster) is refused | PASS | logs/A04.log |
 | A05 | cluster whose identity says env=uat is refused | PASS | logs/A05.log |
-| A06 | kubectl wrapper ignores current-context (decoy) and uses EKS_CONTEXT | PASS | logs/A06.log |
+| A06 | fill-in mode (DR_STRICT_PIN=0) ignores current-context (decoy), uses EKS_CONTEXT | PASS | logs/A06.log |
 | A07 | local endpoint-map seam refused outside DR_ENV=local | PASS | logs/A07.log |
 | A08 | PROD confirmation blocks non-interactive changes (no DR_ASSUME_YES) | PASS | logs/A08.log |
-| A09 | aws wrapper pins profile: caller account = 000000000000 | PASS | logs/A09.log |
+| A09 | pinned aws call: caller account = 000000000000 | PASS | logs/A09.log |
+| A10 | strict: aws without --profile/--region → REFUSED (97) | PASS | logs/A10.log |
+| A11 | strict: aws --profile dr-decoy → REFUSED (97), even with DR_STRICT_PIN=0 | PASS | logs/A11.log |
+| A12 | strict: kubectl without --context → REFUSED (97) | PASS | logs/A12.log |
+| A13 | strict: kubectl --context decoy → REFUSED (97) | PASS | logs/A13.log |
+| A14 | a [default] AWS profile makes the guard fail | PASS | logs/A14.log |
+| A15 | a kube current-context makes the guard fail | PASS | logs/A15.log |
+| A16 | kubeconfig holding another env's context (dr-prod) makes the guard fail | PASS | logs/A16.log |
+| A17 | exported static AWS keys are refused (strict) | PASS | logs/A17.log |
+| A18 | pinning lint: every aws/kubectl call in the scripts is pinned | PASS | logs/A18.log |
 | B01 | dr-env-check.sh S3 → PASS | PASS | logs/B01.log |
 | B02 | inventory: app-a/app-b Reloader YES, app-c NO, CronJob listed | PASS | logs/B02.log |
 | B03 | preflight restore → PASS (inputs copied from source) | PASS | logs/B03.log |
@@ -18,7 +27,7 @@
 | C01b | plan: request from baseline (3 SGs, subnets, PG, retention 7, logs, tags) — no change made | PASS | logs/C01b.log |
 | C02 | restore snapshot with the baseline request (--cli-input-json) | PASS | logs/C02.log |
 | C03 | wait until available (progress + T5) | PASS | logs/C03.log |
-| C03b | validate before harden → NOT VALIDATED (maintenance window can't be set by a restore) | **FAIL** | logs/C03b.log |
+| C03b | validate right after restore: SGs, subnets, PG, retention 7, logs, tags already match | PASS | logs/C03b.log |
 | C03c | CLI default retention 1 day + lost tag → validate detects both | PASS | logs/C03c.log |
 | C04 | harden converges to baseline (retention 7, window, tag) → VALIDATED | PASS | logs/C04.log |
 | C05 | restored instance: 3 SGs, retention 7, deletion protection, all source tags | PASS | logs/C05.log |
@@ -55,10 +64,15 @@
 | F01 | S2 promote replica + wait-promoted (standalone + writable) | PASS | logs/F01.log |
 | F02 | S4 PITR latest → restore request from baseline with 3 SGs | PASS | logs/F02.log |
 | F03 | S4 PITR: wait + harden → VALIDATED against the baseline | PASS | logs/F03.log |
+| G00 | recorded session: transcript + history, password redacted, REFUSED shown, synced to S3 | **FAIL** | logs/G00.log |
+| G00b | audit log commands.jsonl: every call, secret-string redacted, refusals recorded | PASS | logs/G00b.log |
 | G01 | phase timer + summary | PASS | logs/G01.log |
+| G01b | dr_phase end syncs the evidence folder to S3 (timeline already off the machine) | PASS | logs/G01b.log |
 | G02 | collect evidence → manifest uploaded to the evidence bucket | PASS | logs/G02.log |
 | G03 | KPI report: RPO from snapshot time, RTO ~20 min | PASS | logs/G03.log |
 | G04 | SSM Automation documents accepted (create-document) | PASS | logs/G04.log |
 | G05 | tracker CSV generated for every runbook | PASS | logs/G05.log |
 
-**PASS=59 FAIL=1** · DR_ID=DR-localtest-20261004041809 · 2026-10-04T04:23:23Z
+**PASS=71 FAIL=1** · DR_ID=DR-localtest-20261004051001 · 2026-10-04T05:15:23Z
+
+> G00 failed in this run (a doubled keystroke `PGGPASSWORD=` escaped redaction); fixed in dr_redact (any *PASS*/*SECRET*/*TOKEN*/*ACCESS_KEY*= assignment) and re-checked against the same bed: PASS.

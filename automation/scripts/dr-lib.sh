@@ -265,7 +265,7 @@ dr_phase() {
 dr_redact() {
   sed -E -i.bak \
     -e 's/("(password|Password|SecretString|secret|token|SessionToken|SecretAccessKey)"[[:space:]]*:[[:space:]]*")[^"]*"/\1***"/g' \
-    -e 's/((PGPASSWORD|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_ACCESS_KEY_ID)=).*$/\1*** (rest of line redacted)/' \
+    -e 's/([A-Za-z_]*(PASS|SECRET|TOKEN|ACCESS_KEY)[A-Za-z_]*=).*$/\1*** (rest of line redacted)/I' \
     -e 's/(--(secret-string|master-user-password|password|token)[ =]).*$/\1*** (rest of line redacted)/' \
     -e "s/(PASSWORD[[:space:]]+')[^']*'/\1***'/Ig" \
     -e 's/(postgres(ql)?:\/\/[^:\/@[:space:]]+:)[^@[:space:]]+@/\1***@/g' "$1" && rm -f "$1.bak"
