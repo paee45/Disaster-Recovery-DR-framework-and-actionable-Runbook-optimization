@@ -49,7 +49,8 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
-- Latest suite: v0.5 = 100/100. v0.6 adds group J (dr-run.sh) → 109 tests; full run in progress at the time of writing.
+- Latest suite: v0.6 (109 tests, group J = dr-run.sh): full run 107/109 — J02/J09 were test bugs (grep -q SIGPIPE; `env -u` order), fixed and passing; clean re-run pending.
+- In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - **Next for the owner (on the Mac, UAT):** `cp env/uat.env.example env/uat.env`, fill values, `PRIMARY_STOPPED_OK=1`,
   `REPLICA_DB=""`, `source env/uat.env`, then `tests/aws/sandbox-test.sh readonly`, then
   `automation/scripts/dr-run.sh S3 --dry-run` and `--to P2-S05` (restore + verify, no cutover).

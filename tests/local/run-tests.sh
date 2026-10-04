@@ -300,7 +300,7 @@ jdir() { echo "$ROOT/evidence/$1"; }
 jst()  { awk -F'\t' -v i="$2" '$1==i{s=$2} END{print s}' "$(jdir "$1")/run-state.tsv"; }
 j01() { "$RUN" S3 --list | tee /dev/stderr | grep -c '^P[0-9]' | grep -qx 20 && "$RUN" S4 --list | grep -c '^P[0-9]' | grep -qx 22; }
 t  J01 "--list: S3 = 20 steps, S4 = 22 steps (IDs as in the runbooks), no AWS access needed" j01
-j02() { local d; d="$(jdir DR-localtest-dry-$JTS)"; DR_ID="DR-localtest-dry-$JTS" "$RUN" S3 --dry-run | tee /dev/stderr | grep -q 'dr-restore.sh snapshot' && [[ ! -e "$d" ]]; }
+j02() { local d; d="$(jdir DR-localtest-dry-$JTS)"; DR_ID="DR-localtest-dry-$JTS" "$RUN" S3 --dry-run | tee /dev/stderr | grep 'dr-restore.sh snapshot' >/dev/null && [[ ! -e "$d" ]]; }   # no grep -q: SIGPIPE + pipefail
 t  J02 "--dry-run prints every step + command and creates nothing (no evidence folder)" j02
 tf J03 "DR_RUN_GATES=auto is refused outside the local test bed" "only for the local test bed" env DR_ENV=uat DR_RUN_GATES=auto "$RUN" S3
 k patch secret app-db-direct --type merge -p '{"stringData":{"POSTGRES_DB_HOST1":"'"$IP_OLD"'","POSTGRES_DB_HOST2":"'"$IP_OLD"'"}}' >/dev/null
@@ -327,7 +327,7 @@ j07() { "${JENV[@]}" "$RUN" S4 --resume "$JS4" | tee "$LOGS/J07.out"; local rc=$
         && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]] && grep -q '"marker":"T10"' "$(jdir "$JS4")/timeline.jsonl"; }
 t  J07 "--resume continues after the gate: passed steps not repeated (one T4), cutover + T10 done" j07
 tf J08 "a second run with the same DR_ID without --resume is refused" "already has a run" "${JENV[@]}" DR_ID="$JS4" "$RUN" S4
-j09() { local out id; out="$("${JENV[@]}" -u DR_ID RESTORED_DB=app-pg-local-rx "$RUN" S3 --only P0-S03)"; echo "$out"
+j09() { local out id; out="$(env -u DR_ID "${JENV[@]:1}" RESTORED_DB=app-pg-local-rx "$RUN" S3 --only P0-S03)"; echo "$out"
         id="$(grep -oE 'DR_ID DR-[0-9]{8}-[0-9]{4}-local-S3' <<<"$out" | head -1 | cut -d' ' -f2)"; echo "id=$id"
         [[ -n "$id" ]] && [[ "$(jst "$id" P0-S03)" == PASS ]] && [[ -f "$(jdir "$id")/run.log" ]]; }
 t  J09 "no DR_ID given: a new DR-<date>-local-S3 id + its own evidence folder" j09
