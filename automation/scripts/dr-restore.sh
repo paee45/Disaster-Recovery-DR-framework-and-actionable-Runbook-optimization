@@ -73,9 +73,9 @@ def norm:
 capture() { # <source-db> → prints the file path
   local src="$1" ts inst arn tags pg="{}" dsn f
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  inst="$(aws rds describe-db-instances --db-instance-identifier "$src" --query 'DBInstances[0]' --output json)"
+  inst="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$src" --query 'DBInstances[0]' --output json)"
   arn="$(jq -r .DBInstanceArn <<<"$inst")"
-  tags="$(aws rds list-tags-for-resource --resource-name "$arn" --query TagList --output json 2>/dev/null || jq -c '.TagList // []' <<<"$inst")"
+  tags="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$arn" --query TagList --output json 2>/dev/null || jq -c '.TagList // []' <<<"$inst")"
   if dsn="$(dr_dsn "$src" 2>/dev/null)" && [[ -n "$dsn" ]]; then     # pg_settings as the DB actually runs them (best effort)
     pg="$(psql "$dsn" -XAtq -F$'\t' -c 'select name, setting from pg_settings order by 1' 2>/dev/null \
           | jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries' 2>/dev/null || echo '{}')"
@@ -87,7 +87,7 @@ capture() { # <source-db> → prints the file path
       instance: $i, tags: $t, pgSettings: $pg}' > "$f"
   cp "$f" "$BASELINE_DIR/baseline-${src}.json"
   [[ -n "${DR_EVIDENCE_DIR:-}" ]] && cp "$f" "$OUT/" || true
-  [[ -n "${BASELINE_S3_URI:-}" ]] && aws s3 cp --only-show-errors "$f" "${BASELINE_S3_URI%/}/baseline-${src}.json" || true
+  [[ -n "${BASELINE_S3_URI:-}" ]] && aws --profile "$AWS_PROFILE" --region "$AWS_REGION" s3 cp --only-show-errors "$f" "${BASELINE_S3_URI%/}/baseline-${src}.json" || true
   echo "$f"
 }
 
@@ -99,7 +99,7 @@ load_baseline() { # <source-db> → sets BASE (file)
   local src="$1" stored="$BASELINE_DIR/baseline-${1}.json" prev=""
   if [[ -n "${BASELINE_FILE:-}" ]]; then
     BASE="$BASELINE_FILE"; echo "baseline: $BASE (BASELINE_FILE)"
-  elif aws rds describe-db-instances --db-instance-identifier "$src" >/dev/null 2>&1; then
+  elif aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$src" >/dev/null 2>&1; then
     [[ -f "$stored" ]] && { prev="$(mktemp)"; cp "$stored" "$prev"; }
     BASE="$(capture "$src")"; echo "baseline: captured live from $src → $BASE"
     if [[ -n "$prev" ]]; then   # drift since the last capture = something changed on the source (incident? manual change?)
@@ -111,7 +111,7 @@ load_baseline() { # <source-db> → sets BASE (file)
       rm -f "$prev"
     fi
   else
-    [[ -f "$stored" || -z "${BASELINE_S3_URI:-}" ]] || aws s3 cp --only-show-errors "${BASELINE_S3_URI%/}/baseline-${src}.json" "$stored" || true
+    [[ -f "$stored" || -z "${BASELINE_S3_URI:-}" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" s3 cp --only-show-errors "${BASELINE_S3_URI%/}/baseline-${src}.json" "$stored" || true
     [[ -f "$stored" ]] || { echo "FAIL source $src is gone and no stored baseline ($stored) — set BASELINE_FILE, or DB_* in env/$DR_ENV.env"; exit 1; }
     BASE="$stored"; echo "WARN source $src not found — using the stored baseline captured $(jq -r .capturedAt "$BASE")"
   fi
@@ -162,20 +162,20 @@ restore_request() { # <op-specific-json> <restored-from>
 
 run_request() { # <api-op> <request-file> <description>
   echo "restore request ($3) → $2"; jq . "$2"
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then echo "DRY_RUN: aws rds $1 --cli-input-json file://$2"; return 0; fi
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then echo "DRY_RUN: aws --profile $AWS_PROFILE --region $AWS_REGION rds $1 --cli-input-json file://$2"; return 0; fi
   dr_confirm "$3" || exit 1
-  aws rds "$1" --cli-input-json "file://$2" \
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds "$1" --cli-input-json "file://$2" \
     --query 'DBInstance.{id:DBInstanceIdentifier,status:DBInstanceStatus,multiAZ:MultiAZ,retention:BackupRetentionPeriod}' --output table
   [[ -n "${DR_TIMELINE:-}" ]] && dr_mark T4 "restore started: $3 (request $(basename "$2"))" || true
 }
 
-describe() { aws rds describe-db-instances --db-instance-identifier "$1" --query 'DBInstances[0]' --output json; }
+describe() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$1" --query 'DBInstances[0]' --output json; }
 
 wait_available() {
   local db="$1" start now st miss=0
   start=$(date +%s)
   while :; do
-    st="$(aws rds describe-db-instances --db-instance-identifier "$db" --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo not-found)"
+    st="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$db" --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo not-found)"
     now=$(date +%s)
     printf '%s  %-12s elapsed %dm%02ds\n' "$(date -u +%H:%M:%SZ)" "$st" $(( (now-start)/60 )) $(( (now-start)%60 ))
     [[ "$st" == "available" ]] && break
@@ -188,7 +188,7 @@ wait_available() {
 
 # baseline source of a restored instance: its dr-restored-from tag ("<db>" or "<db>@<snapshot|ts>"), else SOURCE_DB/PRIMARY_DB
 source_of() {
-  local from; from="$(aws rds list-tags-for-resource --resource-name "$(describe "$1" | jq -r .DBInstanceArn)" \
+  local from; from="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$(describe "$1" | jq -r .DBInstanceArn)" \
     --query "TagList[?Key=='dr-restored-from'].Value | [0]" --output text 2>/dev/null || true)"
   [[ -n "$from" && "$from" != "None" ]] && echo "${from%%@*}" || echo "${SOURCE_DB:-${PRIMARY_DB:?}}"
 }
@@ -238,30 +238,30 @@ harden() {
   if [[ "$mod" == "{}" ]]; then echo "harden: no setting differs from the baseline"
   else
     echo "harden: modify request (only differing settings) → $req"; jq . "$req"
-    [[ "${DRY_RUN:-0}" == "1" ]] || aws rds modify-db-instance --cli-input-json "file://$req" --query 'DBInstance.PendingModifiedValues' --output json
+    [[ "${DRY_RUN:-0}" == "1" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds modify-db-instance --cli-input-json "file://$req" --query 'DBInstance.PendingModifiedValues' --output json
   fi
   # IAM roles (S3 import/export, Lambda, …) — not carried by a restore
   roles="$(jq -c --argjson t "$t" '[.AssociatedRoles[]? | {RoleArn, FeatureName}] - [$t.AssociatedRoles[]? | {RoleArn, FeatureName}] | .[]' <<<"$e")"
   while read -r r; do
     [[ -z "$r" ]] && continue
     echo "+ add-role-to-db-instance $r"
-    [[ "${DRY_RUN:-0}" == "1" ]] || aws rds add-role-to-db-instance --db-instance-identifier "$db" \
+    [[ "${DRY_RUN:-0}" == "1" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds add-role-to-db-instance --db-instance-identifier "$db" \
       --role-arn "$(jq -r .RoleArn <<<"$r")" --feature-name "$(jq -r .FeatureName <<<"$r")"
   done <<<"$roles"
   # Tags missing or different on the target (restore normally copies them; re-assert anyway)
   arn="$(jq -r .DBInstanceArn <<<"$t")"
-  tags="$(jq -c --argjson have "$(aws rds list-tags-for-resource --resource-name "$arn" --query TagList --output json)" "$JQLIB"'
+  tags="$(jq -c --argjson have "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$arn" --query TagList --output json)" "$JQLIB"'
            (.tags | userTags) - $have' "$BASE")"
   if [[ "$tags" != "[]" ]]; then
     echo "+ add-tags-to-resource $(jq -c 'map(.Key)' <<<"$tags")"
-    [[ "${DRY_RUN:-0}" == "1" ]] || aws rds add-tags-to-resource --resource-name "$arn" --tags "$tags"
+    [[ "${DRY_RUN:-0}" == "1" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds add-tags-to-resource --resource-name "$arn" --tags "$tags"
   fi
   [[ "${DRY_RUN:-0}" == "1" ]] && return 0
   sleep "${HARDEN_SETTLE_S:-20}"; wait_available "$db" >/dev/null
   # A parameter group change (or the restore itself) can leave static parameters pending-reboot → reboot now, before cutover
   if [[ "$(describe "$db" | jq -r '[.DBParameterGroups[].ParameterApplyStatus] | index("pending-reboot") != null')" == "true" ]]; then
     echo "parameter group is pending-reboot → reboot-db-instance $db (not yet in service)"
-    aws rds reboot-db-instance --db-instance-identifier "$db" --query 'DBInstance.DBInstanceStatus' --output text
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds reboot-db-instance --db-instance-identifier "$db" --query 'DBInstance.DBInstanceStatus' --output text
     sleep "${HARDEN_SETTLE_S:-20}"; wait_available "$db" >/dev/null
   fi
   validate "$db"
@@ -273,7 +273,7 @@ validate() { # <db> — exit 1 on unexpected differences
   {
     echo "validate $db against baseline $(jq -r '"\(.source) captured \(.capturedAt)"' "$BASE")  ($(date -u +%FT%TZ))"
     jq -rn --argjson t "$t" --argjson e "$(expected_json)" --slurpfile b "$BASE" \
-           --argjson have "$(aws rds list-tags-for-resource --resource-name "$(jq -r .DBInstanceArn <<<"$t")" --query TagList --output json)" "$JQLIB"'
+           --argjson have "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$(jq -r .DBInstanceArn <<<"$t")" --query TagList --output json)" "$JQLIB"'
       ($b[0].instance | norm) as $base | ($e | norm) as $x | ($t | norm) as $y
       | ([$x | keys[] | select(($x[.] | tojson) == ($y[.] | tojson))] | length) as $match
       | ([$x | keys[] | select(($x[.] | tojson) != ($y[.] | tojson))
@@ -318,7 +318,7 @@ validate_pg() { # TARGET_DSN vs live OLD_DSN (else the baseline's pgSettings)
 # ---------- restore commands ----------
 cmd_snapshot() { # <snap> <new>
   local snap="$1" new="$2" sj src created size op req
-  sj="$(aws rds describe-db-snapshots --db-snapshot-identifier "$snap" --query 'DBSnapshots[0]' --output json)"
+  sj="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-snapshot-identifier "$snap" --query 'DBSnapshots[0]' --output json)"
   src="$(jq -r '.DBInstanceIdentifier // empty' <<<"$sj")"; src="${SOURCE_DB:-${src:-${PRIMARY_DB:?}}}"
   created="$(jq -r '.SnapshotCreateTime // "unknown"' <<<"$sj")"; size="$(jq -r '.AllocatedStorage // 0' <<<"$sj")"
   load_baseline "$src"
@@ -336,10 +336,10 @@ cmd_pitr() { # <src> <new> <ts|latest>
   local src="$1" new="$2" ts="$3" op req s t
   load_baseline "$src"
   [[ -n "${DR_TIMELINE:-}" && "$ts" != "latest" && "${DRY_RUN:-0}" != "1" ]] && dr_mark RPO_RESTORE_TS "value=$ts"
-  if aws rds describe-db-instances --db-instance-identifier "$src" >/dev/null 2>&1; then
+  if aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$src" >/dev/null 2>&1; then
     s="$(jq -n --arg s "$src" '{SourceDBInstanceIdentifier: $s}')"
   else  # source deleted → retained automated backups
-    s="$(jq -n --arg r "$(aws rds describe-db-instance-automated-backups --db-instance-identifier "$src" --query 'DBInstanceAutomatedBackups[0].DbiResourceId' --output text)" '{SourceDbiResourceId: $r}')"
+    s="$(jq -n --arg r "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups --db-instance-identifier "$src" --query 'DBInstanceAutomatedBackups[0].DbiResourceId' --output text)" '{SourceDbiResourceId: $r}')"
   fi
   if [[ "$ts" == "latest" ]]; then t='{"UseLatestRestorableTime": true}'; else t="$(jq -n --arg ts "$ts" '{RestoreTime: $ts}')"; fi
   op="$(jq -n --arg new "$new" --argjson s "$s" --argjson t "$t" --argjson b "$(jq .instance "$BASE")" \
@@ -357,11 +357,11 @@ case "${1:-}" in
                                    *) echo "usage: $0 plan {snapshot <snap> <new>|pitr <src> <new> <ts|latest>}"; exit 2 ;; esac ;;
   list-snapshots)
     db="${2:?db id}"
-    aws rds describe-db-snapshots --db-instance-identifier "$db" --include-shared \
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$db" --include-shared \
       --query 'reverse(sort_by(DBSnapshots,&SnapshotCreateTime))[].[DBSnapshotIdentifier,SnapshotType,SnapshotCreateTime,Status,Encrypted,AllocatedStorage]' \
       --output table
     echo "PITR window:"
-    aws rds describe-db-instance-automated-backups --db-instance-identifier "$db" \
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups --db-instance-identifier "$db" \
       --query 'DBInstanceAutomatedBackups[].{status:Status,window:RestoreWindow,resourceId:DbiResourceId}' --output table || true
     echo "stored baselines:"
     # shellcheck disable=SC2012

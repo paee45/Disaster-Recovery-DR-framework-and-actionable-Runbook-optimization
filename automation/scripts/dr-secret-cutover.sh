@@ -22,8 +22,8 @@ K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
 read -r NEW_HOST NEW_PORT <<<"$(dr_endpoint "$TARGET_DB")"
 [[ -z "$NEW_HOST" || "$NEW_HOST" == "None" ]] && { echo "TARGET_DB $TARGET_DB has no endpoint (not available?)"; exit 1; }
 
-secret_json() { aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage "${1:-AWSCURRENT}" --query SecretString --output text; }
-current_version() { aws secretsmanager describe-secret --secret-id "$SECRET_ID" \
+secret_json() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage "${1:-AWSCURRENT}" --query SecretString --output text; }
+current_version() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" \
   --query 'VersionIdsToStages' --output json | jq -r 'to_entries[] | select(.value | index("AWSCURRENT")) | .key'; }
 
 precheck() {
@@ -42,7 +42,7 @@ precheck() {
 fix_password() {
   : "${MASTER_SECRET_ID:?MASTER_SECRET_ID (master user secret) required}"
   local s m
-  s="$(secret_json)"; m="$(aws secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
+  s="$(secret_json)"; m="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
   # psql variables keep the password out of argv/ps output. NOTE: with log_statement=ddl/all the statement can reach the
   # PostgreSQL log — rotate the secret after stabilisation (CP03-S05).
   PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=${DR_PGSSLMODE:-require}" \
@@ -73,7 +73,7 @@ apply() {
   new="$(jq --arg h "$NEW_HOST" --argjson p "${NEW_PORT:-5432}" --arg id "$TARGET_DB" \
           '.host = $h | .port = $p | (if has("dbInstanceIdentifier") then .dbInstanceIdentifier = $id else . end)' <<<"$s")"
   "$HERE/dr-eks-rollout.sh" snapshot-generations "$K8S_SECRET"
-  ver="$(aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$new" --query VersionId --output text)"
+  ver="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$new" --query VersionId --output text)"
   jq -n --arg prev "$prev" --arg new "$ver" --arg host "$NEW_HOST" --arg db "$TARGET_DB" \
      '{previous_version:$prev, new_version:$new, host:$host, db:$db}' > "${STATE}.after.json"
   dr_mark "SECRET_UPDATED:${SECRET_ID}" "version=${ver} host=${NEW_HOST}"
@@ -87,7 +87,7 @@ apply() {
 rollback() {
   local prev cur host
   prev="$(cat "${STATE}.previous-version")"; cur="$(current_version)"
-  aws secretsmanager update-secret-version-stage --secret-id "$SECRET_ID" --version-stage AWSCURRENT \
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager update-secret-version-stage --secret-id "$SECRET_ID" --version-stage AWSCURRENT \
     --move-to-version-id "$prev" --remove-from-version-id "$cur"
   host="$(secret_json | jq -r .host)"
   dr_mark "SECRET_ROLLBACK:${SECRET_ID}" "AWSCURRENT=${prev} host=${host}"

@@ -38,14 +38,33 @@ a05() { command kubectl --context dr-local -n kube-system patch configmap dr-clu
         local rc=0; DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard" && rc=1
         command kubectl --context dr-local -n kube-system patch configmap dr-cluster-identity --type merge -p '{"data":{"env":"local"}}' >/dev/null; return $rc; }
 t  A05 "cluster whose identity says env=uat is refused"                a05
-a06() { [[ "$(command kubectl config current-context)" == decoy ]] || return 1          # the CURRENT context is the decoy...
-        command kubectl --request-timeout=5s get ns >/dev/null 2>&1 && return 1                                # ...which is unreachable
-        lib "dr_guard && kubectl -n app get deploy app-a -o name"; }                       # but the wrapper pins dr-local
-t  A06 "kubectl wrapper ignores current-context (decoy) and uses EKS_CONTEXT" a06
+a06() { command kubectl config use-context decoy >/dev/null; local rc=0             # make the decoy CURRENT for this test
+        command kubectl --request-timeout=5s get ns >/dev/null 2>&1 && rc=1               # ...it is unreachable
+        DR_STRICT_PIN=0 DR_ALLOW_CURRENT_CONTEXT=1 DR_GUARD_OK='' lib "dr_guard && kubectl -n app get deploy app-a -o name" || rc=1  # fill-in mode pins dr-local
+        command kubectl config unset current-context >/dev/null; return $rc; }
+t  A06 "fill-in mode (DR_STRICT_PIN=0) ignores current-context (decoy), uses EKS_CONTEXT" a06
 tf A07 "local endpoint-map seam refused outside DR_ENV=local" "local-test seam" env DR_ENV=uat REQUIRE_CLUSTER_IDENTITY=false DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"
 a08() { out="$(DR_ENV=prod bash -c "source '$S/dr-lib.sh' && dr_confirm 'test'" </dev/null 2>&1)"; rc=$?; echo "$out"; [[ $rc -ne 0 ]]; }
 t  A08 "PROD confirmation blocks non-interactive changes (no DR_ASSUME_YES)" a08
-t  A09 "aws wrapper pins profile: caller account = 000000000000" lib "aws sts get-caller-identity --query Account --output text | grep -qx 000000000000"
+t  A09 "pinned aws call: caller account = 000000000000"           lib 'aws --profile "$AWS_PROFILE" --region "$AWS_REGION" sts get-caller-identity --query Account --output text | grep -qx 000000000000'
+# strict pinning (default): a missing or foreign profile/context is REFUSED (exit 97), never filled in
+r97() { lib "$1"; local rc=$?; echo "rc=$rc"; [[ $rc == 97 ]]; }
+t  A10 "strict: aws without --profile/--region → REFUSED (97)"       r97 'aws sts get-caller-identity'
+t  A11 "strict: aws --profile dr-decoy → REFUSED (97), even with DR_STRICT_PIN=0" r97 'DR_STRICT_PIN=0; aws --profile dr-decoy --region eu-west-1 sts get-caller-identity'
+t  A12 "strict: kubectl without --context → REFUSED (97)"            r97 'kubectl -n app get pods'
+t  A13 "strict: kubectl --context decoy → REFUSED (97)"              r97 'kubectl --context decoy -n app get pods'
+a14() { local cfg="$STATE/aws-config.default"; { cat "$AWS_CONFIG_FILE"; printf '[default]\nregion = eu-west-1\n'; } > "$cfg"
+        env AWS_CONFIG_FILE="$cfg" DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"; local rc=$?; rm -f "$cfg"; return $rc; }
+tf A14 "a [default] AWS profile makes the guard fail"   "\[default\] AWS profile" a14
+a15() { command kubectl config use-context decoy >/dev/null; DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard"; local rc=$?
+        command kubectl config unset current-context >/dev/null; return $rc; }
+tf A15 "a kube current-context makes the guard fail"     "current-context" a15
+a16() { local kc="$STATE/kubeconfig.foreign"; cp "$KUBECONFIG" "$kc"
+        KUBECONFIG="$kc" command kubectl config set-context dr-prod --cluster=decoy --user=dr-local >/dev/null
+        KUBECONFIG="$kc" DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard"; local rc=$?; rm -f "$kc"; return $rc; }
+tf A16 "kubeconfig holding another env's context (dr-prod) makes the guard fail" "other environments" a16
+tf A17 "exported static AWS keys are refused (strict)"   "REFUSED: AWS_ACCESS_KEY_ID" env AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY=x bash -c "source '$S/dr-lib.sh'"
+t  A18 "pinning lint: every aws/kubectl call in the scripts is pinned" "$ROOT/tests/lint/pinning-lint.sh"
 
 echo "=== B. Environment check, inventory, pre-flight"
 t  B01 "dr-env-check.sh S3 → PASS"                                   "$S/dr-env-check.sh" S3
@@ -60,7 +79,7 @@ echo "=== C. S3 snapshot restore (DR_ID=$DR_ID)"
 # shellcheck source=/dev/null
 source "$S/dr-lib.sh"; dr_init S3 > "$LOGS/C00.log" 2>&1 || { echo "dr_init failed"; cat "$LOGS/C00.log"; exit 99; }
 export OLD_DB="$PRIMARY_DB"
-SNAP="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --snapshot-type automated --query 'DBSnapshots[0].DBSnapshotIdentifier' --output text)"
+SNAP="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --snapshot-type automated --query 'DBSnapshots[0].DBSnapshotIdentifier' --output text)"
 export WAIT_POLL_S=3 HARDEN_SETTLE_S=2
 c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e '(.tags | length) == 4 and (.pgSettings | length) > 100 and (.instance.VpcSecurityGroups | length) == 3' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
 t  C00 "capture baseline of the source (describe + 4 tags + pg_settings)" c00
@@ -141,7 +160,7 @@ t  E06 "suspend CronJobs"                                              bash -c "
 t  E07 "resume CronJobs"                                               bash -c "'$S/dr-eks-rollout.sh' resume-cronjobs && [[ \$(command kubectl --context dr-local -n app get cronjob app-report -o jsonpath='{.spec.suspend}') == false ]]"
 
 echo "=== F. S2 promotion, S4 PITR"
-f01() { dr_set_target "$REPLICA_DB" && aws rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7 >/dev/null \
+f01() { dr_set_target "$REPLICA_DB" && aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7 >/dev/null \
         && TIMEOUT_SECONDS=120 "$S/dr-verify.sh" wait-promoted; }
 t  F01 "S2 promote replica + wait-promoted (standalone + writable)"     f01
 t  F02 "S4 PITR latest → restore request from baseline with 3 SGs"      bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and .BackupRetentionPeriod == 7' '$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json'"
@@ -149,11 +168,22 @@ t  F03 "S4 PITR: wait + harden → VALIDATED against the baseline"        bash -
 
 echo "=== G. Evidence, KPIs, SSM documents, tracker"
 dr_mark T0 --at "$(date -u -d '-20 min' +%FT%T.000Z)" >/dev/null; dr_mark T9 >/dev/null; dr_mark T10 >/dev/null
+g00() { printf 'aws --profile dr-local --region eu-west-1 sts get-caller-identity --query Account --output text\nexport PGPASSWORD=supersecret\naws sts get-caller-identity\nexit\n' \
+          | "$S/dr-session.sh" "$STATE/local.env" S3; local L; L="$(ls -t "$DR_EVIDENCE_DIR"/terminal/session-*.log | head -1)"
+        grep -q 000000000000 "$L" && grep -q 'REFUSED aws' "$L" && grep -q 'PGPASSWORD=\*\*\*' "$L" && ! grep -q 'ersecret' "$L" \
+        && grep -q 'get-caller-identity' "$DR_EVIDENCE_DIR"/terminal/history-*.txt && [[ ! -e "${L%.log}.raw" ]] \
+        && command aws --profile dr-local s3 ls "s3://$EVIDENCE_BUCKET/local/" --recursive | grep -q "$DR_ID/terminal/session-"; }
+t  G00 "recorded session: transcript + history, password redacted, REFUSED shown, synced to S3" g00
+g00b() { lib 'aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager create-secret --name local/dr-test/redact-$RANDOM --secret-string "{\"password\":\"pw-must-not-appear\"}" >/dev/null' \
+         && ! grep -q 'pw-must-not-appear' "$DR_EVIDENCE_DIR/commands.jsonl" && grep -q '"--secret-string","\*\*\*"' "$DR_EVIDENCE_DIR/commands.jsonl" \
+         && jq -e 'select(.status=="REFUSED" and .rc==97)' "$DR_EVIDENCE_DIR/commands.jsonl" >/dev/null; }
+t  G00b "audit log commands.jsonl: every call, secret-string redacted, refusals recorded" g00b
 t  G01 "phase timer + summary"                                          bash -c "source '$S/dr-lib.sh'; dr_phase start demo 1; dr_phase end demo 1; dr_summary | grep -q 'since T0'"
+t  G01b "dr_phase end syncs the evidence folder to S3 (timeline already off the machine)" bash -c "command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/timeline.jsonl'"
 t  G02 "collect evidence → manifest uploaded to the evidence bucket"    bash -c "'$S/dr-collect-evidence.sh' && command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/manifest.json'"
 t  G03 "KPI report: RPO from snapshot time, RTO ~20 min"                bash -c "grep -q 'restore point' '$DR_EVIDENCE_DIR/rto-rpo-report.md' && grep -Eq 'Business RTO \(T9-T0\) \| 2[01]' '$DR_EVIDENCE_DIR/rto-rpo-report.md'"
 g04() { for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFromSnapshot DR-RdsRestoreToPointInTime; do
-          aws ssm create-document --name "$d-$RANDOM" --document-type Automation --document-format YAML --content "file://$ROOT/automation/ssm/$d.yaml" --query DocumentDescription.Status --output text || return 1; done; }
+          aws --profile "$AWS_PROFILE" --region "$AWS_REGION" ssm create-document --name "$d-$RANDOM" --document-type Automation --document-format YAML --content "file://$ROOT/automation/ssm/$d.yaml" --query DocumentDescription.Status --output text || return 1; done; }
 t  G04 "SSM Automation documents accepted (create-document)"            g04
 t  G05 "tracker CSV generated for every runbook"                        bash -c "for f in '$ROOT'/runbooks/*/RB-*.md; do python3 '$S/runbook-to-tracker.py' \"\$f\" -o /dev/null || exit 1; done"
 

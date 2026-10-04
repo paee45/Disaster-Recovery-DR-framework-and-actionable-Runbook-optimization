@@ -31,7 +31,7 @@ dr_set_target "$REPLICA_DB"
 | P2-S02 ‖ | CP01-S01…S03 (inventory, suspend rotation, suspend CronJobs) | Executor | 3 | Done |
 | P2-S03 | Final replica state: `dr_run replica-final psql "$TARGET_DSN" -XAt -f automation/sql/10-preflight-replica.sql` | DBA | 1 | Saved |
 | P2-G2 ⛳ | Point of no return (SRE on-call): approve in SSM or proceed manually | SRE on-call | 1 | Recorded |
-| P2-S04 ⚠ | Promote: SSM `DR-RdsPromoteReplica` (`MinRequiredApprovals=1`) **or** `dr_mark T4; aws rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor | 1 | API 200 |
+| P2-S04 ⚠ | Promote: SSM `DR-RdsPromoteReplica` (`MinRequiredApprovals=1`) **or** `dr_mark T4; aws --profile $AWS_PROFILE --region $AWS_REGION rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor | 1 | API 200 |
 | P2-S05 | `./automation/scripts/dr-verify.sh wait-promoted` → `dr_mark T5` | Executor | 5–15 | PROMOTED |
 | P3-S01 | [CP-01](../common/CP-01-secret-endpoint-cutover.md) S04–S09 (incl. `$SECRET_ID_RO` → new primary) → `T6`, `T7` | Executor | 10 | Consumers on the new primary |
 | P4-S01 | [CP-02](../common/CP-02-post-recovery-verification.md) S01, S03–S07 (synthetics, or the QA smoke suite) → `T9`, `T10`; [Services Restored] to the UAT users | QA lead + DBA | 20 | Pass |

@@ -19,7 +19,7 @@ source env/prod.env && source automation/scripts/dr-lib.sh && dr_init FB-S1 && d
 | P1-S01 | Planned-maintenance comms T−5 business days (customers, if impact ≥ 1 min is visible), T−2 days internal ([05-planned-drill-notices](../../templates/communications/05-planned-drill-notices.md)) | Comms | — | Sent |
 | P1-S02 | Pre-check: `MultiAZ=true`, `SecondaryAvailabilityZone` = the **preferred** AZ, status `available`, no pending modifications, replica `replicating` | DBA | 2 | All true |
 | P1-G1 ⛳ | Go (change owner + DBA) | IC | 1 | Recorded |
-| P2-S01 | `dr_mark T4` then `aws rds reboot-db-instance --db-instance-identifier $PRIMARY_DB --force-failover` | Executor | 1 | API 200 |
-| P2-S02 | `aws rds wait db-instance-available --db-instance-identifier $PRIMARY_DB`, then confirm the AZ = preferred. `dr_mark T5` | Executor | 3 | AZ swapped |
+| P2-S01 | `dr_mark T4` then `aws --profile $AWS_PROFILE --region $AWS_REGION rds reboot-db-instance --db-instance-identifier $PRIMARY_DB --force-failover` | Executor | 1 | API 200 |
+| P2-S02 | `aws --profile $AWS_PROFILE --region $AWS_REGION rds wait db-instance-available --db-instance-identifier $PRIMARY_DB`, then confirm the AZ = preferred. `dr_mark T5` | Executor | 3 | AZ swapped |
 | P2-S03 | Same checks as RB-PROD-S1 P2-S01 … P2-S05 (restart only if errors persist) | App + DBA | 15 | Pass |
 | P2-S04 | CP-05 evidence (label `type=planned`), close the change; send the "maintenance completed" comms | Scribe | 10 | Done |

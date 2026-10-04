@@ -1,0 +1,16 @@
+name: dr-lint
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: pinning lint (every aws/kubectl call carries --profile/--region/--context)
+        run: tests/lint/pinning-lint.sh
+      - name: shellcheck
+        run: shellcheck -S warning -x -P automation/scripts automation/scripts/*.sh tests/aws/*.sh tests/local/*.sh tests/lint/*.sh
+      - name: runbook trackers build
+        run: for f in runbooks/*/RB-*.md; do python3 automation/scripts/runbook-to-tracker.py "$f" -o /dev/null; done

@@ -4,7 +4,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 
 | Level | What | Changes anything real? | Command |
 |---|---|---|---|
-| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~60 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~75 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
@@ -36,17 +36,23 @@ tests/local/run-tests.sh          # report: tests/local/.state/test-report.md ·
 tests/local/down.sh               # remove everything (K3S_MODE=existing: only what up.sh installed)
 ```
 
+Safety of the test bed itself (it installs Helm releases, namespaces and a ConfigMap):
+- `up.sh` **refuses** unless the cluster API server is local (`127.x`, `localhost`, `::1`, `0.0.0.0`, `kubernetes.docker.internal`) — checked
+  before anything is created — and the cluster has no `kube-system/dr-cluster-identity` or one saying `env=local`.
+- `down.sh` (`K3S_MODE=existing`) **refuses** unless the API server is local **and** the identity says `env=local`; nothing is removed otherwise.
+  Docker cleanup only touches the `drtest-*` containers/volume/network that `up.sh` created.
+
 What is covered:
 
 | Group | Tests |
 |---|---|
-| A. Guardrails | Pinned profile passes; wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; the **current** context is a decoy and the scripts still hit the right cluster; local seam refused outside local; PROD confirmation blocks non-interactive runs |
+| A. Guardrails | Pinned profile passes; wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; local seam refused outside local; PROD confirmation blocks non-interactive runs; **strict pinning**: `aws` without `--profile/--region` → 97, `--profile dr-decoy` → 97 (even with `DR_STRICT_PIN=0`), `kubectl` without/with decoy `--context` → 97; `[default]` profile, kube `current-context`, a `dr-prod` context in the kubeconfig, exported keys → refused; pinning lint; fill-in mode ignores a decoy current-context |
 | B. Checks | `dr-env-check.sh`, inventory (**app-c flagged `reloader=NO`**), pre-flight restore + replica |
 | C. S3 restore | **baseline capture** of the source (describe + 4 tags incl. a value with spaces + `pg_settings`), `plan` (request has 3 SGs, subnets, PG, retention 7, backup window, log exports, tags; nothing created), restore with `--cli-input-json`, wait, `validate` **fails** before harden (maintenance window), simulated CLI-default **retention 1 day + lost tag → detected**, `harden` → **VALIDATED**, password trap (precheck fails → `fix-password`), `validate-pg` equal + detects a changed `work_mem`, row counts, DB verification SQL |
 | D. Cutover | `apply` with `RESTART_UNANNOTATED=false`: secret → ESO → **Reloader restarts app-a + app-b**; **app-c untouched** (same pod, same generation) and still connected to the old DB; standalone **`k8s-secret-consumers.sh`**: refuses without `--context` / wrong env, `check` shows **app-c STALE** and app-a/app-b UP-TO-DATE, `restart-stale` restarts **only app-c** (app-a/app-b generation unchanged), `check` clean afterwards; `rollback`/`apply` with `RESTART_UNANNOTATED=true`: app-c restarted by the script; session checks in Postgres |
 | E. Fencing | F1 read-only + F2 quarantine SG + un-fence; CronJob suspend/resume |
 | F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` from the baseline, harden → VALIDATED |
-| G. Evidence | phase timers, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
+| G. Evidence | **recorded session** `dr-session.sh` (transcript + history, password redacted, refusal visible, synced to S3), **`commands.jsonl` audit** (secret-string redacted, refusals logged), phase timers + **sync at phase end**, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
 
 Mock limitations (documented, not hidden): moto keeps the replica link after promotion (patched in `moto_launcher.py`, the mock is fixed, not the scripts); no real replication lag/WAL; CloudTrail lookups return nothing; SSM documents are stored but not executed.
 

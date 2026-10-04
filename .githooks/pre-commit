@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# enable once per clone: git config core.hooksPath .githooks
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/tests/lint/pinning-lint.sh"
+command -v shellcheck >/dev/null && shellcheck -S warning -x -P "$ROOT/automation/scripts" "$ROOT"/automation/scripts/*.sh "$ROOT"/tests/aws/*.sh

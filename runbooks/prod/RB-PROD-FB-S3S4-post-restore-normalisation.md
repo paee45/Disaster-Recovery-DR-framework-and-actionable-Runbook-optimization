@@ -20,7 +20,7 @@ dr_set_target "$NEW_PRIMARY"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | `MultiAZ=true` on NEW_PRIMARY (set at restore; otherwise CP03-S03) | DBA | 1 | true |
-| P1-S02 | **New read replica**: `aws rds create-db-instance-read-replica --db-instance-identifier ${NEW_PRIMARY}-replica --source-db-instance-identifier $NEW_PRIMARY --db-instance-class $DB_INSTANCE_CLASS --db-subnet-group-name $DB_SUBNET_GROUP --vpc-security-group-ids $DB_SG --db-parameter-group-name $DB_PARAM_GROUP --deletion-protection --enable-performance-insights --copy-tags-to-snapshot` | DBA | 5 (+ build) | `replicating`, lag ≈ 0 |
+| P1-S02 | **New read replica**: `aws --profile $AWS_PROFILE --region $AWS_REGION rds create-db-instance-read-replica --db-instance-identifier ${NEW_PRIMARY}-replica --source-db-instance-identifier $NEW_PRIMARY --db-instance-class $DB_INSTANCE_CLASS --db-subnet-group-name $DB_SUBNET_GROUP --vpc-security-group-ids $DB_SG --db-parameter-group-name $DB_PARAM_GROUP --deletion-protection --enable-performance-insights --copy-tags-to-snapshot` | DBA | 5 (+ build) | `replicating`, lag ≈ 0 |
 | P1-S03 | RO secret → new replica: `TARGET_DB=${NEW_PRIMARY}-replica SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` (Reloader rolls the readers) | Executor | 5 | Readers on the new replica |
 | P1-S04 | Pre-flight on the new pair: `PRIMARY_DB=$NEW_PRIMARY REPLICA_DB=${NEW_PRIMARY}-replica ./automation/scripts/dr-preflight.sh replica` | Executor | 3 | PASS |
 
@@ -38,6 +38,6 @@ dr_set_target "$NEW_PRIMARY"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P3-S01 | Confirm the reconciliation sign-off (S3/S4 P3A-S06) and CTO/ISMS hold status (security incidents may require keeping the instance/snapshot as evidence, ISO 27001 A.5.28) | IC | — | Approved |
-| P3-S02 | Delete the old replica, then OLD_DB, with final snapshots: `aws rds modify-db-instance --db-instance-identifier <id> --no-deletion-protection --apply-immediately`; `aws rds delete-db-instance --db-instance-identifier <id> --final-db-snapshot-identifier <id>-final-$(date -u +%Y%m%d)` (replicas: `--skip-final-snapshot` is allowed, since replicas cannot have one) | DBA | 10 | Deleted; final snapshot retained per policy |
+| P3-S02 | Delete the old replica, then OLD_DB, with final snapshots: `aws --profile $AWS_PROFILE --region $AWS_REGION rds modify-db-instance --db-instance-identifier <id> --no-deletion-protection --apply-immediately`; `aws --profile $AWS_PROFILE --region $AWS_REGION rds delete-db-instance --db-instance-identifier <id> --final-db-snapshot-identifier <id>-final-$(date -u +%Y%m%d)` (replicas: `--skip-final-snapshot` is allowed, since replicas cannot have one) | DBA | 10 | Deleted; final snapshot retained per policy |
 | P3-S03 | *(Optional)* identifier rename in a maintenance window → endpoint changes → [CP-01](../common/CP-01-secret-endpoint-cutover.md). Usually skipped | DBA | — | Decision recorded |
 | P3-S04 | CP-05 evidence (`type=failback`), close the change; [Post-Mortem / RCA Ready] comms | Scribe / Comms | 10 | Closed |

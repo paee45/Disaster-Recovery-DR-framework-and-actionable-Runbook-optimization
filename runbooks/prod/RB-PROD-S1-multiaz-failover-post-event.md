@@ -24,8 +24,8 @@ dr_set_target "$PRIMARY_DB"           # the same instance; the endpoint is uncha
 |---|---|---|---|---|
 | P1-S01 | Open the incident (SEV2 by default; SEV1 if impact > 5 min). Post [Investigating] in the internal chat. `dr_mark T1` | On-call SRE | 2 | Channel open |
 | P1-S01b | Record the RPO: `dr_mark RPO_ZERO` (synchronous standby) | Scribe | — | Recorded |
-| P1-S02 | RDS events: `dr_run rds-events aws rds describe-events --source-type db-instance --source-identifier $PRIMARY_DB --duration 120`. Look for the Multi-AZ failover *started* / *completed* events and their **reason** message | SRE | 1 | Failover started at `T_fo_start`, completed at `T_fo_end`. `dr_mark T4 --at <started>` / `dr_mark T5 --at <completed>` |
-| P1-S03 | Instance state: `aws rds describe-db-instances --db-instance-identifier $PRIMARY_DB --query 'DBInstances[0].{st:DBInstanceStatus,az:AvailabilityZone,az2:SecondaryAvailabilityZone,maz:MultiAZ}'` (compare the AZ with the CMDB/last evidence) | SRE | 1 | `available`, AZ changed, `MultiAZ=true` |
+| P1-S02 | RDS events: `dr_run rds-events aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-events --source-type db-instance --source-identifier $PRIMARY_DB --duration 120`. Look for the Multi-AZ failover *started* / *completed* events and their **reason** message | SRE | 1 | Failover started at `T_fo_start`, completed at `T_fo_end`. `dr_mark T4 --at <started>` / `dr_mark T5 --at <completed>` |
+| P1-S03 | Instance state: `aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-db-instances --db-instance-identifier $PRIMARY_DB --query 'DBInstances[0].{st:DBInstanceStatus,az:AvailabilityZone,az2:SecondaryAvailabilityZone,maz:MultiAZ}'` (compare the AZ with the CMDB/last evidence) | SRE | 1 | `available`, AZ changed, `MultiAZ=true` |
 | P1-S04 | If still not `available` after **5 min** since `T_fo_start` → escalate: AWS Support case (Business-critical) + switch to the decision tree (S2 if lag OK). `DECISION:` recorded | IC | — | Decision recorded |
 
 ## Phase 2 — Application recovery & verification (budget 10 min)
@@ -34,7 +34,7 @@ dr_set_target "$PRIMARY_DB"           # the same instance; the endpoint is uncha
 |---|---|---|---|---|
 | P2-S01 | Check app errors since `T_fo_end` (5xx, `could not connect`, `the database system is shutting down`, `read-only transaction`). Most drivers reconnect automatically | App owner | 3 | Error rate back to baseline |
 | P2-S02 | **If errors persist > 3 min after `T_fo_end`:** stale DNS/connection pools (JVM DNS cache, pool without validation). Force a fresh pool: `./automation/scripts/dr-eks-rollout.sh restart` (ordered rolling restart; no secret change, so Reloader does not do it). Record it as a **PIR action** (fix TTL/pool settings) | Executor | 5 | All consumers rolled; errors gone |
-| P2-S03 | **Read replica health**: `aws rds describe-db-instances --db-instance-identifier $REPLICA_DB --query 'DBInstances[0].StatusInfos'` + CloudWatch `ReplicaLag` | DBA | 2 | `replicating`, lag back to normal (the replica reconnects to the new primary host by itself) |
+| P2-S03 | **Read replica health**: `aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-db-instances --db-instance-identifier $REPLICA_DB --query 'DBInstances[0].StatusInfos'` + CloudWatch `ReplicaLag` | DBA | 2 | `replicating`, lag back to normal (the replica reconnects to the new primary host by itself) |
 | P2-S04 | **Standby rebuilt**: `SecondaryAvailabilityZone` populated and status `available`. Until then **PROD has no HA**, so freeze risky changes | DBA | async | Standby present |
 | P2-S05 | Run [CP-02](../common/CP-02-post-recovery-verification.md) steps S01, S03 (no OLD_DB), S04–S07 | App owner + DBA | 15 | All pass. `dr_mark T9` at the first of 3 green synthetics |
 | P2-S06 | **AZ affinity check**: are the app pods now mostly in a different AZ from the DB? Check p95 DB latency vs baseline. If degraded beyond SLO → plan [RB-PROD-FB-S1](RB-PROD-FB-S1-az-rebalance.md) | SRE | 3 | Decision: rebalance yes/no |
@@ -44,7 +44,7 @@ dr_set_target "$PRIMARY_DB"           # the same instance; the endpoint is uncha
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
-| P3-S01 | Root-cause inputs: the RDS event reason, AWS Health events for the account/AZ, CloudTrail (`RebootDBInstance`, `ModifyDBInstance`: was the failover human/maintenance-triggered?), `PendingModifiedValues`/maintenance actions (`aws rds describe-pending-maintenance-actions`) | SRE | 15 | Cause classified: infra / maintenance / human |
+| P3-S01 | Root-cause inputs: the RDS event reason, AWS Health events for the account/AZ, CloudTrail (`RebootDBInstance`, `ModifyDBInstance`: was the failover human/maintenance-triggered?), `PendingModifiedValues`/maintenance actions (`aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-pending-maintenance-actions`) | SRE | 15 | Cause classified: infra / maintenance / human |
 | P3-S02 | [CP-05](../common/CP-05-evidence-and-closure.md) evidence (RPO = 0; RTO = `T9 − T0`) | Scribe | 10 | Uploaded |
 | P3-S03 | [CP-06](../common/CP-06-post-incident-review.md) PIR (S1 questions). Mandatory if the app impact exceeded the AWS failover time by > 2 min | IC | — | Booked |
 

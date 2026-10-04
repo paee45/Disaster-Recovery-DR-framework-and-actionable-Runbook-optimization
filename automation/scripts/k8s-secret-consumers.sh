@@ -58,9 +58,10 @@ if [[ -n "$EXPECT_ENV" && "${REQUIRE_CLUSTER_IDENTITY:-true}" == "true" ]]; then
   [[ "$got" == "$EXPECT_ENV" ]] || { echo "REFUSED: context '$CTX' identifies as env='${got:-?}', expected '$EXPECT_ENV'" >&2; exit 2; }
 fi
 
-secret_json() { "${K[@]}" get secret "$SECRET" -o json; }
+secret_json() { "${K[@]}" get secret "$SECRET" -o json --show-managed-fields; }   # kubectl ≥1.21 hides managedFields by default
 fingerprint() { jq -cS '.data // {}' | sha256sum | cut -c1-16; }
-changed_at() { jq -r '. as $s | ([.metadata.managedFields[]? | select((.fieldsV1 // {}) | tostring | contains("\"f:data\"")) | .time] | max) // $s.metadata.creationTimestamp'; }
+# no silent fallback: without a managedFields entry for .data we cannot tell old pods from new ones → stop
+changed_at() { jq -r '[.metadata.managedFields[]? | select((.fieldsV1 // {}) | tostring | contains("\"f:data\"")) | .time] | max // empty'; }
 to_epoch() { date -u -d "$1" +%s; }
 
 # kind/name <TAB> restart-order <TAB> reloader(YES|NO) <TAB> stamped-fingerprint <TAB> selector-json
@@ -102,7 +103,9 @@ restart_one() { # kind/name fingerprint
   echo "restarting $obj (stamp $fp)"
 }
 
-S="$(secret_json)"; FP="$(fingerprint <<<"$S")"; CHG_TS="$(changed_at <<<"$S")"; CHG="$(to_epoch "$CHG_TS")"
+S="$(secret_json)"; FP="$(fingerprint <<<"$S")"; CHG_TS="$(changed_at <<<"$S")"
+[[ -n "$CHG_TS" ]] || { echo "ERROR: cannot determine when $NS/$SECRET data last changed (no managedFields for .data) — refusing to guess; use 'restart --all' if needed" >&2; exit 3; }
+CHG="$(to_epoch "$CHG_TS")"
 
 case "$CMD" in
   list)

@@ -23,9 +23,9 @@ project='.DBInstances[0] | {
   ReadReplicas: (.ReadReplicaDBInstanceIdentifiers | length)
 }'
 
-ref_json() { if [[ -n "${REFERENCE_JSON:-}" ]]; then cat "$REFERENCE_JSON"; else aws rds describe-db-instances --db-instance-identifier "$REF"; fi; }
+ref_json() { if [[ -n "${REFERENCE_JSON:-}" ]]; then cat "$REFERENCE_JSON"; else aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$REF"; fi; }
 a="$(ref_json | jq -S "$project")"
-b="$(aws rds describe-db-instances --db-instance-identifier "$NEW" | jq -S "$project")"
+b="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$NEW" | jq -S "$project")"
 
 echo "attribute | ${REF} | ${NEW}"
 jq -rn --argjson a "$a" --argjson b "$b" '
@@ -34,7 +34,7 @@ echo "(expected diffs after S2/S3/S4: ReadReplicas, possibly MultiAZ until CP03-
 
 if (( ALARMS )); then
   echo "--- CloudWatch alarms on DBInstanceIdentifier"
-  list() { aws cloudwatch describe-alarms --query "MetricAlarms[?Dimensions[?Name=='DBInstanceIdentifier' && Value=='$1']].AlarmName" --output text | tr '\t' '\n' | sed '/^$/d' | sort; }
+  list() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" cloudwatch describe-alarms --query "MetricAlarms[?Dimensions[?Name=='DBInstanceIdentifier' && Value=='$1']].AlarmName" --output text | tr '\t' '\n' | sed '/^$/d' | sort; }
   old="$(list "$REF")"; new="$(list "$NEW")"
   echo "on ${REF}: $(grep -c . <<<"$old" || true)  on ${NEW}: $(grep -c . <<<"$new" || true)"
   comm -23 <(sed "s/${REF}/<db>/g" <<<"$old") <(sed "s/${NEW}/<db>/g" <<<"$new") | sed 's/^/MISSING on new: /'

@@ -15,7 +15,7 @@ STATE="${DR_EVIDENCE_DIR}/db/fence-${DB}"
 master_psql() {
   : "${MASTER_SECRET_ID:?MASTER_SECRET_ID required}"
   local m addr port
-  m="$(aws secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
+  m="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
   read -r addr port <<<"$(dr_endpoint "$DB")"
   PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$addr port=$port dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=${DR_PGSSLMODE:-require} connect_timeout=5 application_name=dr-fence" \
     -v ON_ERROR_STOP=1 -v dbname="${DB_NAME:-app}" -Xq
@@ -35,9 +35,9 @@ SQL
 
 quarantine() {
   : "${QUARANTINE_SG:?QUARANTINE_SG required}"
-  aws rds describe-db-instances --db-instance-identifier "$DB" \
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$DB" \
     --query 'DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' --output json > "${STATE}.sgs.json"
-  aws rds modify-db-instance --db-instance-identifier "$DB" --vpc-security-group-ids "$QUARANTINE_SG" --apply-immediately \
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds modify-db-instance --db-instance-identifier "$DB" --vpc-security-group-ids "$QUARANTINE_SG" --apply-immediately \
     --query 'DBInstance.VpcSecurityGroups' --output json
   dr_mark FENCE "db=${DB} level=F2 saved=$(jq -c . "${STATE}.sgs.json")"
 }
@@ -45,7 +45,7 @@ quarantine() {
 restore() {
   if [[ -f "${STATE}.sgs.json" ]]; then
     # shellcheck disable=SC2046
-    aws rds modify-db-instance --db-instance-identifier "$DB" --apply-immediately \
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds modify-db-instance --db-instance-identifier "$DB" --apply-immediately \
       --vpc-security-group-ids $(jq -r '.[]' "${STATE}.sgs.json") --query 'DBInstance.VpcSecurityGroups' --output json
     echo "restored SGs (security group change applies within a few minutes)"
   fi

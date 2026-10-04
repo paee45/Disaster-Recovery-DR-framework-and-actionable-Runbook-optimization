@@ -6,6 +6,12 @@
 # Run down.sh for a clean slate. Nothing outside tests/local/.state and the drtest-* containers is touched.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
+LOCAL_API_RE='^https?://(\[?)(127\.[0-9.]+|localhost|::1|0\.0\.0\.0|kubernetes\.docker\.internal)(\]?)(:[0-9]+)?/?$'
+if [[ "${K3S_MODE:-docker}" == existing ]]; then   # refuse a non-local cluster BEFORE anything is created
+  _srv="$(kubectl --kubeconfig "${EXISTING_KUBECONFIG:?set EXISTING_KUBECONFIG for K3S_MODE=existing}" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \
+          || kubectl --kubeconfig "$EXISTING_KUBECONFIG" config view -o jsonpath='{.clusters[0].cluster.server}')"
+  [[ "$_srv" =~ $LOCAL_API_RE ]] || { echo "REFUSED: EXISTING_KUBECONFIG points at '$_srv' — up.sh only runs against a local cluster (127.x/localhost/::1)." >&2; exit 2; }
+fi
 STATE="$HERE/.state"; mkdir -p "$STATE"
 NET=drtest; SUBNET=172.30.0.0/24
 IP_LS=172.30.0.10; IP_OLD=172.30.0.21; IP_REPLICA=172.30.0.22; IP_RESTORED=172.30.0.23
@@ -132,12 +138,20 @@ open(sys.argv[2], "w").write(yaml.safe_dump(out))
 PY
 chmod 600 "$STATE/kubeconfig"; rm -f "$STATE/kubeconfig.src"
 export KUBECONFIG="$STATE/kubeconfig"
-# decoy context made CURRENT on purpose: scripts must never use the current context
+# SAFETY: the test bed installs Helm releases, namespaces and an identity ConfigMap — only ever on a LOCAL cluster.
+SERVER="$(kubectl config view -o jsonpath='{.clusters[?(@.name=="dr-local")].cluster.server}')"
+[[ "$SERVER" =~ $LOCAL_API_RE ]] \
+  || { echo "REFUSED: API server '$SERVER' is not local (127.x/localhost/::1). up.sh only runs against a local test cluster." >&2; exit 2; }
+# decoy context (another cluster) kept in the file; NO current-context (best practice — dr_guard refuses one).
+# Tests A06/A15 set it temporarily to prove the scripts never use it.
 kubectl config set-cluster decoy --server=https://198.51.100.7:6443 --insecure-skip-tls-verify=true   # TEST-NET-2: unroutable >/dev/null
 kubectl config set-context decoy --cluster=decoy --user=dr-local >/dev/null
-kubectl config use-context decoy >/dev/null
+kubectl config unset current-context >/dev/null
 K() { command kubectl --context dr-local "$@"; }
 until K get nodes 2>/dev/null | grep -q " Ready"; do sleep 2; done
+IDENT="$(K -n kube-system get configmap dr-cluster-identity -o jsonpath='{.data.env}' 2>/dev/null || true)"
+[[ -z "$IDENT" || "$IDENT" == local ]] \
+  || { echo "REFUSED: cluster at $SERVER identifies as env='$IDENT' (kube-system/dr-cluster-identity) — not a local test cluster." >&2; exit 2; }
 # Pods (10.42.0.0/16) → test containers (172.30.0.0/24): Docker's FORWARD policy drops it; DOCKER-USER is the supported hook.
 if command -v iptables >/dev/null && iptables -S DOCKER-USER >/dev/null 2>&1; then
   iptables -C DOCKER-USER -s 10.42.0.0/16 -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -s 10.42.0.0/16 -d 172.30.0.0/24 -j ACCEPT
@@ -149,16 +163,24 @@ log "helm: External Secrets Operator (→ LocalStack) and Stakater Reloader (rep
 helm repo add external-secrets https://charts.external-secrets.io >/dev/null 2>&1 || true
 helm repo add stakater https://stakater.github.io/stakater-charts >/dev/null 2>&1 || true
 helm repo update >/dev/null
-helm --kube-context dr-local upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace \
+# a previous down.sh may leave ESO CRDs terminating; helm would then skip them and they vanish → wait them out first
+for _ in $(seq 1 60); do
+  [[ -z "$(K get crd -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep external-secrets.io)" ]] && break; sleep 3
+done
+eso_install() { helm --kube-context dr-local upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace \
   --set installCRDs=true --set-string "extraEnv[0].name=AWS_SECRETSMANAGER_ENDPOINT,extraEnv[0].value=http://$IP_LS:4566" \
-  --set-string "extraEnv[1].name=AWS_STS_ENDPOINT,extraEnv[1].value=http://$IP_LS:4566" --wait --timeout 10m >/dev/null
+  --set-string "extraEnv[1].name=AWS_STS_ENDPOINT,extraEnv[1].value=http://$IP_LS:4566" --wait --timeout 10m >/dev/null; }
+eso_install
 helm --kube-context dr-local upgrade --install reloader stakater/reloader -n reloader --create-namespace \
   -f "$ROOT/automation/k8s/reloader-values.yaml" --wait --timeout 10m >/dev/null
 helm --kube-context dr-local list -A
 
 log "cluster identity, ESO store, sample apps"
 # after a down.sh the old CRDs can still be terminating while helm installs → wait until they exist again
-for _ in $(seq 1 60); do K get crd externalsecrets.external-secrets.io secretstores.external-secrets.io >/dev/null 2>&1 && break; sleep 3; done
+for try in 1 2; do
+  for _ in $(seq 1 20); do K get crd externalsecrets.external-secrets.io secretstores.external-secrets.io >/dev/null 2>&1 && break 2; sleep 3; done
+  log "ESO CRDs missing after install (old ones were terminating) → helm upgrade again (try $try)"; eso_install
+done
 K wait --for condition=established --timeout=180s crd/externalsecrets.external-secrets.io crd/secretstores.external-secrets.io >/dev/null
 for _ in 1 2 3 4 5 6; do K apply -f "$HERE/k8s/" >/dev/null && break; sleep 10; done   # webhook may need a few seconds
 K -n app wait --for=condition=Ready externalsecret/app-db-credentials --timeout=180s \

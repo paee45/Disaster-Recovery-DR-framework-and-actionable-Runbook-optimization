@@ -78,10 +78,10 @@ Returns UAT to the original instance after an exercise. It is safe because nothi
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
-| XF-S01 | Start the original instance if it was stopped: `aws rds start-db-instance --db-instance-identifier $OLD_DB` then `./automation/scripts/dr-restore.sh wait $OLD_DB` | SRE | ~5 | `available` |
+| XF-S01 | Start the original instance if it was stopped: `aws --profile $AWS_PROFILE --region $AWS_REGION rds start-db-instance --db-instance-identifier $OLD_DB` then `./automation/scripts/dr-restore.sh wait $OLD_DB` | SRE | ~5 | `available` |
 | XF-S02 | `dr_phase start failback` · switch back: `./automation/scripts/dr-secret-cutover.sh rollback` (AWSPREVIOUS → AWSCURRENT; Reloader restarts the pods) | SRE | 4 | Consumers on `$OLD_DB` |
 | XF-S03 | Post-failback check: `TARGET_DB=$OLD_DB ./automation/scripts/dr-verify.sh connections` + the E2E playbook (dashboard + one test transaction) · `dr_phase end failback` | Backend | 3 | Pass |
-| XF-S04 | Remove the restored instance: `aws rds modify-db-instance --db-instance-identifier $RESTORED_DB --no-deletion-protection --apply-immediately` then `aws rds delete-db-instance --db-instance-identifier $RESTORED_DB --skip-final-snapshot` | SRE | 1 | Deleting |
+| XF-S04 | Remove the restored instance: `aws --profile $AWS_PROFILE --region $AWS_REGION rds modify-db-instance --db-instance-identifier $RESTORED_DB --no-deletion-protection --apply-immediately` then `aws --profile $AWS_PROFILE --region $AWS_REGION rds delete-db-instance --db-instance-identifier $RESTORED_DB --skip-final-snapshot` | SRE | 1 | Deleting |
 | XF-S05 | Re-enable rotation if it was suspended; `./automation/scripts/dr-collect-evidence.sh` again (adds the failback records); fill in the [exercise report](../../templates/reports/drill-report.md) | SRE | 10 | Report draft |
 
 ## Troubleshooting

@@ -16,7 +16,7 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}"
 wait_promoted() {
   local deadline=$(( $(date +%s) + TIMEOUT_SECONDS )) dsn
   while (( $(date +%s) < deadline )); do
-    read -r status source <<<"$(aws rds describe-db-instances --db-instance-identifier "$TARGET_DB" \
+    read -r status source <<<"$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$TARGET_DB" \
       --query 'DBInstances[0].[DBInstanceStatus,ReadReplicaSourceDBInstanceIdentifier]' --output text)"
     echo "$(date -u +%FT%TZ) status=${status} source=${source}"
     # Pitfall: right after the API call the instance may still report 'available' WITH a source set.

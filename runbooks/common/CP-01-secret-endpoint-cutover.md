@@ -28,7 +28,7 @@
 | CronJobs | Each run creates new pods, which read the new Secret | Suspend during the event; resume after CP-02 |
 | Running Jobs (migrations, batch) | Keep the old endpoint until they finish | Delete/restart them after cutover |
 | Workloads without the annotation | Not restarted | The pre-flight lists all Secret consumers without the annotation (step S01) |
-| Apps that read the secret **directly from Secrets Manager** (SDK, not the K8s Secret) | Not restarted, and may cache | Restart manually (`kubectl rollout restart`) or check the app's cache TTL |
+| Apps that read the secret **directly from Secrets Manager** (SDK, not the K8s Secret) | Not restarted, and may cache | Restart manually (`kubectl --context $EKS_CONTEXT rollout restart`) or check the app's cache TTL |
 | Connection poolers (PgBouncer) | They hold the upstream host | Annotate them too, with `restart-order 1` |
 
 ## Steps
@@ -36,12 +36,12 @@
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | CP01-S01 | **Inventory consumers**: `./automation/scripts/dr-eks-rollout.sh inventory` lists every workload that mounts/env-refs `$K8S_SECRET`, with or without a Reloader annotation | Executor | 1 | No unannotated consumers, or the list is noted for manual restart |
-| CP01-S02 | **Suspend secret rotation** (a rotation run would race with the cutover): `aws secretsmanager cancel-rotate-secret --secret-id $SECRET_ID` (only if `RotationEnabled=true`; record this so rotation is re-enabled in CP-03) | Executor | 1 | `RotationEnabled=false` |
+| CP01-S02 | **Suspend secret rotation** (a rotation run would race with the cutover): `aws --profile $AWS_PROFILE --region $AWS_REGION secretsmanager cancel-rotate-secret --secret-id $SECRET_ID` (only if `RotationEnabled=true`; record this so rotation is re-enabled in CP-03) | Executor | 1 | `RotationEnabled=false` |
 | CP01-S03 | **Suspend CronJobs** that use the DB: `./automation/scripts/dr-eks-rollout.sh suspend-cronjobs` | Executor | 1 | Listed CronJobs `suspend=true` |
 | CP01-S04 | **Pre-verify credentials on TARGET_DB *before* switching**: `./automation/scripts/dr-secret-cutover.sh precheck`. ⚠ **S3/S4 trap:** a restored DB holds passwords **as of the restore point**. If the app password was rotated since then, the current secret password fails. The script reports this, and `fix-password` resets the role password on TARGET_DB to the current secret value (needs the master credentials) | DBA | 3 | `login OK as $APP_DB_USER on TARGET_DB`, `pg_is_in_recovery=f` |
 | CP01-G1 ⛳ | **Cutover gate (PROD: G3 of the parent runbook)**: TARGET_DB verified, the old instance is fenced or agreed not to be, and comms are ready. `DECISION: CUTOVER GO` | IC | 1 | Decision recorded |
 | CP01-S05 | **Update the secret**: `./automation/scripts/dr-secret-cutover.sh apply`. It saves the previous VersionId and host (never the password) into evidence, sets `host`, `port`, `dbInstanceIdentifier` (if present), calls `put-secret-value`, then `dr_mark T6` | Executor (+2nd eyes in PROD) | 1 | New VersionId is `AWSCURRENT`; old is `AWSPREVIOUS` |
-| CP01-S06 | **Force ESO sync** (do not wait up to `refreshInterval`): run by the script: `kubectl annotate externalsecret $K8S_SECRET force-sync=$(date +%s) --overwrite` | Executor | 1 | ExternalSecret `Ready=True`, `refreshTime` after T6; K8s Secret `DB_HOST` = new endpoint |
+| CP01-S06 | **Force ESO sync** (do not wait up to `refreshInterval`): run by the script: `kubectl --context $EKS_CONTEXT annotate externalsecret $K8S_SECRET force-sync=$(date +%s) --overwrite` | Executor | 1 | ExternalSecret `Ready=True`, `refreshTime` after T6; K8s Secret `DB_HOST` = new endpoint |
 | CP01-S07 | **Wait for the Reloader rollouts**: `./automation/scripts/dr-eks-rollout.sh wait` (waits on `rollout status` for every annotated consumer, in `restart-order`). Fallback if Reloader is down or not annotated: `./automation/scripts/dr-eks-rollout.sh restart`. Then `dr_mark T7` | Executor | 5 | All `successfully rolled out`; 0 pods older than T6 among consumers |
 | CP01-S08 | **Read-only secret** (UAT/PROD, if `SECRET_ID_RO` is used by read paths that pointed at the replica, which is gone, stale or now primary): `SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` (temporarily points reads at TARGET_DB). Restore a proper replica in the FB runbook | Executor | 3 | Reader pods rolled; no connections to the old replica |
 | CP01-S08b | **Stale check**: `./automation/scripts/dr-eks-rollout.sh check` (or by hand: `k8s-secret-consumers.sh --context $EKS_CONTEXT -n $K8S_NS -s $K8S_SECRET check`) lists every consumer still running pods older than the Secret change | Executor | 1 | `stale=0`, or only the unannotated ones you chose to leave |
@@ -55,7 +55,7 @@ Only valid while OLD_DB is still intact and writable, i.e. **before** writes hav
                                                        # force-syncs ESO; Reloader rolls the pods again
 ```
 Equivalent manual command:
-`aws secretsmanager update-secret-version-stage --secret-id $SECRET_ID --version-stage AWSCURRENT --move-to-version-id <prev> --remove-from-version-id <new>`
+`aws --profile $AWS_PROFILE --region $AWS_REGION secretsmanager update-secret-version-stage --secret-id $SECRET_ID --version-stage AWSCURRENT --move-to-version-id <prev> --remove-from-version-id <new>`
 
 ## Pre-requisites (steady state — verify at each runbook review)
 - Every DB-consuming workload carries `secret.reloader.stakater.com/reload: "<k8s-secret>"` and `dr.example.com/restart-order`.

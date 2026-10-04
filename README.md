@@ -4,7 +4,10 @@ Capstone: **Enterprise Disaster Recovery framework and actionable runbook optimi
 recovery = a new/promoted DB endpoint written into **Secrets Manager**, synced by **External Secrets Operator**, with pods
 restarted automatically by **Stakater Reloader** (no DNS change).
 
-> Status: **v0.4**. Includes the corrective action plan for the 2026-08-04 UAT exercise (RTO 39:55 vs 30 min) → [docs/10](docs/10-corrective-action-plan-2026-08-04.md).
+> Status: **v0.5**. Includes the corrective action plan for the 2026-08-04 UAT exercise (RTO 39:55 vs 30 min) → [docs/10](docs/10-corrective-action-plan-2026-08-04.md).
+> v0.5: baseline-driven restore (`capture` → `plan` → restore → `harden` → `validate`/`validate-pg`), standalone stale-pod tool
+> `k8s-secret-consumers.sh`, **strict pinning** (no default profile/context; unpinned calls refused), recorded DR shell
+> `dr-session.sh` + `commands.jsonl` audit + continuous evidence sync to S3, pinning lint in CI. See [docs/12](docs/12-account-and-cluster-safety.md).
 > Targets: **RPO 24 h** (RDS daily backup, 7-day retention), **RTO 30 min** (aim). No DR drills are scheduled.
 > Runbooks are ISMS documents (ISO/IEC 27001:2022), reviewed by the SRE lead and approved by the CTO. Fill in the placeholders (`{{…}}`, `TODO`) and `env/<env>.env`.
 
@@ -29,7 +32,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 | `env/*.env.example` | Per-environment variables (instance IDs, secrets, EKS context, targets) |
 | [`automation/`](automation/) | SSM Automation documents, scripts (cutover, Reloader wait, restore, fence, parity, evidence, KPIs, tracker generator), SQL, K8s manifests |
 | [`docs/`](docs/) | 00 strategy · 01 architecture · 02 runbook standards · 03 execution media/tooling · 04 RPO/RTO · 05 evidence/audit · 06 comms · 07 validation (no scheduled drills) · 08 capstone optimization · **09 ISO 27001 scope, control mapping & risk register** · **10 corrective action plan (UAT exercise 2026-08-04)** · 11 AWS CLI quick reference · **12 account & cluster safety (guardrails)** |
-| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 48 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
+| [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; ~75 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
 | [`templates/`](templates/) | Comms (chat, leadership, vendor, customer/status page, planned drills), execution tracker, evidence manifest, drill report, PIR, runbook template |
 
 ## Ten rules this framework is built on

@@ -17,7 +17,7 @@ export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Team channel post. Stop the offending job/migration. `dr_mark T1`, `dr_mark T0 --at <bad change>` | Engineer | 3 | Posted |
-| P1-S02 | `RESTORE_TS` = bad change − 1 s (or `--use-latest-restorable-time` if the instance is lost); check the window: `aws rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` | Engineer | 5 | Inside the window |
+| P1-S02 | `RESTORE_TS` = bad change − 1 s (or `--use-latest-restorable-time` if the instance is lost); check the window: `aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` | Engineer | 5 | Inside the window |
 | P1-G1 ⛳ | Team lead OK; choose full cutover vs side instance. `dr_mark T2` | Team lead | 2 | Recorded |
 | P2-S01 | `dr_mark T4` · `./automation/scripts/dr-restore.sh pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"` | Engineer | 2 | API 200 |
 | P2-S02 | `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (records `T5`) → `harden` (converge to the baseline + `validate` = `VALIDATED`) → `dr_set_target "$RESTORED_DB"`; `05-restore-point-check.sql` | Engineer | size | Bad change absent |

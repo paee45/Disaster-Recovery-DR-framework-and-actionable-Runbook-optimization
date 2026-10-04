@@ -4,6 +4,8 @@
 - **Collect while executing.** Every automated step writes its output into the run directory, so nothing is collected from memory afterwards.
 - **Immutable.** Store evidence in a dedicated **log-archive account**, in an S3 bucket with **Object Lock (compliance mode)**, SSE-KMS, versioning, and cross-region replication. Executors can write but cannot delete.
 - **Verifiable.** A `manifest.json` lists each file with its SHA-256 hash. The manifest itself is hashed and the hash is posted in the incident timeline.
+- **Leave the machine early.** The evidence folder is synced to the bucket at every `dr_phase end` (`dr_sync_evidence`), on session exit, and finally by `dr-collect-evidence.sh` — a dead laptop must not lose the record.
+- **Everything typed is recorded.** Work inside `automation/scripts/dr-session.sh env/<env>.env <scenario>`: a recorded shell (transcript + timestamped history) with the env, strict pinning and the guard already loaded. Every `aws`/`kubectl` call made through the wrappers is also written to `commands.jsonl` (args, rc, duration; no output). Secrets are redacted before anything is stored (`dr_redact`); the raw transcript never leaves the machine.
 - **One process for every recovery.** The same bundle structure is used for real events and for any future test.
 
 ## 2. Evidence bundle structure
@@ -12,7 +14,10 @@
 s3://org-dr-evidence-<acct>/
   <env>/<yyyy>/<incident-or-drill-id>/
     manifest.json                 # file list + sha256 + collector identity + git SHA of runbook
-    timeline.jsonl                # dr_mark events (T0..T10), UTC
+    timeline.jsonl                # dr_mark events (T0..T10, SESSION_START/END, RESTORE_VALIDATE), UTC
+    commands.jsonl                # audit: every aws/kubectl call via the wrappers (redacted args, rc, ms, REFUSED ones too)
+    terminal/session-<ts>-<user>.log   # recorded shell transcript (dr-session.sh), control codes stripped, secrets redacted
+    terminal/history-<user>.txt   # every command typed, with UTC timestamps
     rto-rpo-report.json|md        # computed by dr-rto-rpo-calc.py
     approvals/                    # SSM aws:approve outputs / incident-tool decision log (G1..G4, FB-G0)
     db/
@@ -27,6 +32,9 @@ s3://org-dr-evidence-<acct>/
       secret-<id>.before|after.json  # host/port/dbInstanceIdentifier + version IDs only — NEVER the password
       secret-meta-<id>.json       # VersionIdsToStages, rotation state
       ssm-execution.json          # aws ssm get-automation-execution
+      baseline-<src>-<ts>.json    # source RDS config captured before the restore (describe + tags + pg_settings)
+      restore-request-<db>.json   # exact --cli-input-json used for the restore; harden-request-<db>.json
+      validate-<db>.txt · validate-pg-<db>.txt   # every setting vs the baseline → VALIDATED / NOT VALIDATED
       cloudwatch-replicalag.json
     k8s/
       inventory-<secret>.txt      # consumers + Reloader annotation status

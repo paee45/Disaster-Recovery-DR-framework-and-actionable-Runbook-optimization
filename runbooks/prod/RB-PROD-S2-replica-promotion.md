@@ -34,7 +34,7 @@ dr_set_target "$REPLICA_DB"           # exports TARGET_DB/TARGET_DSN (replica en
 
 > Preferred: start the SSM automation right after G1; it pauses at G2.
 > ```bash
-> aws ssm start-automation-execution --document-name DR-RdsPromoteReplica --parameters \
+> aws --profile $AWS_PROFILE --region $AWS_REGION ssm start-automation-execution --document-name DR-RdsPromoteReplica --parameters \
 >  "ReplicaDbInstanceId=$REPLICA_DB,SecretId=$SECRET_ID,DrId=$DR_ID,BackupRetentionDays=7,Approvers=arn:aws:iam::$ACCOUNT_ID:role/DRApproverRole,MinRequiredApprovals=2" \
 >  --query AutomationExecutionId --output text | tee "$DR_EVIDENCE_DIR/aws/ssm-execution-id.txt"
 > ```
@@ -47,7 +47,7 @@ dr_set_target "$REPLICA_DB"           # exports TARGET_DB/TARGET_DSN (replica en
 | P2-S03 | **Capture the final replica state** (RPO evidence): `dr_run replica-final psql "$TARGET_DSN" -XAt -f automation/sql/10-preflight-replica.sql` | DBA | 1 | LSN + last replay ts + heartbeat saved |
 | P2-G2 ⛳ | **Point of no return (IC + DBA)**: fence status accepted, final LSN captured. Approve in SSM (`aws:approve`) | IC + DBA | 2 | Approval recorded |
 | P2-S04 ‖ | [Failover Initiated] comms, all audiences | Comms | 5 | Logged |
-| P2-S05 ⚠ | **Promote** (manual fallback): `dr_mark T4` · `aws rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor + 2nd eyes | 1 | API 200 |
+| P2-S05 ⚠ | **Promote** (manual fallback): `dr_mark T4` · `aws --profile $AWS_PROFILE --region $AWS_REGION rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor + 2nd eyes | 1 | API 200 |
 | P2-S06 | **Wait until standalone**: `./automation/scripts/dr-verify.sh wait-promoted`. ⚠ Do not trust `wait db-instance-available` alone: the instance can still show `available` *before* the promotion starts. The script waits for: no `ReadReplicaSourceDBInstanceIdentifier` + `available` + `pg_is_in_recovery()=f`. `dr_mark T5` | Executor | 5–15 | `PROMOTED` |
 
 ## Phase 3 — Secret cutover & EKS reload (budget 10 min)

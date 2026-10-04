@@ -10,7 +10,7 @@ Use one or more levels, from the lightest to the strongest:
 |---|---|---|---|---|
 | F1 | **Make the DB read-only** and kill sessions | Yes | Yes | `./automation/scripts/dr-fence-instance.sh readonly $OLD_DB` |
 | F2 | **Quarantine SG** (no inbound) attached to OLD_DB | Yes | DBA only, via a bastion SG rule | `./automation/scripts/dr-fence-instance.sh quarantine $OLD_DB` |
-| F3 | **Stop** the instance (`stop-db-instance`; auto-starts after 7 days!) | Yes | No (start it to read) | `aws rds stop-db-instance --db-instance-identifier $OLD_DB --db-snapshot-identifier ${OLD_DB}-fence-$(date -u +%Y%m%d%H%M)` |
+| F3 | **Stop** the instance (`stop-db-instance`; auto-starts after 7 days!) | Yes | No (start it to read) | `aws --profile $AWS_PROFILE --region $AWS_REGION rds stop-db-instance --db-instance-identifier $OLD_DB --db-snapshot-identifier ${OLD_DB}-fence-$(date -u +%Y%m%d%H%M)` |
 
 **Recommended by scenario:**
 | Scenario | When | Level |
@@ -25,7 +25,7 @@ Use one or more levels, from the lightest to the strongest:
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
-| CP04-S01 | Snapshot the old instance **before** any destructive action, if it is reachable: `aws rds create-db-snapshot --db-instance-identifier $OLD_DB --db-snapshot-identifier ${OLD_DB}-pre-fence-$(date -u +%Y%m%d%H%M)` (can run ‖ with the fence) | DBA | 1 | Snapshot creating |
+| CP04-S01 | Snapshot the old instance **before** any destructive action, if it is reachable: `aws --profile $AWS_PROFILE --region $AWS_REGION rds create-db-snapshot --db-instance-identifier $OLD_DB --db-snapshot-identifier ${OLD_DB}-pre-fence-$(date -u +%Y%m%d%H%M)` (can run ‖ with the fence) | DBA | 1 | Snapshot creating |
 | CP04-S02 | Apply the fence level chosen in the table above; the script saves the before-state (SG IDs, parameter values) into evidence | Executor | 2 | `fence: OK level=Fx` |
 | CP04-S03 | Verify: `./automation/scripts/dr-verify.sh connections` shows 0 app sessions on OLD_DB (F1/F2) | DBA | 1 | 0 |
 | CP04-S04 | Record the fence state and any waiver in the timeline: `dr_mark FENCE "level=F2 waiver=none"` | Scribe | — | Recorded (input to reconciliation) |

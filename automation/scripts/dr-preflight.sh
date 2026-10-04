@@ -17,21 +17,21 @@ warn() { printf 'WARN  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*"; fails=$((fails+1)); }
 
 check_primary() {
-  local st; st="$(aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" --query 'DBInstances[0].DBInstanceStatus' --output text 2>&1)"
+  local st; st="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" --query 'DBInstances[0].DBInstanceStatus' --output text 2>&1)"
   echo "INFO  primary $PRIMARY_DB status=$st"
 }
 
 check_replica() {
   : "${REPLICA_DB:?REPLICA_DB empty — S2 is not applicable in this environment}"
-  read -r status source <<<"$(aws rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
+  read -r status source <<<"$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
     --query 'DBInstances[0].[DBInstanceStatus,ReadReplicaSourceDBInstanceIdentifier]' --output text)"
   [[ "$status" == "available" ]] && pass "replica status=$status" || fail "replica status=$status"
   [[ "$source" == *"$PRIMARY_DB"* ]] && pass "replica source=$source" || fail "replica source='$source' (expected $PRIMARY_DB)"
-  local repl; repl="$(aws rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
+  local repl; repl="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$REPLICA_DB" \
     --query 'DBInstances[0].StatusInfos[?StatusType==`read replication`].Status | [0]' --output text)"
   [[ "$repl" == "replicating" ]] && pass "replication=$repl" || warn "replication=$repl (expected while the primary is down)"
 
-  local lag; lag="$(aws cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name ReplicaLag \
+  local lag; lag="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name ReplicaLag \
     --dimensions Name=DBInstanceIdentifier,Value="$REPLICA_DB" \
     --start-time "$(date -u -d '-15 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum \
     --query 'max(Datapoints[].Maximum)' --output text)"
@@ -48,12 +48,12 @@ check_replica() {
 }
 
 check_restore() {
-  local win; win="$(aws rds describe-db-instance-automated-backups --db-instance-identifier "$PRIMARY_DB" \
+  local win; win="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups --db-instance-identifier "$PRIMARY_DB" \
     --query 'DBInstanceAutomatedBackups[0].RestoreWindow' --output json 2>/dev/null)"
   if [[ -n "$win" && "$win" != "null" ]]; then pass "PITR window: $(jq -c . <<<"$win")"; else warn "no automated backups / PITR window for $PRIMARY_DB → S3 snapshot only"; fi
-  local n; n="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --query 'length(DBSnapshots)' --output text 2>/dev/null)"
+  local n; n="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --query 'length(DBSnapshots)' --output text 2>/dev/null)"
   (( ${n:-0} > 0 )) && pass "$n snapshots available for $PRIMARY_DB" || warn "no snapshots listed for $PRIMARY_DB (check AWS Backup vault / cross-account copies)"
-  local src_ok=0; aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && src_ok=1
+  local src_ok=0; aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && src_ok=1
   # Restore settings come from a baseline of the source (dr-restore.sh capture): live if the source exists, else stored.
   local bl="${BASELINE_DIR:-$HERE/../../evidence/baselines/$DR_ENV}/baseline-${PRIMARY_DB}.json" age
   if (( src_ok )); then pass "restore baseline ← captured live from $PRIMARY_DB at restore time (all SGs, subnets, PG, tags, retention, …)"
@@ -65,7 +65,7 @@ check_restore() {
     [[ -n "${!v:-}" ]] && warn "override $v=${!v} in env profile wins over the baseline (validate will report it)"
   done
   if [[ -n "${DB_PARAM_GROUP:-}" ]]; then
-    aws rds describe-db-parameter-groups --db-parameter-group-name "$DB_PARAM_GROUP" >/dev/null 2>&1 \
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-parameter-groups --db-parameter-group-name "$DB_PARAM_GROUP" >/dev/null 2>&1 \
       && pass "parameter group $DB_PARAM_GROUP exists" || fail "parameter group $DB_PARAM_GROUP not found"
   fi
 }
@@ -90,7 +90,7 @@ case "$MODE" in
   *) echo "usage: $0 replica|restore"; exit 2 ;;
 esac
 check_k8s
-aws secretsmanager describe-secret --secret-id "$SECRET_ID" --query '{rotation:RotationEnabled,stages:VersionIdsToStages}' --output json \
+aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" --query '{rotation:RotationEnabled,stages:VersionIdsToStages}' --output json \
   | sed 's/^/      /'
 
 echo "----"

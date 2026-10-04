@@ -29,10 +29,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/dr-lib.sh"             # pins aws → $AWS_PROFILE/$AWS_REGION and kubectl → $EKS_CONTEXT
 unset DR_GUARD_OK
 if dr_guard; then ok "identity guard (account, cluster identity, context)"; else bad "identity guard — see GUARD FAIL above"; fi
-aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && ok "instance $PRIMARY_DB exists" || warn "instance $PRIMARY_DB not found (expected if it was lost/deleted)"
-[[ -n "${REPLICA_DB:-}" ]] && { aws rds describe-db-instances --db-instance-identifier "$REPLICA_DB" >/dev/null 2>&1 && ok "replica $REPLICA_DB exists" || bad "replica $REPLICA_DB not found"; }
-aws secretsmanager describe-secret --secret-id "$SECRET_ID" >/dev/null 2>&1 && ok "secret $SECRET_ID readable" || bad "secret $SECRET_ID not readable"
-kubectl config get-contexts -o name 2>/dev/null | grep -qx "$EKS_CONTEXT" && ok "kube context $EKS_CONTEXT present" || bad "kube context $EKS_CONTEXT missing (aws eks update-kubeconfig --name <cluster> --alias $EKS_CONTEXT)"
+aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && ok "instance $PRIMARY_DB exists" || warn "instance $PRIMARY_DB not found (expected if it was lost/deleted)"
+[[ -n "${REPLICA_DB:-}" ]] && { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$REPLICA_DB" >/dev/null 2>&1 && ok "replica $REPLICA_DB exists" || bad "replica $REPLICA_DB not found"; }
+aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" >/dev/null 2>&1 && ok "secret $SECRET_ID readable" || bad "secret $SECRET_ID not readable"
+kubectl config get-contexts -o name 2>/dev/null | grep -qx "$EKS_CONTEXT" && ok "kube context $EKS_CONTEXT present" || bad "kube context $EKS_CONTEXT missing (aws --profile $AWS_PROFILE --region $AWS_REGION eks update-kubeconfig --name <cluster> --alias $EKS_CONTEXT)"
 kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" >/dev/null 2>&1 && ok "K8s secret $K8S_NS/$K8S_SECRET" || bad "K8s secret $K8S_NS/$K8S_SECRET not found"
 
 echo "----"
