@@ -4,10 +4,10 @@
 |---|---|
 | Runbook ID / version | |
 | Service / tier | |
-| Owner / approver | |
+| Owner · Reviewed by (SRE lead) · Approved by (CTO) | |
 | Environments | |
 | Linked automation (doc + version, git SHA) | |
-| Last drill / measured RTO / RPO | |
+| Test status / measured RTO / RPO (from real events) | |
 | Targets RTO / RPO | |
 | Pre-approved change | |
 
@@ -35,5 +35,5 @@
 | Step | Template | Audience |
 |---|---|---|
 ## 10. Change log
-| Version | Date | Change | Trigger (drill/PIR) |
+| Version | Date | Change | Trigger (PR/PIR) |
 |---|---|---|---|

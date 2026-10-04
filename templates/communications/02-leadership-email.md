@@ -1,6 +1,6 @@
 # Internal leadership — Email (+ exec chat cross-post)
 
-**To:** `dr-leadership-{{env}}@` (CTO/VP Eng, Service Owner, Head of Customer Success, Head of Support, Security lead; Legal/DPO **only if data loss/security**)
+**To:** `dr-leadership-{{env}}@` (CTO, SRE lead, Head of Support, Security lead; DPO only if the CTO decides personal data is affected)
 **From:** Comms lead on behalf of the IC · **Cadence:** PROD SEV1 every 30 min; UAT only if UAT is blocked > 4 h · **DEV: not sent**
 **Style:** business impact first, decisions needed, no jargon. Each email is ≤ 12 lines in the main body.
 
@@ -28,7 +28,7 @@ Next update: {{hh:mm}} UTC · Bridge: {{link}}
 **Subject:** `[{{ENV}}][SEV{{n}}][Recovery Initiated] {{SERVICE}} — {{switching to standby database | restoring data to <time>}}`
 ```
 Decision: At {{hh:mm}} UTC we started {{promotion of the standby database | a restore to <time>}} (approved by {{names}}).
-Expected restoration: {{hh:mm}} UTC (based on drill performance of {{x}} min).
+Expected restoration: {{hh:mm}} UTC (RTO target 30 min; estimate for this scenario: {{x}} min).
 Data: {{No data loss expected (planned switchover) | Up to ≈{{x}} seconds of transactions before {{hh:mm}} UTC
 may need re-entry or reconciliation; we will confirm after recovery.}}
 Risks: {{e.g. reduced capacity for first 30 min; integrations may need replay}}.
@@ -49,8 +49,8 @@ Follow-ups: PIR on {{date}}; customer RCA by {{date}} (per contract: {{x}} busin
 ```
 Data impact: To remove {{the faulty change / damaged data}}, we are restoring the database to {{hh:mm}} UTC.
 Changes made by customers between {{hh:mm}} and {{hh:mm}} UTC are not in the restored database. We have preserved
-them separately and are assessing which can be re-applied ({{owner}}, ETA {{date}}). Customer wording approved by Legal/CS.
-Regulatory: DPO informed {{yes/no}} (integrity/availability loss of personal data may be notifiable).
+them separately and are assessing which can be re-applied ({{owner}}, ETA {{date}}). Customer wording: pre-approved template (CTO).
+Regulatory: CTO decision on DPO notification {{yes/no}} (integrity/availability loss of personal data may be notifiable).
 ```
 
 ### 4. [Post-Mortem / RCA Ready]

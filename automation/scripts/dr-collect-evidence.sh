@@ -37,7 +37,7 @@ if [[ -n "${REPLICA_DB:-}" ]]; then
 fi
 
 python3 "$HERE/dr-rto-rpo-calc.py" "${DR_EVIDENCE_DIR}/timeline.jsonl" --out "${DR_EVIDENCE_DIR}" \
-  --rto-target-min "${RTO_TARGET_MIN:-60}" --rpo-target-s "${RPO_TARGET_S:-300}" || true
+  --rto-target-min "${RTO_TARGET_MIN:-30}" --rpo-target-s "${RPO_TARGET_S:-86400}" || true
 
 ( cd "$DR_EVIDENCE_DIR"
   find . -type f ! -name manifest.json -print0 | sort -z | xargs -0 sha256sum \

@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Version / owner / approver | v1.0-draft / `{{SRE_OWNER}}` / `{{SERVICE_OWNER}}` |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO (ISMS document control, [docs/09](../../docs/09-iso27001-scope.md)) |
 | Topology | `app-pg-prod` Multi-AZ (primary + synchronous standby) + read replica `app-pg-prod-replica` |
 | What AWS does | Detects the primary failure → promotes the standby → **flips the same endpoint DNS** to the new host (typically 60–120 s) → builds a new standby in the background |
 | Secret change | **None.** The endpoint is unchanged, so Reloader is **not** triggered |
-| Targets | RPO **0** (synchronous). RTO ≤ 5 min (AWS) + app reconnect |
-| Last drill | `{{date}}` (drilled with `reboot-db-instance --force-failover` in a maintenance window, see [docs/07](../../docs/07-testing-and-drill-program.md)) |
+| Targets | RPO target 24 h (expected **0**, synchronous standby) · RTO target 30 min (expected: AWS 1–2 min + app reconnect) |
+| Tested | **Not tested** — no DR testing scheduled; S1 cannot be rehearsed in UAT (no Multi-AZ). Accepted risk R6 in [docs/09](../../docs/09-iso27001-scope.md#5-dr-risk-register-input-to-61-risk-treatment) |
 
 **Use when:** an RDS event shows a Multi-AZ failover started/completed on `$PRIMARY_DB`, or the instance is `rebooting`/`modifying` with failover.
 **Do not:** start a replica promotion (S2) or a restore while an automatic failover is in progress. **Wait up to 5 min**
@@ -23,6 +23,7 @@ dr_set_target "$PRIMARY_DB"           # the same instance; the endpoint is uncha
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Open the incident (SEV2 by default; SEV1 if impact > 5 min). Post [Investigating] in the internal chat. `dr_mark T1` | On-call SRE | 2 | Channel open |
+| P1-S01b | Record the RPO: `dr_mark RPO_ZERO` (synchronous standby) | Scribe | — | Recorded |
 | P1-S02 | RDS events: `dr_run rds-events aws rds describe-events --source-type db-instance --source-identifier $PRIMARY_DB --duration 120`. Look for the Multi-AZ failover *started* / *completed* events and their **reason** message | SRE | 1 | Failover started at `T_fo_start`, completed at `T_fo_end`. `dr_mark T4 --at <started>` / `dr_mark T5 --at <completed>` |
 | P1-S03 | Instance state: `aws rds describe-db-instances --db-instance-identifier $PRIMARY_DB --query 'DBInstances[0].{st:DBInstanceStatus,az:AvailabilityZone,az2:SecondaryAvailabilityZone,maz:MultiAZ}'` (compare the AZ with the CMDB/last evidence) | SRE | 1 | `available`, AZ changed, `MultiAZ=true` |
 | P1-S04 | If still not `available` after **5 min** since `T_fo_start` → escalate: AWS Support case (Business-critical) + switch to the decision tree (S2 if lag OK). `DECISION:` recorded | IC | — | Decision recorded |

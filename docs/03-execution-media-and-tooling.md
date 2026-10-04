@@ -75,7 +75,7 @@ Score: 1 (poor) – 5 (excellent). "Risk" = operational risk (higher score = low
 | Secret sync to EKS | External Secrets Operator + IRSA / EKS Pod Identity (force-sync annotation) |
 | Automatic restarts | **Stakater Reloader** (HA, `reloadStrategy: annotations`) + verification script |
 | GitOps | Argo CD / Flux; IaC adoption of the new instance (Terraform import) |
-| Fault injection for drills | AWS Fault Injection Service (FIS) |
+| Fault injection (only if testing is approved later) | AWS Fault Injection Service (FIS) |
 | Observability | CloudWatch + Prometheus/Grafana or Datadog; synthetic checks (CloudWatch Synthetics / Datadog Synthetics) |
 | Evidence | S3 Object Lock + `dr-collect-evidence.sh` |
 | Backups (class B/C) | AWS Backup with cross-account copy + Vault Lock |

@@ -1,4 +1,7 @@
-# Planned DR tests, switchovers and failbacks
+# Planned maintenance (failback/normalisation) and any future DR tests
+
+> No DR drills are scheduled at present. These notices are used for planned FB-runbook changes with customer impact,
+> and would be used for DR tests if they are approved later.
 
 Every drill message starts and ends with **`[DRILL] — THIS IS AN EXERCISE`** in internal channels.
 For customers, a planned switchover is presented as **scheduled maintenance**, not a "disaster".

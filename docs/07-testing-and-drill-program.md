@@ -1,62 +1,69 @@
-# 07 — Testing & Drill Program
+# 07 — Runbook Validation (No Scheduled DR Drills)
 
-## 1. Drill matrix (environment × scenario)
+## 1. Current decision
 
-| Scenario | DEV | UAT | PROD |
-|---|---|---|---|
-| **S1** Multi-AZ failover | n/a | n/a (no Multi-AZ: see gap below) | **Semi-annual**, maintenance window: `aws rds reboot-db-instance --force-failover` (≈ 1–2 min of write outage), then run RB-PROD-S1 Phase 2 |
-| **S2** Replica promotion | n/a | **Quarterly**, full runbook incl. FB-S2 (planned mode: drain → lag 0 → promote) | Annual tabletop + validated by UAT. A real PROD drill only with a disposable replica (§2 L2) |
-| **S3** Snapshot restore | **Monthly automated** (restore → verify → cutover on a DEV namespace → cleanup) | **Quarterly** incl. cutover + FB-S3S4 | **Quarterly restore test** into an isolated account/VPC (no cutover); the cross-account Vault Lock copy at least annually |
-| **S4** PITR | **Monthly automated** (both modes alternately) | **Quarterly** (alternate mode A / mode B) | **Semi-annual** side restore (mode B rehearsal, no cutover) + measure the restore time |
-| CP-01 secret cutover + Reloader | Every DEV drill | Every UAT drill | Implicitly in S2/S3/S4 tests; plus the **monthly inventory check** (0 unannotated consumers) |
-
-> **UAT gap for S1:** UAT has no Multi-AZ, so app behaviour during a Multi-AZ failover (DNS caching, pool recovery) is only
-> exercised in PROD. Mitigation options (choose one, backlog P12): enable Multi-AZ on UAT for a drill window each quarter,
-> or keep the semi-annual PROD maintenance-window S1 drill and treat its result as the S1 baseline.
-
-## 2. Drill ladder (increasing realism)
-
-| Level | Type | What happens |
-|---|---|---|
-| L1 | **Tabletop** | Walk through the env/scenario runbook against a scenario card; validate roles, gates, comms |
-| L2 | **Component test (automated)** | Scheduled pipeline: restore/promote a **disposable** instance → `dr-verify.sh db` → measure `T5 − T4` → delete. Also an ESO/Reloader test: bump a dummy key in a test secret → verify rollout |
-| L3 | **Planned scenario drill** | Full runbook incl. cutover, comms, evidence, FB runbook |
-| L4 | **Unplanned simulation (game day)** | AWS FIS, or an injected "bad migration", with executors not briefed on the details |
-| L5 | **Security restore** | Restore from the cross-account Vault-Locked backup into a clean account; rotated credentials |
-
-## 3. Fault injection ideas
-
-| Scenario | Injection |
+| Item | Decision (owner: CTO) |
 |---|---|
-| S1 | FIS `aws:rds:reboot-db-instances` with `forceFailover=true` (PROD maintenance window) |
-| S2 | Make the primary unreachable from the app/replica path (FIS `aws:network:disrupt-connectivity` on the DB subnets in UAT), or stop the UAT primary (`stop-db-instance` is not allowed while it has a read replica; use the network disruption) |
-| S4 | A scripted "bad migration" against a seeded UAT table (e.g. `UPDATE … SET price = 0`), timestamp unknown to the executors |
-| CP-01 | Remove the Reloader annotation from one test workload: the pre-flight inventory must catch it |
+| DR drills / game days | **None scheduled in any environment** (DEV, UAT, PROD). Ad-hoc exercises happen when decided (e.g. **UAT S3 on 2026-08-04**: RTO 39:55, not met → [corrective action plan](10-corrective-action-plan-2026-08-04.md)) |
+| PROD | Runbooks only; **no PROD drill** |
+| How runbooks are validated | Desk review + static/automated checks (§2), learning from real events (§3) |
+| Residual risk | Recorded as **R2** (no regular DR testing) and **R6** (S1 not rehearsable in UAT) in the [risk register](09-iso27001-scope.md#5-dr-risk-register-input-to-61-risk-treatment), accepted by the CTO with a review date |
 
-Always use **stop conditions** (a CloudWatch alarm on the customer-facing SLO) and a change ticket.
+> **ISO 27001 note:** Annex A **5.30** (ICT readiness for business continuity) and **8.13** (information backup) expect
+> continuity and backup arrangements to be *tested*. Not testing is allowed only as a **documented, risk-based decision**.
+> That is why R2 exists. Expect an auditor to ask for it, and to ask when it will be re-evaluated.
 
-## 4. Scoring (every drill report)
+## 2. Validation without drills (what we do instead)
 
-| KPI | Target | Source |
+| Check | What it proves | When |
 |---|---|---|
-| Business RTO (`T9 − T0`) | ≤ env/scenario target | timeline |
-| RPO actual | ≤ target | KPI report |
-| Decision time (`T2 − T1`) | ≤ 15 min (PROD) | timeline |
-| Cutover time (`T7 − T6`) | ≤ 10 min | timeline |
-| Consumers not reloaded automatically | 0 | `dr-eks-rollout.sh wait` output |
-| Parity diffs after restore | 0 | `rds-config-parity.sh` |
-| Missing timeline markers | 0 | KPI report |
-| Comms on time | 100 % | comms log |
-| Deviations without a ticket | 0 | PIR |
+| **Desk review** (PR: SRE lead reviews, CTO approves) | Steps are complete, correct and match the current architecture | Every change; at least every 12 months |
+| **Walk-through / read-through** by on-call engineers (no execution) | People know the runbooks exist and understand the roles (A.6.3 awareness) | Yearly and for new on-call members (recommended) |
+| CI: `shellcheck`, YAML/JSON lint, `runbook-to-tracker.py` on every runbook | Scripts and step tables are well-formed | Every PR |
+| **Read-only pre-flight** against the real env (`dr-preflight.sh replica\|restore`) | Access, replica health, PITR window, snapshots, ESO/Reloader, consumer inventory | After each runbook change (no impact on the environment) |
+| `dr-restore.sh … ` with **`DRY_RUN=1`** | The restore commands resolve with the real env profile | After env/profile changes |
+| `dr-eks-rollout.sh inventory` | 0 DB consumers without the Reloader annotation | After each app release that adds a workload (could be a CI gate) |
+| Backup monitoring (daily automated snapshot exists, `LatestRestorableTime` recent) | The 24 h RPO basis is in place | Continuous (alarms in [04](04-rpo-rto-measurement.md)) |
 
-## 5. DR maturity model
+## 3. Learning from real events
+
+Without drills, the **first real recovery is the baseline measurement**. Every event (any environment, including DEV data
+resets with S3/S4) must:
+- run with `dr_mark` timestamps, so RTO/RPO are measured, not estimated
+- produce a PIR ([CP-06](../runbooks/common/CP-06-post-incident-review.md)) and runbook updates
+- update the RTO model in [04](04-rpo-rto-measurement.md) (restore minutes per 100 GB) and re-assess risk R3 (RTO 30 min for S3/S4)
+
+> A DEV data reset done with RB-DEV-S3/S4 is not a "drill". It is normal operations, but it produces real restore-time data at no extra cost.
+
+## 3b. Practice without drills (TICKET-108)
+- Yearly read-through of the env/scenario runbooks by every on-call engineer (attendance recorded: ISO 27001 cl. 7.2)
+- Hands-on in **DEV** with no impact: `dr-env-check.sh`, `dr-preflight.sh`, `dr-restore.sh … DRY_RUN=1`, `dr-eks-rollout.sh inventory`
+- The [CLI quick reference](11-aws-cli-quick-reference.md) is the only command set to learn
+
+## 4. Known gap: S1 cannot be rehearsed in UAT
+
+UAT has no Multi-AZ, so application behaviour during a Multi-AZ failover (DNS caching, pool recovery) is only seen in PROD.
+Accepted as **R6**. Options if the decision is revisited:
+1. Enable Multi-AZ on UAT for a short window, run `reboot-db-instance --force-failover`, then disable it again (low cost)
+2. A PROD maintenance-window failover (`reboot --force-failover`, ≈ 1–2 min of write outage)
+
+## 5. If testing is approved later (catalogue, not a schedule)
+
+| Option | Env | Effort | Value |
+|---|---|---|---|
+| Automated restore test (S3/S4 into a disposable instance, measure, delete) | DEV | Low | Measures restore time → closes R3 |
+| Planned S2 with drain (`DR_MODE=planned`) + FB-S2 | UAT | Medium | Proves the cutover + Reloader path end to end |
+| S4 mode B on a seeded "bad change" | UAT | Medium | Practises restore-time selection and surgical repair |
+| S1 per §4 | UAT window / PROD | Low | Closes R6 |
+
+Templates for that case already exist: [`drill-report.md`](../templates/reports/drill-report.md) and [`05-planned-drill-notices.md`](../templates/communications/05-planned-drill-notices.md).
+
+## 6. Maturity (for the capstone narrative)
 
 | Level | Name | Characteristics |
 |---|---|---|
-| 1 | Ad-hoc | One wiki page; manual console restore; manual secret edits; teams restart pods themselves; RTO unknown |
-| 2 | Documented | Step-by-step runbook (generic), tested once, sheet tracking |
-| 3 | Repeatable | Env/scenario runbooks, gates, roles, scheduled UAT drills, measured RTO/RPO, comms templates |
-| 4 | Automated | SSM docs, scripted cutover + Reloader verification, evidence auto-collected, DEV monthly restore tests, KPI trend |
-| 5 | Resilient by design | Continuous L2 tests, FIS game days, cross-region protection, RTO model per DB size, zero manual secret handling |
-
-Typical capstone goal: **Level 2 → Level 4**.
+| 1 | Ad-hoc | No runbooks; manual console restore; manual secret edits; RTO unknown |
+| 2 | Documented | A generic runbook |
+| **3** | **Repeatable (capstone target)** | Env × scenario runbooks, gates, roles, CP procedures, comms templates, ISMS document control, risks accepted |
+| 4 | Automated & measured | SSM documents in use, verified Reloader cutover, evidence auto-collected, measured RTO/RPO from tests or events |
+| 5 | Resilient by design | Regular tests, cross-region protection, RTO model per DB size |

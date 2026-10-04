@@ -4,6 +4,7 @@
 #   db            : writability probe on TARGET_DB
 #   connections   : app sessions per application_name on TARGET_DB and OLD_DB (old must reach 0)
 #   app           : deep-health URLs (APP_HEALTH_URLS)
+#   compare-counts: row counts of VERIFY_TABLES on OLD vs TARGET
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
@@ -54,6 +55,21 @@ connections() {
   return 0
 }
 
+# compare-counts: exact row counts of VERIFY_TABLES (space-separated schema.table) on OLD_DB vs TARGET_DB (TICKET-104).
+# Replaces the outdated verification scripts: one list per env in env/<env>.env, no schema assumptions in code.
+compare_counts() {
+  : "${VERIFY_TABLES:?set VERIFY_TABLES in env/<env>.env, e.g. 'public.orders public.payments'}"
+  local t a b tdsn odsn
+  tdsn="$(dr_dsn "$TARGET_DB")"; odsn="$( [[ -n "${OLD_DB:-}" ]] && dr_dsn "$OLD_DB" 2>/dev/null || true)"
+  printf '%-40s %15s %15s\n' table old target
+  for t in $VERIFY_TABLES; do
+    b="$(psql "$tdsn" -XAtqc "select count(*) from $t" 2>&1 | tail -1)"
+    a="$( [[ -n "$odsn" ]] && psql "$odsn" -XAtqc "select count(*) from $t" 2>&1 | tail -1 || echo n/a)"
+    printf '%-40s %15s %15s\n' "$t" "$a" "$b"
+  done
+  echo "(after a restore, target < old is expected: the difference = writes after the restore point)"
+}
+
 app_probe() {
   : "${APP_HEALTH_URLS:?space-separated deep-health URLs}"
   local rc=0 code
@@ -68,6 +84,7 @@ case "${1:-}" in
   wait-promoted) wait_promoted ;;
   db)            db_probe ;;
   connections)   connections ;;
+  compare-counts) compare_counts ;;
   app)           app_probe ;;
-  *) echo "usage: $0 {wait-promoted|db|connections|app}"; exit 2 ;;
+  *) echo "usage: $0 {wait-promoted|db|connections|compare-counts|app}"; exit 2 ;;
 esac

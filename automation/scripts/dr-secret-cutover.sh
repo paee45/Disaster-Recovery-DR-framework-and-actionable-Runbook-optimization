@@ -4,7 +4,7 @@
 #   fix-password  : reset the app role password on TARGET_DB to the current secret value (restored DBs have old passwords)
 #   apply         : save previous version → put-secret-value(host/port/dbInstanceIdentifier) → ESO force-sync → wait Reloader rollouts
 #   rollback      : move AWSCURRENT back to the saved previous version → ESO force-sync → wait rollouts
-# Env: SECRET_ID, TARGET_DB, EKS_CONTEXT, K8S_NS, K8S_SECRET (K8S_SECRET_RO used automatically when SECRET_ID==SECRET_ID_RO),
+# Env: SECRET_ID, TARGET_DB, EKS_CONTEXT, K8S_NS, K8S_SECRET, K8S_HOST_KEY (e.g. POSTGRES_DB_HOST) (K8S_SECRET_RO used automatically when SECRET_ID==SECRET_ID_RO),
 #      MASTER_SECRET_ID (fix-password only). Never prints or stores passwords.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,7 +56,7 @@ wait_k8s_secret_host() {
   local want="$1" deadline=$(( $(date +%s) + 180 )) got=""
   $K annotate externalsecret "$K8S_SECRET" force-sync="$(date +%s)" --overwrite >/dev/null
   while (( $(date +%s) < deadline )); do
-    got="$($K get secret "$K8S_SECRET" -o json | jq -r '.data | (.DB_HOST // .host // empty)' | base64 -d 2>/dev/null || true)"
+    got="$($K get secret "$K8S_SECRET" -o json | jq -r --arg k "${K8S_HOST_KEY:-DB_HOST}" '.data | (.[$k] // .DB_HOST // .host // empty)' | base64 -d 2>/dev/null || true)"
     [[ "$got" == "$want" ]] && { echo "K8s Secret $K8S_SECRET host=$got (synced)"; return 0; }
     sleep 5
   done

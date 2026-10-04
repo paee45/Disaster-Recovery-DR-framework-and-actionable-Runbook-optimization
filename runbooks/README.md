@@ -27,6 +27,7 @@
 | [CP-04](common/CP-04-fencing-old-instance.md) | Fencing the old instance (split-brain / stray writes) |
 | [CP-05](common/CP-05-evidence-and-closure.md) | Evidence, RTO/RPO calculation, closure |
 | [CP-06](common/CP-06-post-incident-review.md) | Post-incident review (post-mortem), with scenario-specific questions |
+| [CP-07](common/CP-07-troubleshooting.md) | Troubleshooting: env/tooling, RDS, secret/ESO/Reloader/EKS |
 
 ## 2. Which scenario? (decision tree)
 
@@ -44,21 +45,23 @@
                                Is the damage small and well-scoped?           ▼
                                  │yes                │no              Replica exists & healthy & lag ≤ RPO?
                                  ▼                   ▼                   │yes (UAT/PROD)        │no / DEV
-                    S4 SURGICAL REPAIR      Within backup retention?     ▼                      ▼
-                    (PITR side instance,      │yes          │no      S2 replica promotion   Within retention?
+                    S4 SURGICAL REPAIR      Within 7-day retention?      ▼                      ▼
+                    (PITR side instance,      │yes          │no      S2 replica promotion   Within 7 days?
                     copy rows back, no        ▼             ▼                               │yes      │no
-                    cutover)               S4 PITR     S3 snapshot                         S4 PITR  S3 snapshot
-                                           (cutover)   (AWS Backup / manual /                (latest  (daily)
-                                                        cross-account copy)                  restorable)
+                    cutover)               S4 PITR     S3 MANUAL snapshot                  S4 PITR  S3 snapshot
+                                           (cutover)   only (if one exists;                 (latest  (daily)
+                                                        else unrecoverable, R4)              restorable)
 ```
 
 > ⚠ **Never promote the replica for a data problem.** The replica has already applied the bad change.
-> ⚠ For a **security event** (compromise or ransomware), the Security IR lead becomes IC. Restore only from a backup
-> copy the attacker could not reach (cross-account AWS Backup vault), using rotated credentials.
+> ⚠ For a **security event** (compromise or ransomware), the Security IR lead becomes IC. Restore with rotated credentials into
+> a clean VPC. There is no isolated (cross-account) backup copy today: accepted risk R5 ([docs/09](../docs/09-iso27001-scope.md)).
 
 ## 3. Conventions used in every runbook
 
-- **Profile:** `source env/<env>.env` (copy from `env/<env>.env.example`), then `source automation/scripts/dr-lib.sh && dr_init <SCENARIO>`.
+- **Profile:** `source env/<env>.env` (copy from `env/<env>.env.example`), run `./automation/scripts/dr-env-check.sh <SCENARIO>` (must PASS), then `source automation/scripts/dr-lib.sh && dr_init <SCENARIO>`. Never edit values inside commands.
+- **CLI, not console:** every action has a copy-paste CLI command or script ([CLI quick reference](../docs/11-aws-cli-quick-reference.md)).
+- **Phase timers:** `dr_phase start|end <phase> <budget>`; `dr_summary` shows where the time went.
 - **`TARGET_DB`** = the instance that becomes the primary (the promoted replica, or the restored instance). **`OLD_DB`** = the previous primary.
 - **Restored instance naming:** `<primary>-r<YYYYMMDDHHMM>` for snapshot and `<primary>-p<YYYYMMDDHHMM>` for PITR (UTC). This makes them unique, sortable and traceable to the event.
 - **Step IDs** `P<phase>-S<nn>`. Gates `G<n>` are table rows, so the [tracker generator](../automation/scripts/runbook-to-tracker.py) picks them up. `‖` = can run in parallel, ⚠ = irreversible.
@@ -68,9 +71,22 @@
 
 | | DEV | UAT | PROD |
 |---|---|---|---|
-| Declares / approves | Team lead | SRE on-call + QA lead | IC + Service Owner (+ exec if data loss > RPO) |
+| Declares / approves | Team lead | SRE on-call + QA lead | IC + SRE lead; **CTO** accepts data loss |
 | Gate approvals in SSM (`MinRequiredApprovals`) | 1 | 1 | 2 (four-eyes) |
 | Change type | None | Standard | Pre-approved emergency change |
 | Comms | Team chat | Chat + UAT users/projects email | Full matrix ([docs/06](../docs/06-communications.md)) |
-| Targets (example, `TODO(capstone)`) | RTO 8 h / RPO 24 h | RTO 4 h / RPO 1 h | RTO 1 h / RPO 5 min (S2), ≤ 15 min (S4) |
-| Evidence retention | 30 days | 1 year | 7 years (Object Lock compliance) |
+| Targets (all envs) | RTO 30 min (aim) / RPO 24 h | RTO 30 min (aim) / RPO 24 h | RTO 30 min (aim) / RPO 24 h |
+| Backups | RDS automated, 7-day retention | same | same |
+| DR testing | Not scheduled | Not scheduled | Not scheduled |
+| Evidence retention | Per ISMS records policy (`TODO`) | same | same |
+
+## 5. Document control (ISO/IEC 27001:2022 clause 7.5, A.5.37)
+
+| Item | Rule |
+|---|---|
+| Owner | SRE (`{{SRE_OWNER}}`) |
+| Review / approval | Every change by Git pull request: **reviewed by the SRE lead, approved by the CTO**. The merged PR is the approval record |
+| Classification | Internal |
+| Review cycle | At least every 12 months, and after every DR event, significant architecture change or ISMS audit finding |
+| Versioning | `vMAJOR.MINOR` in each runbook header, plus a change-log row that references the PR/PIR |
+| Scope & controls | [docs/09 — ISO 27001 scope](../docs/09-iso27001-scope.md) |

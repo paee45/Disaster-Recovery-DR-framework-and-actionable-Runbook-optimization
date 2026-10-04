@@ -21,6 +21,8 @@ dr_init() {
   export OLD_DB="${OLD_DB:-$PRIMARY_DB}"
   dr_mark RUNBOOK_START "scenario=${DR_SCENARIO} env=${DR_ENV} git=$(git rev-parse --short HEAD 2>/dev/null || echo n/a) mode=${DR_MODE:-unplanned}"
   echo "DR_ID=${DR_ID}  evidence=${DR_EVIDENCE_DIR}"
+  echo "ENV=${DR_ENV} PRIMARY_DB=${PRIMARY_DB:-} OLD_DB=${OLD_DB:-} REPLICA_DB=${REPLICA_DB:-} SECRET_ID=${SECRET_ID} EKS_CONTEXT=${EKS_CONTEXT:-} K8S_SECRET=${K8S_SECRET:-}/${K8S_HOST_KEY:-DB_HOST}"
+  echo "All timestamps are UTC. Next: dr_set_target <instance> once the target exists."
 }
 
 # dr_mark <marker> [note...] [--at <iso-ts>] — append a timeline event (T0..T10, step ids, decisions).
@@ -79,4 +81,28 @@ dr_set_target() {
     export OLD_DSN
   fi
   dr_mark TARGET_SET "target=${TARGET_DB} old=${OLD_DB:-none}"
+}
+
+# dr_phase <start|end> <name> [budget-min] — phase timer (TICKET-107). Prints elapsed vs budget, writes PHASE_* markers.
+dr_phase() {
+  local action="$1" name="$2" budget="${3:-}" var
+  var="DR_PHASE_START_${name//[^A-Za-z0-9]/_}"
+  if [[ "$action" == "start" ]]; then
+    printf -v "$var" '%s' "$(date +%s)"; export "${var?}"
+    dr_mark "PHASE_START:${name}" "budget_min=${budget:-n/a}"
+  else
+    local start="${!var:-$(date +%s)}" el
+    el=$(( $(date +%s) - start ))
+    dr_mark "PHASE_END:${name}" "elapsed_s=${el}"
+    printf '⏱  phase %-28s %dm%02ds%s\n' "$name" $((el/60)) $((el%60)) "${budget:+ (budget ${budget}m)}"
+  fi
+}
+
+# dr_summary — per-phase durations + elapsed since T0 (for the channel and the report).
+dr_summary() {
+  jq -rs '
+    (map(select(.marker=="T0"))[0].ts // .[0].ts) as $t0
+    | (map(select(.marker|startswith("PHASE_END:")))[] | "\(.marker|ltrimstr("PHASE_END:")): \(.note)"),
+      "since T0: \(((now - ($t0|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601))/60|floor)) min (target ${RTO_TARGET_MIN:-30})"
+  ' "$DR_TIMELINE" | sed "s/\${RTO_TARGET_MIN:-30}/${RTO_TARGET_MIN:-30}/"
 }

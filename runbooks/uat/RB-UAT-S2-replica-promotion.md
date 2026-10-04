@@ -2,15 +2,15 @@
 
 | Field | Value |
 |---|---|
-| Version / owner / approver | v1.0-draft / `{{SRE_OWNER}}` / SRE on-call + QA lead |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Before → after | `app-pg-uat` (single-AZ, lost) + `app-pg-uat-replica` → **`app-pg-uat-replica` = standalone primary** (single-AZ, as UAT standard) |
 | Endpoint | **Changes** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) → ESO → Reloader |
-| Targets (example) | RPO ≤ 1 h · RTO ≤ 4 h |
+| Targets | RPO target 24 h (expected = replica lag) · RTO target 30 min |
 | Approvals | 1 (SSM `MinRequiredApprovals=1`) |
 | Comms | Internal chat + UAT users / implementation projects (email) |
 
-> UAT is the **rehearsal ground for RB-PROD-S2**. Run this as a planned drill every quarter (using `DR_MODE=planned`, with a drain to lag 0),
-> and compare the timings with PROD expectations.
+> UAT mirrors RB-PROD-S2 (except Multi-AZ). No drills are scheduled; if testing is approved later, this is the safest place to
+> rehearse the PROD S2 path (`DR_MODE=planned` with a drain to lag 0).
 
 **Use when:** the UAT primary is lost (instance/AZ failure; **no Multi-AZ** in UAT, so an AZ failure takes the primary down)
 and the replica data is correct. **Not for** data damage → [RB-UAT-S4](RB-UAT-S4-pitr.md).

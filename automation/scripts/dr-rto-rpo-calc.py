@@ -12,7 +12,7 @@ RPO inputs per scenario (markers, note field "value=<iso-ts>"):
   loss_end = latest of T0 / DAMAGE_STOPPED / FENCE (writes accepted by the old primary after the restore
   point are lost unless reconciled).
 
-Usage: dr-rto-rpo-calc.py timeline.jsonl [--out DIR] [--rto-target-min 60] [--rpo-target-s 300]
+Usage: dr-rto-rpo-calc.py timeline.jsonl [--out DIR] [--rto-target-min 30] [--rpo-target-s 86400]
 """
 import argparse
 import json
@@ -46,8 +46,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("timeline", type=Path)
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--rto-target-min", type=float, default=60)
-    ap.add_argument("--rpo-target-s", type=float, default=300)
+    ap.add_argument("--rto-target-min", type=float, default=30)
+    ap.add_argument("--rpo-target-s", type=float, default=86400)
     args = ap.parse_args()
 
     mk = load(args.timeline)

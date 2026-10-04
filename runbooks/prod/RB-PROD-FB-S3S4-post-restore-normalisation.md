@@ -37,7 +37,7 @@ dr_set_target "$NEW_PRIMARY"
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
-| P3-S01 | Confirm the reconciliation sign-off (S3/S4 P3A-S06) and Legal/GRC hold status (security incidents may require keeping the instance/snapshot as forensic evidence) | IC | — | Approved |
+| P3-S01 | Confirm the reconciliation sign-off (S3/S4 P3A-S06) and CTO/ISMS hold status (security incidents may require keeping the instance/snapshot as evidence, ISO 27001 A.5.28) | IC | — | Approved |
 | P3-S02 | Delete the old replica, then OLD_DB, with final snapshots: `aws rds modify-db-instance --db-instance-identifier <id> --no-deletion-protection --apply-immediately`; `aws rds delete-db-instance --db-instance-identifier <id> --final-db-snapshot-identifier <id>-final-$(date -u +%Y%m%d)` (replicas: `--skip-final-snapshot` is allowed, since replicas cannot have one) | DBA | 10 | Deleted; final snapshot retained per policy |
 | P3-S03 | *(Optional)* identifier rename in a maintenance window → endpoint changes → [CP-01](../common/CP-01-secret-endpoint-cutover.md). Usually skipped | DBA | — | Decision recorded |
 | P3-S04 | CP-05 evidence (`type=failback`), close the change; [Post-Mortem / RCA Ready] comms | Scribe / Comms | 10 | Closed |

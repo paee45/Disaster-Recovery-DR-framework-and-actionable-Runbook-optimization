@@ -2,11 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Version / owner / approver | v1.0-draft / `{{SRE_OWNER}}` / `{{SERVICE_OWNER}}` + **exec approver** |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · G1 data-loss acceptance: **CTO** |
 | Before → after | **Mode A (full cutover):** new instance **`app-pg-prod-p<YYYYMMDDHHMM>`** (Multi-AZ) becomes primary. **Mode B (surgical repair):** a side instance is used only to copy data back; `app-pg-prod` stays primary |
 | Endpoint | Mode A: **new** → [CP-01](../common/CP-01-secret-endpoint-cutover.md). Mode B: unchanged |
 | RPO | Mode A: incident detection − chosen `restore-time` (writes after the restore time are lost unless reconciled). Mode B: ≈ 0 for unaffected data |
-| Restore window | `EarliestRestorableTime` … `LatestRestorableTime` (usually ≤ 5 min behind now) |
+| Restore window | Last **7 days** (backup retention): `EarliestRestorableTime` … `LatestRestorableTime` (usually ≤ 5 min behind now) |
+| Targets | RPO target 24 h (expected: minutes) · RTO target 30 min — ⚠ **at risk** for mode A (restore + WAL replay time not measured, risk R3) |
 | Automation | SSM `DR-RdsRestoreToPointInTime`; `automation/scripts/dr-restore.sh pitr` |
 
 **Use when:** logical damage (bad migration/deploy, mass delete/update, app bug), or the instance is lost but automated backups
@@ -14,7 +15,8 @@ are retained (instance failure, both AZs, accidental deletion with retained back
 **Prefer S2** if the instance is lost *and* the replica is healthy (smaller RPO, faster). **Never S2 for data damage.**
 
 ```bash
-source env/prod.env && source automation/scripts/dr-lib.sh && dr_init S4
+source env/prod.env && ./automation/scripts/dr-env-check.sh S4   # must PASS before starting
+source automation/scripts/dr-lib.sh && dr_init S4
 export OLD_DB=$PRIMARY_DB
 export RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 ```
@@ -29,15 +31,15 @@ export RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 | P1-S04 | Restore window: `aws rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` and `LatestRestorableTime` | DBA | 1 | `BAD_TS` inside the window |
 | P1-S05 | **Choose the mode** (IC + DBA + App owner): **B surgical** if the damage is limited to known tables/rows and the rest of the DB must keep its newer writes; **A full** if the damage is wide/unknown or the instance is lost | IC | 5 | `DECISION: mode=A\|B` |
 | P1-S06 | **Restore time** = `BAD_TS − 1 s` (for a lost instance: `--use-latest-restorable-time`). Estimate data loss (mode A) = writes between `RESTORE_TS` and `DAMAGE_STOPPED` | DBA | 2 | `RESTORE_TS` |
-| P1-G1 ⛳ | **Approve** mode + `RESTORE_TS` + data-loss window (IC + Service Owner + exec) · `dr_mark T2` | IC | 5 | Recorded |
-| P1-S07 ‖ | [Investigating] / [Failover Initiated] comms (**data-restore variant**, Legal/CS-approved) | Comms | 10 | Logged |
+| P1-G1 ⛳ | **Approve** mode + `RESTORE_TS` + data-loss window (IC + SRE lead; **CTO** accepts the data loss) · `dr_mark T2` | IC | 5 | Recorded |
+| P1-S07 ‖ | [Investigating] / [Failover Initiated] comms (**data-restore variant**, wording reviewed by SRE lead / approved by CTO) | Comms | 10 | Logged |
 
 ## Phase 2 — PITR restore (both modes)
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P2-S01 | `dr_mark T4` · `./automation/scripts/dr-restore.sh pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"` → `aws rds restore-db-instance-to-point-in-time --source-db-instance-identifier $PRIMARY_DB --target-db-instance-identifier $RESTORED_DB --restore-time $RESTORE_TS --db-instance-class $DB_INSTANCE_CLASS --db-subnet-group-name $DB_SUBNET_GROUP --vpc-security-group-ids $DB_SG --db-parameter-group-name $DB_PARAM_GROUP --multi-az --no-publicly-accessible --deletion-protection --copy-tags-to-snapshot --enable-cloudwatch-logs-exports postgresql upgrade --tags Key=dr-restore,Value=$DR_ID` (source deleted → `--source-dbi-resource-id` from the retained automated backup; mode B: `--no-multi-az`, smaller class OK) | Executor + 2nd eyes | 2 | API 200 |
-| P2-S02 | Wait `aws rds wait db-instance-available --db-instance-identifier $RESTORED_DB` (PITR replays WAL: longer if far from a snapshot) · `dr_set_target "$RESTORED_DB"` · `dr_mark T5` | Executor | size | `available` |
+| P2-S02 | Wait `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (progress + elapsed time; records `T5`), then `./automation/scripts/dr-restore.sh harden "$RESTORED_DB"` (backup retention, deletion protection, parity diff) (PITR replays WAL: longer if far from a snapshot) · `dr_set_target "$RESTORED_DB"` · `dr_mark T5` | Executor | size | `available` |
 | P2-S03 | **Validate the restore point**: `psql "$TARGET_DSN" -v cutoff="'$RESTORE_TS'" -f automation/sql/05-restore-point-check.sql`; the bad change must be **absent**; latest business rows ≈ `RESTORE_TS` | DBA + App owner | 10 | Signed off. If wrong → new PITR with a corrected time (keep the instance for comparison) |
 
 ## Phase 3B — Mode B: surgical repair (no cutover)

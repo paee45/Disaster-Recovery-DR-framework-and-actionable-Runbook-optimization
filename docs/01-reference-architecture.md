@@ -70,9 +70,9 @@ With secret-based cutover the old instance stays reachable, and any not-yet-rest
 
 | Item | DEV | UAT | PROD |
 |---|---|---|---|
-| Automated backups (PITR) retention | 7 d | 7–14 d | 14–35 d |
-| Daily snapshot | Automated snapshot | Automated + AWS Backup daily | AWS Backup daily/weekly/monthly |
-| Cross-account copy (security events) | — | — | AWS Backup copy to a vault in a separate account with **Vault Lock (compliance)** |
-| Retained automated backups on deletion | Off | On | **On** (`--no-delete-automated-backups`) + deletion protection |
-| Cross-region copy | — | Optional | Recommended (regional event protection; see [08](08-capstone-runbook-optimization.md) backlog) |
-| Restore test | Monthly automated (L2) | Quarterly | Quarterly into an isolated account |
+| Automated backups (PITR) retention | **7 d** | **7 d** | **7 d** |
+| Daily snapshot | RDS automated daily snapshot (7 d) | same | same |
+| Cross-account copy (security events) | — | — | **None today** (risk R5; option: AWS Backup copy to a Vault-Locked vault in another account) |
+| Retained automated backups on deletion | Recommended on | Recommended on | **Recommended on** (`--no-delete-automated-backups`) + deletion protection |
+| Cross-region copy / replica | — | — | **None today**: replica is in the same region (risk R1, accepted) |
+| Restore test | Not scheduled (R2) | Not scheduled (R2) | Not scheduled (R2) |

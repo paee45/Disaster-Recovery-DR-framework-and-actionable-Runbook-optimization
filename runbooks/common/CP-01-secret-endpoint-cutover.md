@@ -56,7 +56,7 @@ Only valid while OLD_DB is still intact and writable, i.e. **before** writes hav
 Equivalent manual command:
 `aws secretsmanager update-secret-version-stage --secret-id $SECRET_ID --version-stage AWSCURRENT --move-to-version-id <prev> --remove-from-version-id <new>`
 
-## Pre-requisites (steady state — verify in every drill)
+## Pre-requisites (steady state — verify at each runbook review)
 - Every DB-consuming workload carries `secret.reloader.stakater.com/reload: "<k8s-secret>"` and `dr.example.com/restart-order`.
 - Reloader runs with `reloadStrategy: annotations` when Argo CD/Flux manage the workloads (this avoids GitOps drift), and has ≥ 2 replicas (HA).
 - ESO `refreshInterval` ≤ 1 min and the ESO controller is healthy (alert `DRExternalSecretNotReady`).

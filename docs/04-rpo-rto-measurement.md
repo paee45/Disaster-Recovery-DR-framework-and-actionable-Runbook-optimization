@@ -29,11 +29,15 @@ Events go to `timeline.jsonl` via `dr_mark` ([`dr-lib.sh`](../automation/scripts
 | Cutover time | `T7 − T6` | ESO sync + Reloader rollouts (pod start time × waves) |
 | Validation time | `T9 − T7` | Smoke tests, warm-up (S3/S4 lazy loading) |
 
-**Build an RTO model per environment** from drills and update it after each one:
+**Build an RTO model per environment** from real events (no drills are scheduled) and update it after each one:
 `RTO_est(S3/S4) = decision + restore_minutes_per_100GB × size/100 + parity(10) + warm-up + cutover + validation`.
-If `RTO_est` > target for PROD S3/S4 → backlog item (smaller DB/archiving, faster storage class, or prefer S2 where valid).
+Target: **30 min**. Until measured, S3/S4 are assumed to exceed it (risk R3, [09](09-iso27001-scope.md)). If `RTO_est` > 30 min → backlog item (archiving/smaller DB, faster storage, prefer S2/S4-mode-B where valid).
 
 ## 3. RPO per scenario
+
+**Committed RPO target: 24 h** for all environments, based on the RDS daily automated snapshot with **7-day retention**.
+All scenarios are expected to do better (below). The KPI report compares the actual value with 24 h (`RPO_TARGET_S=86400`).
+
 
 | Scenario | RPO formula | How to measure | Markers |
 |---|---|---|---|
@@ -58,10 +62,10 @@ lost **unless reconciled** (`30-reconciliation-hints.sql`). For data-corruption 
 ### Alarms that protect RPO
 | Metric | Alarm |
 |---|---|
-| `ReplicaLag` (replica, seconds) | > 50 % of RPO for 5 min → page |
+| `ReplicaLag` (replica, seconds) | > 150 s for 5 min → page (operational threshold; the 24 h RPO is not a useful lag alarm) |
 | Heartbeat age on replica | > 120 s → page |
 | `TransactionLogsDiskUsage`, `OldestReplicationSlotLag` (primary) | WAL backlog growth |
-| AWS Backup job failures / missing daily snapshot | Ticket (S3 RPO at risk) |
+| Missing daily automated snapshot (`describe-db-snapshots --snapshot-type automated`, newest > 26 h) | Page: the 24 h RPO is at risk |
 | `LatestRestorableTime` older than 15 min | Page (S4 RPO at risk) |
 
 ## 4. Automated calculation

@@ -1,4 +1,6 @@
-# DR Drill Report — {{DR_ID}}
+# DR Test Report — {{DR_ID}}
+
+> Optional: no DR tests are scheduled at present. Use this template only if a test is approved by the CTO.
 
 | Field | Value |
 |---|---|
@@ -7,6 +9,9 @@
 | Date / window | {{date}} {{hh:mm}}–{{hh:mm}} UTC · Change {{CHG}} |
 | Roles | IC {{}} · Exec {{}} · DBA {{}} · Comms {{}} · Scribe {{}} · Observers {{GRC/auditor}} |
 | Scenario | {{e.g. FIS network disruption of DB subnets in eu-west-1, executors not briefed}} |
+| Outage simulation method | {{e.g. quarantine SG on primary (dr-fence-instance.sh quarantine) — note: an instance with a read replica cannot be stopped}} |
+| Prepared / reviewed / approved | {{Lead SRE}} / SRE lead / CTO |
+| Time zone | **All times UTC** |
 | **Result** | **{{PASS / PASS with findings / FAIL}}** |
 
 ## 1. KPIs (from `rto-rpo-report.md`)
@@ -22,6 +27,18 @@
 | Manual steps executed | | | ↓ | |
 | Time to first customer comms | | | ≤ 30 min | |
 | Evidence completeness | | | 100 % | |
+
+## 1b. Phase breakdown (from `dr_summary` / PHASE markers)
+| Phase | Budget | Actual | Notes |
+|---|---|---|---|
+| Prepare + decision | 3 | | |
+| Restore → available | 12 | | |
+| Harden + DB verification | 4 | | |
+| Cutover (secret → Reloader) | 5 | | |
+| App verification (E2E) | 5 | | |
+| Close | 1 | | |
+
+**RPO derivation:** event/outage time (UTC) − `SnapshotCreateTime` (UTC) = RPO. Latest business transaction in the restored DB = supporting evidence only.
 
 ## 2. Timeline (auto-generated from timeline.jsonl, annotated)
 | UTC | Marker / step | Note |

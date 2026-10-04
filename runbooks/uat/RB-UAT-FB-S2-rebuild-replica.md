@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Type | Standard change within 5 business days of RB-UAT-S2 (or immediately after a drill) |
+| Type | Standard change within 5 business days of RB-UAT-S2 |
 | Start → end | Promoted `app-pg-uat-replica` standalone, no replica → **primary + new replica** (UAT standard: no Multi-AZ), IaC in sync |
 | Model | **Forward-fix** (keep the promoted instance as primary). Return to the original identifier only if tooling requires it (then follow RB-PROD-FB-S2 Phase 3B without the Multi-AZ steps) |
 

@@ -8,4 +8,17 @@
 | CP05-S04 | Raise the **FB / normalisation change** for the scenario (see the [catalogue](../README.md)) with an owner and date | IC | 2 | Change ID recorded |
 | CP05-S05 | Schedule the **post-incident review** ([CP-06](CP-06-post-incident-review.md)): PROD ≤ 5 business days; UAT ≤ 10; DEV optional | IC | 1 | Meeting booked |
 
+**Minimum evidence set** (collected by `dr-collect-evidence.sh`; nothing typed or screenshotted by hand during the RTO clock, F10):
+
+| Evidence | Source | Auto |
+|---|---|---|
+| Timeline with T0…T10 + phase durations (UTC) | `timeline.jsonl`, `rto-rpo-report.md` | ✔ |
+| RPO reference (`SnapshotCreateTime` / restore time / heartbeat) | timeline markers | ✔ |
+| Recovery API calls + approvals | CloudTrail, SSM execution | ✔ |
+| Instance configuration after recovery (SGs, retention, parity) | `db/describe-*.json`, parity output | ✔ |
+| Secret version change (no values) + K8s rollout records | `aws/secret-*`, `k8s/*` | ✔ |
+| DB verification + row counts | `db-post.txt`, `counts.txt` | ✔ |
+| E2E result (transaction ID, screenshot with clock) | `app/` per the E2E playbook | manual, after T9 |
+| Communications sent | `comms/sent-messages.md` | manual / incident tool |
+
 **Closure checklist** (the incident cannot close without it): every gate decision recorded; comms log complete; evidence manifest uploaded; parity diff empty or accepted (CP-03); FB change raised; deviations listed, each with a ticket.

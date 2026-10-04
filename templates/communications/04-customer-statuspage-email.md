@@ -1,7 +1,7 @@
 # External customers / business users — Status page + Email
 
 **Channels:** Status page (primary, public or per-customer), email to customer admin/key contacts, optional in-app banner.
-**Sender:** Comms lead · **Approver:** IC + Customer Success lead (**+ Legal** for any data-loss or security wording)
+**Sender:** Comms lead · **Approver:** IC, using CTO-pre-approved wording (any deviation, data-loss or security wording: **CTO**)
 **Cadence (PROD):** first post ≤ 30 min from impact (or SLA), then every 60 min, plus at each phase change.
 
 | Env | Audience | Channel |
@@ -11,6 +11,7 @@
 | PROD | All affected customers | Status page component `{{SERVICE}}` + email to subscribers/admins |
 
 **Wording rules:** plain language, no internal names (regions, instances, vendors), no speculation, no blame. Never say "no data was lost" until reconciliation is signed off.
+**Restore scenarios (S3/S4):** use Variant B; the restore point (up to 24 h back for S3) defines the window customers must check.
 
 ---
 
@@ -44,7 +45,7 @@ Resolved / Monitoring — {{SERVICE}} was fully restored at {{hh:mm}} UTC and is
 action is required. We are continuing to monitor closely. We apologise for the disruption; a summary of the
 incident will be provided by {{date}}.
 ```
-*Variant B — possible data impact (Legal-approved wording):*
+*Variant B — possible data impact (CTO-approved wording):*
 ```
 Monitoring — {{SERVICE}} was restored at {{hh:mm}} UTC. Changes saved between approximately {{hh:mm}} and
 {{hh:mm}} UTC may not have been retained. We are verifying this and will contact affected customers directly

@@ -3,11 +3,11 @@
 ## 1. Approach
 
 ```
- Baseline              Assess                  Redesign                 Validate               Institutionalise
+ Baseline              Assess                  Redesign                 Approve                Institutionalise
  ────────              ──────                  ────────                 ────────               ────────────────
- Run the current  ─►   Scorecard (§2) per ─►   Env × scenario      ─►   DEV → UAT drills  ─►   CI lint, drill calendar,
- runbook in UAT        env × scenario +        runbooks + CP-01..06     with the new runbook;  KPI dashboard, freshness
- (S2/S3/S4) and DEV    RTO breakdown           + automation             before/after KPIs      SLO, owner rotation
+ Review current   ─►   Scorecard (§2) per ─►   Env × scenario      ─►   Desk review +     ─►   CI lint, ISMS document
+ runbook in UAT        env × scenario +        runbooks + CP-01..06     SRE lead/CTO PR    control, yearly review,
+ (S2/S3/S4) and DEV    RTO breakdown           + automation             approval            risk register
  (S3/S4), measure      (decision / DB /        (backlog §3)
  T0..T10               cutover / validation)
 ```
@@ -44,12 +44,12 @@ Total /36: < 10 L1 · 10–19 L2 · 20–27 L3 · 28–33 L4 · 34+ L5 (see [07 
 | P7 | Heartbeat + replica LSN capture | Exact RPO for S2, reconciliation cutoff | Low |
 | P8 | Warm-up (`pg_prewarm`) before cutover for S3/S4 | Avoids a "restored but unusably slow" phase | Low |
 | P9 | Parity + alarm diff + IaC adoption as standard FB steps | No silent monitoring gaps / Terraform destroying the new primary | Medium |
-| P10 | Monthly automated DEV restore test; quarterly UAT S2/S3/S4 drills; PROD S1 drill via `reboot --force-failover` | Measured RTO model, drift caught early | Medium |
-| P11 | **Cross-region protection for PROD** (cross-region read replica *or* cross-region automated-backup replication + AWS Backup copy) | Today's PROD topology (same-region replica, `TODO(capstone)`: confirm) does not survive a regional event | Medium–High |
-| P12 | **UAT Multi-AZ gap**: S1 cannot be rehearsed in UAT. Options: a short-lived Multi-AZ UAT window per quarter, or a PROD maintenance-window S1 drill | S1 behaviour (app reconnect) validated before a real event | Low |
-| P13 | Status page + comms templates pre-approved (incl. the data-restore variant) | 10–20 min to first customer comms; legal-safe wording | Low |
+| P10 | *(Deferred — no testing for now)* Restore tests to measure the S3/S4 restore time against the 30 min RTO | Turns risks R2/R3 into numbers | Medium |
+| P11 | *(Deferred — accepted risk R1)* Cross-region protection for PROD (cross-region automated-backup replication is the cheapest option) | Confirmed: the PROD replica is in the same region, so a regional event is not recoverable within RTO/RPO | Medium |
+| P12 | *(Deferred — accepted risk R6)* UAT has no Multi-AZ, so S1 cannot be rehearsed. Options when testing is approved: a short Multi-AZ window in UAT, or a PROD maintenance-window failover | S1 app-reconnect behaviour validated | Low |
+| P13 | Comms templates pre-approved by the CTO (incl. the data-restore variant) | 10–20 min to first customer comms | Low |
 
-## 4. Before / after KPI table (fill from drills; one table per env/scenario)
+## 4. Before / after KPI table (fill from real events or desk walk-throughs; one table per env/scenario)
 
 | KPI | Baseline | After | Target |
 |---|---|---|---|
@@ -65,11 +65,11 @@ Total /36: < 10 L1 · 10–19 L2 · 20–27 L3 · 28–33 L4 · 34+ L5 (see [07 
 | Scorecard /36 | | | ≥ 28 |
 
 ## 5. Capstone deliverables checklist
-- [ ] Current-state runbook(s) + scorecard + baseline drill timelines (DEV S3/S4, UAT S2/S3/S4)
+- [ ] Current-state runbook(s) + scorecard (before) and the new runbooks scored (after)
 - [ ] 15 env/scenario runbooks customised (`env/*.env`, identifiers, approvers, targets)
 - [ ] Reloader annotations + inventory = 0 unannotated consumers in UAT and PROD
 - [ ] SSM documents deployed; executor IAM + K8s RBAC in place
-- [ ] Comms templates approved (Comms / Customer Success / Legal), incl. the data-restore variant
-- [ ] Evidence bucket + a sample bundle from a drill
-- [ ] Before/after KPI tables with at least one re-drill per scenario
-- [ ] Residual-risk statement (P11/P12) presented to leadership with a recommendation
+- [ ] All runbooks + comms templates reviewed by the SRE lead and approved by the CTO (PR record)
+- [ ] Evidence bucket created; collector validated read-only
+- [ ] ISO 27001 scope, control mapping and risk register ([09](09-iso27001-scope.md)) with CTO risk acceptance
+- [ ] Residual risks R1–R8 accepted (or treated) by the CTO, with a review date

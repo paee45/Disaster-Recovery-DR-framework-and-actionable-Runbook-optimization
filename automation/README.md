@@ -34,4 +34,4 @@ done
 `s3:PutObject` on the evidence bucket, plus K8s RBAC: get/list/patch on deployments, statefulsets, daemonsets, cronjobs and externalsecrets in the app namespace.
 
 **CI:** `shellcheck -x scripts/*.sh`, `yamllint`, a Python compile check, and `runbook-to-tracker.py` on every runbook (fails if a step table is malformed).
-Schedule a monthly DEV restore test (S3/S4 with `DRY_RUN=0`, followed by cleanup) to measure restore time and catch drift.
+No DR tests are scheduled at present (see [docs/07](../docs/07-testing-and-drill-program.md)). Use `DRY_RUN=1` and the read-only pre-flight to validate scripts against real environments without changing them.

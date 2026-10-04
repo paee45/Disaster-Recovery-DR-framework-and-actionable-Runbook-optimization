@@ -4,7 +4,7 @@
 - **Collect while executing.** Every automated step writes its output into the run directory, so nothing is collected from memory afterwards.
 - **Immutable.** Store evidence in a dedicated **log-archive account**, in an S3 bucket with **Object Lock (compliance mode)**, SSE-KMS, versioning, and cross-region replication. Executors can write but cannot delete.
 - **Verifiable.** A `manifest.json` lists each file with its SHA-256 hash. The manifest itself is hashed and the hash is posted in the incident timeline.
-- **Same process for drills and real events.** Auditors want proof that drills follow the production procedure.
+- **One process for every recovery.** The same bundle structure is used for real events and for any future test.
 
 ## 2. Evidence bundle structure
 
@@ -55,17 +55,13 @@ aws s3api put-object-lock-configuration --bucket org-dr-evidence-111122223333 \
 # + replication to a bucket in a second region (also Object Lock): evidence survives a regional event
 ```
 
-> Use **GOVERNANCE** mode in DEV/UAT (it can be overridden with a special permission). Use **COMPLIANCE** mode for PROD
-> (nobody, including root, can delete before retention ends). Confirm the retention period with GRC/Legal.
+> Use **GOVERNANCE** mode in DEV/UAT (it can be overridden with a special permission) and **COMPLIANCE** mode for PROD
+> (nobody, including root, can delete before retention ends). The retention period follows the ISMS records-retention policy (`TODO`), approved by the CTO.
 
-## 4. Control mapping (example — confirm with your GRC team)
+## 4. Control mapping
 
-| Framework | Control (abbrev.) | Evidence from this framework |
-|---|---|---|
-| ISO/IEC 27001:2022 | A.5.29 Information security during disruption; A.5.30 ICT readiness for business continuity; A.8.13 Information backup; A.8.14 Redundancy | Drill reports, measured RTO/RPO, runbook versions, backup restore tests |
-| ISO 22301 | 8.4 BC plans and procedures; 8.5 Exercise programme | Runbooks, drill schedule, PIRs |
-| SOC 2 (TSC 2017) | A1.2 (recovery infrastructure), A1.3 (recovery plan testing), CC7.4/CC7.5 (incident response and recovery) | Evidence bundles, approvals, comms log |
-| DORA (EU financial entities / ICT providers to them) | ICT business continuity, backup & restoration, testing | Same, plus test reports and lessons learned |
+The ISO/IEC 27001:2022 scope, Annex A mapping and DR risk register are in [09 — ISO 27001 scope](09-iso27001-scope.md).
+Evidence from this bundle supports A.5.24–A.5.30, A.5.33, A.5.37, A.8.13–A.8.16 and A.8.32.
 
 ## 5. Closure checklist (Gate: incident cannot close without it)
 - [ ] `manifest.json` uploaded, and its hash posted in the incident timeline

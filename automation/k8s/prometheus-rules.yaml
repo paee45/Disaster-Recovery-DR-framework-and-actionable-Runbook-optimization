@@ -13,7 +13,7 @@ spec:
           for: 5m
           labels: { severity: page, runbook: RB-PROD-S2 }
           annotations:
-            summary: "Cross-region replica lag > 50% of RPO (300s)"
+            summary: "Read replica lag > 150s (operational threshold; S2 data loss = lag at promotion)"
             description: "A failover now would lose ~{{ $value }}s of data. Investigate long transactions / WAL backlog."
         - alert: DRHeartbeatStale
           expr: time() - pg_dr_heartbeat_ts_seconds{role="replica"} > 120

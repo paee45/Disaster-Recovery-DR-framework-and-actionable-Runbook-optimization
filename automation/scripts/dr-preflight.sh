@@ -5,7 +5,7 @@
 set -uo pipefail
 MODE="${1:?usage: dr-preflight.sh replica|restore}"
 : "${PRIMARY_DB:?}" "${SECRET_ID:?}" "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${K8S_SECRET:?}"
-RPO_TARGET_S="${RPO_TARGET_S:-300}"
+REPLICA_LAG_MAX_S="${REPLICA_LAG_MAX_S:-300}"   # operational threshold; the RPO target (24 h) is far looser
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
@@ -35,8 +35,8 @@ check_replica() {
     --start-time "$(date -u -d '-15 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum \
     --query 'max(Datapoints[].Maximum)' --output text)"
   if [[ "$lag" == "None" || -z "$lag" ]]; then warn "ReplicaLag: no datapoints (common when the primary is down) — rely on SQL/heartbeat"
-  elif (( ${lag%.*} <= RPO_TARGET_S )); then pass "ReplicaLag max15m=${lag}s <= RPO ${RPO_TARGET_S}s"
-  else fail "ReplicaLag max15m=${lag}s > RPO ${RPO_TARGET_S}s — exec approval required at G1"; fi
+  elif (( ${lag%.*} <= REPLICA_LAG_MAX_S )); then pass "ReplicaLag max15m=${lag}s <= ${REPLICA_LAG_MAX_S}s"
+  else fail "ReplicaLag max15m=${lag}s > ${REPLICA_LAG_MAX_S}s — estimated data loss = lag; CTO acceptance at G1 (PROD)"; fi
 
   local dsn; dsn="$(dr_dsn "$REPLICA_DB")"
   if out="$(psql "$dsn" -XAtq -F' | ' -f "$HERE/../sql/10-preflight-replica.sql" 2>&1)"; then

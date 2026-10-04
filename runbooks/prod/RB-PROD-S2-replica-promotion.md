@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Version / owner / approver | v1.0-draft / `{{SRE_OWNER}}` / `{{SERVICE_OWNER}}` + exec approver if data loss > RPO |
-| Topology before → after | `app-pg-prod` (Multi-AZ, **lost**) + `app-pg-prod-replica` → **`app-pg-prod-replica` = standalone primary** (single-AZ until CP03-S03) |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: IC + SRE lead (CTO if data loss is material) |
+| Topology before → after | `app-pg-prod` (Multi-AZ, **lost**) + `app-pg-prod-replica` (same region) → **`app-pg-prod-replica` = standalone primary** (single-AZ until CP03-S03). Not a regional-outage solution (risk R1) |
 | Endpoint | **Changes** → secret update ([CP-01](../common/CP-01-secret-endpoint-cutover.md)) → ESO → Reloader |
-| Targets | RPO ≤ 5 min (replica lag) · RTO ≤ 60 min (`T9 − T0`) |
+| Targets | RPO target 24 h (expected = replica lag, usually seconds) · RTO target **30 min** (`T9 − T0`) — achievable only with a fast G1 (≤ 10 min) |
 | Automation | SSM `DR-RdsPromoteReplica` (pre-check → G2 approval → promote → wait → secret update via `DR-UpdateDbSecretEndpoint`) |
 | Pre-approved change | `{{CHG}}` |
 
@@ -28,14 +28,14 @@ dr_set_target "$REPLICA_DB"           # exports TARGET_DB/TARGET_DSN (replica en
 | P1-S03 | Set **T0** from the first failing synthetic / 5xx: `dr_mark T0 --at <ts> source=<monitor>` | App owner | 2 | Recorded |
 | P1-S04 | Confirm the scenario: RDS events + status of `$PRIMARY_DB`; no Multi-AZ failover in progress or it failed; **data is correct** (not a corruption incident) | DBA | 3 | `DECISION: scenario S2` |
 | P1-S05 | Pre-flight: `dr_run preflight ./automation/scripts/dr-preflight.sh replica` (replica `available` + `replicating`/`error`, `ReplicaLag` vs RPO, LSN/heartbeat SQL, creds work on the replica, EKS + ESO + Reloader healthy, consumer inventory) | Executor | 3 | `PRE-FLIGHT: PASS`, or a waiver per FAIL |
-| P1-G1 ⛳ | **Declare DR (IC + Service Owner; + exec if est. loss > RPO)**. GO if the primary is not recoverable within (RTO − measured promote+cutover time) | IC | 5 | `DECISION: G1 GO est_loss=<s>` · `dr_mark T2` |
+| P1-G1 ⛳ | **Declare DR (IC + SRE lead; CTO if the estimated loss is material)**. GO if the primary is not recoverable within (RTO − measured promote+cutover time) | IC | 5 | `DECISION: G1 GO est_loss=<s>` · `dr_mark T2` |
 
 ## Phase 2 — Promotion (budget 15 min)
 
 > Preferred: start the SSM automation right after G1; it pauses at G2.
 > ```bash
 > aws ssm start-automation-execution --document-name DR-RdsPromoteReplica --parameters \
->  "ReplicaDbInstanceId=$REPLICA_DB,SecretId=$SECRET_ID,DrId=$DR_ID,BackupRetentionDays=14,Approvers=arn:aws:iam::$ACCOUNT_ID:role/DRApproverRole,MinRequiredApprovals=2" \
+>  "ReplicaDbInstanceId=$REPLICA_DB,SecretId=$SECRET_ID,DrId=$DR_ID,BackupRetentionDays=7,Approvers=arn:aws:iam::$ACCOUNT_ID:role/DRApproverRole,MinRequiredApprovals=2" \
 >  --query AutomationExecutionId --output text | tee "$DR_EVIDENCE_DIR/aws/ssm-execution-id.txt"
 > ```
 > SSM performs P2-S05/S06 and the secret update (CP01-S05). The executor still does the K8s side (CP01-S06/S07).
@@ -47,7 +47,7 @@ dr_set_target "$REPLICA_DB"           # exports TARGET_DB/TARGET_DSN (replica en
 | P2-S03 | **Capture the final replica state** (RPO evidence): `dr_run replica-final psql "$TARGET_DSN" -XAt -f automation/sql/10-preflight-replica.sql` | DBA | 1 | LSN + last replay ts + heartbeat saved |
 | P2-G2 ⛳ | **Point of no return (IC + DBA)**: fence status accepted, final LSN captured. Approve in SSM (`aws:approve`) | IC + DBA | 2 | Approval recorded |
 | P2-S04 ‖ | [Failover Initiated] comms, all audiences | Comms | 5 | Logged |
-| P2-S05 ⚠ | **Promote** (manual fallback): `dr_mark T4` · `aws rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 14` | Executor + 2nd eyes | 1 | API 200 |
+| P2-S05 ⚠ | **Promote** (manual fallback): `dr_mark T4` · `aws rds promote-read-replica --db-instance-identifier $REPLICA_DB --backup-retention-period 7` | Executor + 2nd eyes | 1 | API 200 |
 | P2-S06 | **Wait until standalone**: `./automation/scripts/dr-verify.sh wait-promoted`. ⚠ Do not trust `wait db-instance-available` alone: the instance can still show `available` *before* the promotion starts. The script waits for: no `ReadReplicaSourceDBInstanceIdentifier` + `available` + `pg_is_in_recovery()=f`. `dr_mark T5` | Executor | 5–15 | `PROMOTED` |
 
 ## Phase 3 — Secret cutover & EKS reload (budget 10 min)

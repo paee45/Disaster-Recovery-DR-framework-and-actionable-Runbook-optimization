@@ -2,16 +2,17 @@
 
 | Field | Value |
 |---|---|
-| Version / owner / approver | v1.0-draft / `{{SRE_OWNER}}` / SRE on-call + QA lead |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Modes | **A — full cutover** to `app-pg-uat-p<YYYYMMDDHHMM>` (single-AZ) · **B — surgical repair** (side instance, copy rows back, no cutover) |
 | Endpoint | A: **new** → [CP-01](../common/CP-01-secret-endpoint-cutover.md). B: unchanged |
-| RPO / RTO (example) | ≤ 1 h / ≤ 4 h |
+| RPO / RTO targets | 24 h (expected: minutes; 7-day restore window) / 30 min (at risk for mode A, R3) |
 
 **Use when:** bad data in UAT (failed migration test, a broken test-data load, accidental delete) **or** the primary is lost with
 backups retained and the replica is unusable. **Never promote the replica for a data problem** (it holds the same damage).
 
 ```bash
-source env/uat.env && source automation/scripts/dr-lib.sh && dr_init S4
+source env/uat.env && ./automation/scripts/dr-env-check.sh S4   # must PASS before starting
+source automation/scripts/dr-lib.sh && dr_init S4
 export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 ```
 
@@ -23,7 +24,7 @@ export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 | P1-S04 | Choose the mode: **B** if the damage is limited to known tables and other teams' newer UAT data must survive; else **A** | DBA + QA lead | 5 | `DECISION: mode=…` |
 | P1-G1 ⛳ | GO (SRE on-call + QA lead) with `RESTORE_TS` and the loss window. `dr_mark T2`. Email the UAT users | SRE on-call | 5 | Recorded / sent |
 | P2-S01 | `dr_mark T4` · `./automation/scripts/dr-restore.sh pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"` | Executor | 2 | API 200 |
-| P2-S02 | `aws rds wait db-instance-available --db-instance-identifier $RESTORED_DB`; `dr_set_target "$RESTORED_DB"`; `dr_mark T5` | Executor | size | available |
+| P2-S02 | `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (progress + elapsed time; records `T5`), then `./automation/scripts/dr-restore.sh harden "$RESTORED_DB"` (backup retention, deletion protection, parity diff); `dr_set_target "$RESTORED_DB"`; `dr_mark T5` | Executor | size | available |
 | P2-S03 | Restore-point check `05-restore-point-check.sql` (bad change absent) | DBA + QA | 10 | Signed off |
 | P3B-S01 | **Mode B:** export the affected tables/rows from RESTORED_DB (`pg_dump --data-only -t …` / `\copy`), apply a reviewed repair script on `$PRIMARY_DB` in one transaction; release F1; delete RESTORED_DB after 3 days | DBA | 30 | Data repaired; T9/T10 via CP-02 |
 | P3A-S01 | **Mode A:** [CP-03](../common/CP-03-restored-instance-config-parity.md) S01–S02 | DBA | 10 | Parity OK |

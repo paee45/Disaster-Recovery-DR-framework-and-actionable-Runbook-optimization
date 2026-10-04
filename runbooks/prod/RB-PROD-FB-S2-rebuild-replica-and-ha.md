@@ -6,7 +6,7 @@
 | Start state | `TARGET_DB` (= former replica) is the primary; OLD_DB is fenced; there is no replica; Multi-AZ per CP03-S03 |
 | End state | The original topology again: **Multi-AZ primary + read replica**, IaC in sync, monitoring and rotation on, OLD_DB decommissioned |
 
-## Choose the failback model (Gate FB-G0, Service Owner + DBA)
+## Choose the failback model (Gate FB-G0, SRE lead + DBA; CTO approves option B)
 
 | Option | When | Downtime | Recommendation |
 |---|---|---|---|

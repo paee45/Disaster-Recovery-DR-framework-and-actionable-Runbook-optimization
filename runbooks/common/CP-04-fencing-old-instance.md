@@ -16,7 +16,7 @@ Use one or more levels, from the lightest to the strongest:
 | Scenario | When | Level |
 |---|---|---|
 | S2 unplanned | **Before promotion** (if OLD_DB is reachable) | F2 (it may be unresponsive to SQL). If unreachable → record a waiver and re-try fencing as soon as it is reachable |
-| S2 planned (drill) | Before promotion | F1 (drain) → wait for lag 0 → promote |
+| S2 planned (maintenance / FB option B) | Before promotion | F1 (drain) → wait for lag 0 → promote |
 | S3/S4 full cutover | **Right after CP01-S07** (rollouts done), *before* CP-02 | F1 immediately; F2 once reconciliation data is extracted. F1 *before* the cutover is also valid: it stops further damage (corruption still running) at the cost of read-only errors until the cutover |
 | S4 surgical repair | Not applicable (OLD_DB stays primary) | — |
 

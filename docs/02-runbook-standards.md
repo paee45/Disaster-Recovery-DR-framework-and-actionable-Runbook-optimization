@@ -10,7 +10,7 @@ Repeated procedures (secret cutover, verification, parity, fencing, evidence, PI
 
 | # | Section | Purpose |
 |---|---|---|
-| 0 | **Header / metadata** | ID, version, owner, approver, last drill date, measured RTO/RPO, tier, environments, linked automation version |
+| 0 | **Header / metadata** | ID, version, owner, reviewer (SRE lead), approver (CTO), targets, test status, environment, linked automation version |
 | 1 | **When to use / when NOT to use** | Trigger criteria, and the failure classes this runbook does *not* cover (link to the PITR or ransomware runbooks) |
 | 2 | **Roles (RACI)** | IC, Executor (Ops lead), Scribe, Comms lead, DBA, App owner, Approver |
 | 3 | **Prerequisites** | Access (break-glass role), tools, links, pre-checks, comms channel |
@@ -20,7 +20,7 @@ Repeated procedures (secret cutover, verification, parity, fencing, evidence, PI
 | 7 | **Verification & exit criteria** | Objective conditions that close the runbook |
 | 8 | **Evidence checklist** | What must be in the evidence bucket before closure |
 | 9 | **Comms checkpoints** | Which template is sent at which step |
-| 10 | **Change log** | Version history, with links to the drill/PIR that caused each change |
+| 10 | **Change log** | Version history, with links to the PR/PIR that caused each change |
 
 ## 2. Step format (non-negotiable)
 
@@ -42,7 +42,7 @@ Writing rules:
 - **One action per step.** If a step needs "and", split it.
 - **Copy-paste-safe commands.** Use only variables set in a single "env block" at the top. No `<replace-me>` inside commands.
 - **Every step has an expected result and a verification.** "Run X" without "you should see Y" is not allowed.
-- **Time budget per step.** The sum of the budgets is the *designed* RTO. Compare it to the measured RTO after each drill.
+- **Time budget per step.** The sum of the budgets is the *designed* RTO (target 30 min). Compare it to the measured RTO after every real event.
 - **Mark irreversible steps** (⚠) and put a gate before them.
 - **Automation-first, manual fallback.** Each automated step names the equivalent manual command for when automation fails.
 - **No knowledge outside the runbook.** If a step depends on "ask Bob", that is a defect.
@@ -72,15 +72,15 @@ so the approver identity and timestamp are recorded automatically.
 | **Comms lead** | Sends templates on cadence; is the only voice to customers and vendors | Improvise wording on data loss/security |
 | **DBA** | Lag/LSN assessment, promotion, data reconciliation | — |
 | **App owner(s)** | App health, smoke tests, business validation | — |
-| **Exec approver** | Accepts data loss / customer impact | — |
+| **CTO** | Accepts data loss / customer impact; approves runbook versions | — |
 
-Rotate roles in drills. Each role needs at least 2 trained people (no single point of failure in people).
+Each role needs at least 2 people who have read the runbooks (no single point of failure in people). Without drills, a yearly read-through is the minimum awareness measure (ISO 27001 A.6.3).
 
 ## 5. Lifecycle and governance
 
 - **One runbook per environment × scenario** (DEV/UAT/PROD × S1–S4 + FB). Env differences (approvers, Multi-AZ steps, comms, targets) are explicit, not "if PROD then…" prose.
-- **Source of truth:** Markdown in Git, with PR review by SRE + DBA + App owner. Version bump with each merged change (`vMAJOR.MINOR`).
+- **Source of truth:** Markdown in Git; every PR is **reviewed by the SRE lead and approved by the CTO** (ISMS approval record). Version bump with each merged change (`vMAJOR.MINOR`).
 - **Linked automation:** the runbook header pins the SSM document version and script git SHA. CI checks that they match.
-- **Freshness SLO:** a T0/T1 runbook drilled > 90 days ago (UAT) or > 365 days (PROD) is red on the DR dashboard.
+- **Freshness:** a runbook not reviewed for > 12 months, or not updated after a DR event/architecture change, is out of date (ISMS document control, [09](09-iso27001-scope.md)).
 - **Automated linting in CI:** every step has an ID, expected result and verify; no TODOs in released versions; links resolve; commands pass `shellcheck` and `cfn-lint`/`yamllint`.
 - **Distribution:** on release, CI publishes (1) the incident tool runbook, (2) a PDF to the DR-region S3 bucket, (3) the change log to the team channel.
