@@ -5,6 +5,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 : "${DR_ID:?}" "${DR_EVIDENCE_DIR:?run dr_init first}" "${EVIDENCE_BUCKET:?}"
 LOOKBACK_START="${LOOKBACK_START:-$(head -1 "${DR_EVIDENCE_DIR}/timeline.jsonl" | jq -r .ts)}"
 A="${DR_EVIDENCE_DIR}/aws"; D="${DR_EVIDENCE_DIR}/db"; mkdir -p "$A" "$D"

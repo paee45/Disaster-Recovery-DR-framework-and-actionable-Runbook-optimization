@@ -7,6 +7,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 CMD="${1:-}"; DB="${2:?db instance id}"
 : "${DR_EVIDENCE_DIR:?run dr_init first}"
 STATE="${DR_EVIDENCE_DIR}/db/fence-${DB}"
@@ -16,7 +17,7 @@ master_psql() {
   local m addr port
   m="$(aws secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
   read -r addr port <<<"$(dr_endpoint "$DB")"
-  PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$addr port=$port dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=require connect_timeout=5 application_name=dr-fence" \
+  PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$addr port=$port dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=${DR_PGSSLMODE:-require} connect_timeout=5 application_name=dr-fence" \
     -v ON_ERROR_STOP=1 -v dbname="${DB_NAME:-app}" -Xq
 }
 
@@ -50,6 +51,8 @@ restore() {
   fi
   if [[ -f "${STATE}.readonly" ]]; then
     master_psql <<'SQL'
+-- this session inherits the read-only default from F1 → switch it to read-write first
+SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE;
 ALTER DATABASE :"dbname" SET default_transaction_read_only = off;
 SQL
     echo "read-only default removed (new sessions only)"
@@ -57,6 +60,7 @@ SQL
   dr_mark UNFENCE "db=${DB}"
 }
 
+dr_confirm "fence ($CMD) $DB" || exit 1
 case "$CMD" in
   readonly)   readonly_on ;;
   quarantine) quarantine ;;

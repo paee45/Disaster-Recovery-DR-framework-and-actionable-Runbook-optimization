@@ -152,6 +152,15 @@ ISO 27001 requires reviewing whether corrective actions were effective. Choose o
 | B: review at the next real event | Use the KPI report of the next S2/S3/S4 event (any env) | Same criteria |
 | C: desk verification only | SRE lead verifies the deliverables + `DRY_RUN` in UAT | Deliverables exist and run; **RTO not proven** (risk R3 stays open) |
 
+## 5b. Verification of the delivered scripts (before any re-exercise)
+
+`tests/local/run-tests.sh` exercises every script end to end on k3s + LocalStack + moto + real Postgres + ESO + Reloader: **48/48 pass**
+([last run](../tests/local/last-run-report.md)). It covers TICKET-102 (app-a/app-b restarted by Reloader, app-c not annotated, so it is detected,
+left alone or restarted by policy), TICKET-103 (all 3 SGs copied, retention hardened, env check, wrong account/cluster refused) and
+TICKET-107 (phase timers, evidence, KPI report). The tests also found and fixed 3 real script bugs: DB password lost in a subshell,
+un-fence failing on a read-only DB, and a Reloader values setting (`watchGlobally: false`) that would never have restarted app pods.
+Next: `tests/aws/sandbox-test.sh readonly`, then `full` in UAT, which also measures the real snapshot-restore time (risk R3).
+
 ## 6. Tracking
 
 | Ticket | Delivered in repo | Open items | Owner | Due | Status |

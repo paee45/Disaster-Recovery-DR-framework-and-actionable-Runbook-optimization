@@ -10,6 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 : "${TARGET_DB:?run dr_set_target <id> first, or export TARGET_DB}" "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${DR_EVIDENCE_DIR:?run dr_init first}"
 
 if [[ -n "${SECRET_ID_RO:-}" && "$SECRET_ID" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
@@ -29,7 +30,7 @@ precheck() {
   local s user pw
   s="$(secret_json)"; user="$(jq -r .username <<<"$s")"; pw="$(jq -r .password <<<"$s")"
   echo "secret $SECRET_ID: host(now)=$(jq -r .host <<<"$s") → target=$NEW_HOST:$NEW_PORT user=$user"
-  if PGPASSWORD="$pw" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$user sslmode=require connect_timeout=5 application_name=dr-precheck" \
+  if PGPASSWORD="$pw" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$user sslmode=${DR_PGSSLMODE:-require} connect_timeout=5 application_name=dr-precheck" \
        -XAtqc "select 'login OK as ' || current_user || ', in_recovery=' || pg_is_in_recovery()"; then
     return 0
   fi
@@ -44,7 +45,7 @@ fix_password() {
   s="$(secret_json)"; m="$(aws secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
   # psql variables keep the password out of argv/ps output. NOTE: with log_statement=ddl/all the statement can reach the
   # PostgreSQL log — rotate the secret after stabilisation (CP03-S05).
-  PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=require" \
+  PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=${DR_PGSSLMODE:-require}" \
     -v ON_ERROR_STOP=1 -v role="$(jq -r .username <<<"$s")" -v pw="$(jq -r .password <<<"$s")" -Xq <<'SQL'
 ALTER ROLE :"role" WITH PASSWORD :'pw';
 SQL
@@ -97,8 +98,8 @@ rollback() {
 
 case "${1:-}" in
   precheck)     precheck ;;
-  fix-password) fix_password ;;
-  apply)        precheck && apply ;;
-  rollback)     rollback ;;
+  fix-password) dr_confirm "reset app password on $TARGET_DB" && fix_password ;;
+  apply)        precheck && dr_confirm "point $SECRET_ID at $TARGET_DB (pods will restart)" && apply ;;
+  rollback)     dr_confirm "roll back $SECRET_ID" && rollback ;;
   *) echo "usage: $0 {precheck|fix-password|apply|rollback}"; exit 2 ;;
 esac

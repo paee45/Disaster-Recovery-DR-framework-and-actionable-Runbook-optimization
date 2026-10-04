@@ -15,6 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 : "${DR_ENV:?}"
 SOURCE_DB="${SOURCE_DB:-${PRIMARY_DB:-}}"
 
@@ -110,6 +111,7 @@ case "${1:-}" in
     created="$(aws rds describe-db-snapshots --db-snapshot-identifier "$snap" --query 'DBSnapshots[0].SnapshotCreateTime' --output text 2>/dev/null || echo unknown)"
     echo "snapshot $snap created $created  → RPO reference point (recorded as RPO_SNAPSHOT)"
     [[ -n "${DR_TIMELINE:-}" && "$created" != "unknown" ]] && dr_mark RPO_SNAPSHOT "value=$created"
+    dr_confirm "restore $snap → $new" || exit 1
     mapfile -t F < <(common_flags)
     run aws rds restore-db-instance-from-db-snapshot --db-instance-identifier "$new" --db-snapshot-identifier "$snap" "${F[@]}"
     ;;
@@ -125,9 +127,10 @@ case "${1:-}" in
       rid="$(aws rds describe-db-instance-automated-backups --db-instance-identifier "$src" --query 'DBInstanceAutomatedBackups[0].DbiResourceId' --output text)"
       S=(--source-dbi-resource-id "$rid")
     fi
+    dr_confirm "PITR $src → $new at $ts" || exit 1
     run aws rds restore-db-instance-to-point-in-time "${S[@]}" --target-db-instance-identifier "$new" "${T[@]}" "${F[@]}"
     ;;
   wait)   wait_available "${2:?db id}" ;;
-  harden) load_source_settings >/dev/null; harden "${2:?db id}" ;;
+  harden) dr_confirm "harden ${2:-}" || exit 1; load_source_settings >/dev/null; harden "${2:?db id}" ;;
   *) echo "usage: $0 {list-snapshots <db>|snapshot <snap> <new>|pitr <src> <new> <ts|latest>|wait <db>|harden <db>}"; exit 2 ;;
 esac

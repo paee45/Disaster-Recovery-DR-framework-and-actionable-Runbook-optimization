@@ -1,0 +1,17 @@
+# Cluster identity marker checked by dr_guard (create the same in every real cluster with its own env/account).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-cluster-identity
+  namespace: kube-system
+data:
+  env: local
+  account: "000000000000"
+  cluster: dr-local-k3s
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+  labels:
+    reloader: enabled          # matches reloader-values.yaml namespaceSelector

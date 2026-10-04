@@ -1,0 +1,11 @@
+# Connectivity probe used by up.sh: pod → LocalStack and pod → Postgres (old primary).
+apiVersion: v1
+kind: Pod
+metadata: { name: nettest, namespace: app }
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: postgres:16-alpine
+      imagePullPolicy: IfNotPresent
+      command: ["pg_isready", "-h", "172.30.0.21", "-t", "5"]

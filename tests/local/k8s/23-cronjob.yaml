@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: app-report
+  namespace: app
+  labels: { dr.example.com/db-consumer: "true" }
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: report
+              image: postgres:16-alpine
+              imagePullPolicy: IfNotPresent
+              envFrom: [ { secretRef: { name: app-db-credentials } } ]
+              command: ["/bin/sh", "-c", "echo report on $POSTGRES_DB_HOST"]

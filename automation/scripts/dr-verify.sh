@@ -9,6 +9,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 : "${TARGET_DB:?run dr_set_target first}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}"
 
@@ -39,19 +40,19 @@ insert into dr.write_probe(note) values ('dr-verify') returning 'write_probe_ok 
 SQL
 }
 
-sessions() { # sessions <db-id> <label>
-  local dsn; dsn="$(dr_dsn "$1" 2>/dev/null)" || { echo "$2 $1: not reachable (OK if fenced/stopped)"; return 0; }
+sessions() { # sessions <db-id> <label> <required:0|1>
+  local dsn; dsn="$(dr_dsn "$1" 2>/dev/null)" || { echo "$2 $1: not reachable"; return "$3"; }
   echo "== $2 $1"
   psql "$dsn" -XAtq -F' | ' -c "select coalesce(nullif(application_name,''),'<none>'), usename, count(*)
      from pg_stat_activity where backend_type='client backend' and pid<>pg_backend_pid()
        and usename not in ('rdsadmin') and application_name not like 'dr-%'
-     group by 1,2 order by 3 desc" 2>&1 || echo "$2 $1: query failed (fenced?)"
+     group by 1,2 order by 3 desc" 2>&1 || { echo "$2 $1: query failed"; return "$3"; }
 }
 
-connections() {
-  sessions "$TARGET_DB" TARGET
-  [[ -n "${OLD_DB:-}" && "$OLD_DB" != "$TARGET_DB" ]] && sessions "$OLD_DB" OLD
-  [[ -n "${REPLICA_DB:-}" && "$REPLICA_DB" != "$TARGET_DB" ]] && sessions "$REPLICA_DB" OLD_REPLICA
+connections() {   # TARGET must be queryable; OLD/replica may be fenced or gone
+  sessions "$TARGET_DB" TARGET 1 || return 1
+  [[ -n "${OLD_DB:-}" && "$OLD_DB" != "$TARGET_DB" ]] && sessions "$OLD_DB" OLD 0
+  [[ -n "${REPLICA_DB:-}" && "$REPLICA_DB" != "$TARGET_DB" ]] && sessions "$REPLICA_DB" OLD_REPLICA 0
   return 0
 }
 

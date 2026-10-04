@@ -2,11 +2,17 @@
 # dr-eks-rollout.sh — Kubernetes side of the secret cutover (CP-01) and S1 restarts.
 #   inventory [secret]             : every Deployment/StatefulSet/DaemonSet/CronJob consuming the Secret, Reloader-annotated or not
 #   snapshot-generations [secret]  : record metadata.generation of consumers (called right before the secret update)
-#   wait [secret]                  : wait until Reloader bumped each annotated consumer (generation increased), then rollout status,
-#                                    in dr.example.com/restart-order (1 poolers → 2 APIs → 3 workers). Falls back to manual restart.
+#   wait [secret]                  : annotated consumers: wait until Reloader restarted them (generation bump), else manual restart
+#                                    (reported as RELOADER FAILED). Unannotated consumers: Reloader never touches them;
+#                                    RESTART_UNANNOTATED=true (default) restarts them manually, false leaves + reports them.
+#                                    Ordered by dr.example.com/restart-order (1 poolers → 2 APIs → 3 workers).
 #   restart [secret]               : manual ordered `rollout restart` of all consumers (Reloader down, or S1 stale pools)
 #   suspend-cronjobs | resume-cronjobs [secret]
 set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dr-lib.sh
+source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 : "${EKS_CONTEXT:?}" "${K8S_NS:?}"
 CMD="${1:-}"; SECRET="${2:-${K8S_SECRET:?}}"
 K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
@@ -37,28 +43,43 @@ snapshot_generations() {
 }
 
 wait_rollouts() {
-  local gens="$OUT/generations-${SECRET}.tsv"
+  local gens="$OUT/generations-${SECRET}.tsv" report="$OUT/reload-report-${SECRET}.txt"
   [[ -f "$gens" ]] || { echo "no generation snapshot — run snapshot-generations before the secret update"; exit 1; }
+  : > "$report"
   for order in $(consumers | cut -f2 | sort -nu); do
     echo "== restart-order ${order}"
-    consumers | awk -F'\t' -v o="$order" '$2==o && $1 !~ /^cronjob\//' | while IFS=$'\t' read -r obj _ rl; do
+    while IFS=$'\t' read -r obj _ rl; do
       local before now deadline
       before="$(awk -F'\t' -v o="$obj" '$1==o{print $2}' "$gens")"
-      deadline=$(( $(date +%s) + RELOADER_GRACE_S ))
-      while :; do
+      if [[ "$rl" == "NO" ]]; then
+        # Not Reloader-managed: Reloader must NOT touch it; we decide explicitly.
         now="$($K get "$obj" -o jsonpath='{.metadata.generation}')"
-        (( now > before )) && { echo "$obj: reloaded (generation $before→$now)"; break; }
-        if (( $(date +%s) > deadline )); then
-          echo "$obj: NOT reloaded after ${RELOADER_GRACE_S}s (reloader=$rl) → manual rollout restart"
-          $K rollout restart "$obj"; break
+        (( now > before )) && echo "$obj: UNEXPECTED — generation changed without Reloader annotation" | tee -a "$report"
+        if [[ "${RESTART_UNANNOTATED:-true}" == "true" ]]; then
+          echo "$obj: UNANNOTATED → manual rollout restart (RESTART_UNANNOTATED=true)" | tee -a "$report"
+          $K rollout restart "$obj"
+        else
+          echo "$obj: UNANNOTATED → SKIPPED, still using the OLD endpoint until restarted (RESTART_UNANNOTATED=false)" | tee -a "$report"
+          continue
         fi
-        sleep 3
-      done
+      else
+        deadline=$(( $(date +%s) + RELOADER_GRACE_S ))
+        while :; do
+          now="$($K get "$obj" -o jsonpath='{.metadata.generation}')"
+          (( now > before )) && { echo "$obj: RELOADED by Reloader (generation $before→$now)" | tee -a "$report"; break; }
+          if (( $(date +%s) > deadline )); then
+            echo "$obj: RELOADER FAILED (no restart after ${RELOADER_GRACE_S}s) → manual rollout restart" | tee -a "$report"
+            $K rollout restart "$obj"; break
+          fi
+          sleep 3
+        done
+      fi
       $K rollout status "$obj" --timeout=600s 2>&1 | tee "$OUT/rollout-status-${obj//\//_}.txt"
-    done
+    done < <(consumers | awk -F'\t' -v o="$order" '$2==o && $1 !~ /^cronjob\//')
   done
   $K get pods -o wide > "$OUT/pods-wide.txt"
   $K get events --sort-by=.lastTimestamp > "$OUT/events.txt"
+  echo "--- reload report: $report"; cat "$report"
 }
 
 restart_all() {
@@ -82,7 +103,7 @@ case "$CMD" in
   inventory)             inventory ;;
   snapshot-generations)  snapshot_generations ;;
   wait)                  wait_rollouts ;;
-  restart)               restart_all ;;
+  restart)               dr_confirm "rolling restart of all consumers of $SECRET" && restart_all ;;
   suspend-cronjobs)      cronjobs true ;;
   resume-cronjobs)       cronjobs false ;;
   *) echo "usage: $0 {inventory|snapshot-generations|wait|restart|suspend-cronjobs|resume-cronjobs} [k8s-secret]"; exit 2 ;;

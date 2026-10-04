@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-c
+  namespace: app
+  labels:
+    app: app-c
+    dr.example.com/db-consumer: "true"
+    dr.example.com/restart-order: "3"
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: app-c } }
+  template:
+    metadata:
+      labels: { app: app-c }
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: app
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom: [ { secretRef: { name: app-db-credentials } } ]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Sample DB client: holds a session visible in pg_stat_activity as application_name=app-c.
+              # DB_HOST is read ONCE at start (like a real app) → only a restart moves it to a new endpoint.
+              echo "start host=$POSTGRES_DB_HOST"
+              while true; do
+                PGPASSWORD="$POSTGRES_DB_PASSWORD" psql "host=$POSTGRES_DB_HOST port=$POSTGRES_DB_PORT dbname=$POSTGRES_DB_NAME user=$POSTGRES_DB_USER sslmode=disable connect_timeout=3 application_name=app-c" \
+                  -XAtqc "select pg_sleep(30)" >/dev/null 2>&1 || { echo "db error on $POSTGRES_DB_HOST"; sleep 2; }
+              done
+          resources: { requests: { cpu: 5m, memory: 16Mi } }

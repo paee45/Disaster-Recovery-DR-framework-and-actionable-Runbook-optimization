@@ -1,0 +1,45 @@
+# ESO → LocalStack Secrets Manager (endpoint injected into the ESO controller via AWS_SECRETSMANAGER_ENDPOINT).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: localstack-creds
+  namespace: app
+stringData:
+  access-key: test
+  secret-key: test
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: aws-secretsmanager
+  namespace: app
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: eu-west-1
+      auth:
+        secretRef:
+          accessKeyIDSecretRef: { name: localstack-creds, key: access-key }
+          secretAccessKeySecretRef: { name: localstack-creds, key: secret-key }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: app-db-credentials
+  namespace: app
+spec:
+  refreshInterval: 1m
+  secretStoreRef: { kind: SecretStore, name: aws-secretsmanager }
+  target:
+    name: app-db-credentials       # mirrors the real "[app]-db-credentials"
+    creationPolicy: Owner
+    template:
+      data:
+        POSTGRES_DB_HOST: "{{ .host }}"   # mirrors the real key name (K8S_HOST_KEY)
+        POSTGRES_DB_PORT: "{{ .port }}"
+        POSTGRES_DB_NAME: "{{ .dbname }}"
+        POSTGRES_DB_USER: "{{ .username }}"
+        POSTGRES_DB_PASSWORD: "{{ .password }}"
+  dataFrom:
+    - extract: { key: local/app/db }

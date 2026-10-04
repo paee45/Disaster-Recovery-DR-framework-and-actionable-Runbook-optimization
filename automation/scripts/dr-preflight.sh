@@ -9,6 +9,7 @@ REPLICA_LAG_MAX_S="${REPLICA_LAG_MAX_S:-300}"   # operational threshold; the RPO
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 
 fails=0
 pass() { printf 'PASS  %s\n' "$*"; }
@@ -52,11 +53,16 @@ check_restore() {
   if [[ -n "$win" && "$win" != "null" ]]; then pass "PITR window: $(jq -c . <<<"$win")"; else warn "no automated backups / PITR window for $PRIMARY_DB → S3 snapshot only"; fi
   local n; n="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --query 'length(DBSnapshots)' --output text 2>/dev/null)"
   (( ${n:-0} > 0 )) && pass "$n snapshots available for $PRIMARY_DB" || warn "no snapshots listed for $PRIMARY_DB (check AWS Backup vault / cross-account copies)"
+  local src_ok=0; aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && src_ok=1
   for v in DB_SUBNET_GROUP DB_SG DB_PARAM_GROUP DB_INSTANCE_CLASS; do
-    [[ -n "${!v:-}" ]] && pass "restore input $v=${!v}" || fail "restore input $v not set in env profile"
+    if [[ -n "${!v:-}" ]]; then pass "restore input $v=${!v} (profile)"
+    elif (( src_ok )); then pass "restore input $v ← copied from $PRIMARY_DB at restore time"
+    else fail "restore input $v empty in profile and $PRIMARY_DB not readable — set a fallback value"; fi
   done
-  aws rds describe-db-parameter-groups --db-parameter-group-name "${DB_PARAM_GROUP:-x}" >/dev/null 2>&1 \
-    && pass "parameter group exists" || fail "parameter group ${DB_PARAM_GROUP:-} not found"
+  if [[ -n "${DB_PARAM_GROUP:-}" ]]; then
+    aws rds describe-db-parameter-groups --db-parameter-group-name "$DB_PARAM_GROUP" >/dev/null 2>&1 \
+      && pass "parameter group $DB_PARAM_GROUP exists" || fail "parameter group $DB_PARAM_GROUP not found"
+  fi
 }
 
 check_k8s() {

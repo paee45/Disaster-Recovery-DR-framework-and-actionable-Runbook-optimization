@@ -1,0 +1,69 @@
+# Testing the DR scripts
+
+Two levels. Always run them in this order: **local first**, then **your real AWS account** (DEV/UAT only).
+
+| Level | What | Changes anything real? | Command |
+|---|---|---|---|
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~45 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
+| 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
+
+## 1. Local test bed (`tests/local/`)
+
+```
+                   ┌──────────────── k3s cluster (context dr-local) ─────────────────┐
+  run-tests.sh     │ ns app (label reloader=enabled)                                 │
+  (scripts under   │   ExternalSecret app-db-credentials ──► Secret (POSTGRES_DB_*)  │
+   test)           │   app-a  Deployment   reloader annotation ✔  restart-order 2    │
+     │             │   app-b  StatefulSet  reloader annotation ✔  restart-order 1    │
+     │             │   app-c  Deployment   NO annotation ✘        restart-order 3    │
+     │             │   app-report CronJob  (suspend/resume test)                     │
+     │             │ ns external-secrets (ESO → LocalStack)   ns reloader (repo values)│
+     │             └───────────────────────────────┬────────────────────────────────┘
+     │  profile dr-local                           │ pods connect to DB_HOST from the secret
+     ├──► LocalStack 172.30.0.10   Secrets Manager, STS, S3 (evidence), SSM, CloudWatch
+     ├──► moto 127.0.0.1:5000      RDS + EC2 mock (RDS is a LocalStack Pro feature)
+     └──► Postgres containers      "old primary" .21 · "replica" .22 · "restored" .23
+          (mock RDS ids → real Postgres via tests/local/.state/endpoint-map, a LOCAL-ONLY seam refused in real envs)
+```
+
+Requirements: Docker, `kubectl`, `helm`, `aws` CLI, `psql`, `jq`, Python 3 with `moto[server]` (`pip install "moto[server]"`).
+
+```bash
+tests/local/up.sh                 # k3s in Docker (default). Or bring your own cluster:
+K3S_MODE=existing EXISTING_KUBECONFIG=~/.kube/k3d-dr.yaml tests/local/up.sh
+tests/local/run-tests.sh          # report: tests/local/.state/test-report.md · logs: .state/logs/
+tests/local/down.sh               # remove everything (K3S_MODE=existing: only what up.sh installed)
+```
+
+What is covered:
+
+| Group | Tests |
+|---|---|
+| A. Guardrails | Pinned profile passes; wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; the **current** context is a decoy and the scripts still hit the right cluster; local seam refused outside local; PROD confirmation blocks non-interactive runs |
+| B. Checks | `dr-env-check.sh`, inventory (**app-c flagged `reloader=NO`**), pre-flight restore + replica |
+| C. S3 restore | list snapshots, restore copying **all 3 SGs**, wait, harden (retention), password trap (precheck fails → `fix-password`), row counts old vs restored, DB verification SQL |
+| D. Cutover | `apply` with `RESTART_UNANNOTATED=false`: secret → ESO → **Reloader restarts app-a + app-b**; **app-c untouched** (same pod, same generation) and still connected to the old DB; `rollback`/`apply` with `RESTART_UNANNOTATED=true`: app-c restarted by the script; session checks in Postgres |
+| E. Fencing | F1 read-only + F2 quarantine SG + un-fence; CronJob suspend/resume |
+| F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` with all SGs |
+| G. Evidence | phase timers, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
+
+Mock limitations (documented, not hidden): moto keeps the replica link after promotion (patched in `moto_launcher.py`, the mock is fixed, not the scripts); no real replication lag/WAL; CloudTrail lookups return nothing; SSM documents are stored but not executed.
+
+### Notes for constrained hosts (how it was run in a cloud sandbox)
+- If pods fail with `runc … can't get final child's PID`, the kernel forbids negative `oom_score_adj`. Run k3s natively with a containerd template that sets `restrict_oom_score_adj = true`, then use `K3S_MODE=existing`.
+- Docker ≥ 28 drops pod → container traffic ("direct routing protection"). `up.sh` creates the test network with `gateway_mode_ipv4=nat-unprotected` and adds `DOCKER-USER` / raw-table accept rules for `10.42.0.0/16 ↔ 172.30.0.0/24`.
+- Behind an HTTP proxy, add the node IP to `NO_PROXY` for k3s, or `kubectl logs/exec` break.
+
+## 2. Real AWS (`tests/aws/sandbox-test.sh`)
+
+Before running:
+1. Set up isolation and pinning per [docs/12](../docs/12-account-and-cluster-safety.md): named profile, separate kubeconfig, `kube-system/dr-cluster-identity` ConfigMap, `env/<env>.env`.
+2. `readonly` first; it must be all green.
+3. For `full`: an ESO store that can read `<env>/dr-test/*` (`DRTEST_STORE_KIND`/`DRTEST_STORE_NAME`), Reloader installed, the sample image pullable (`DRTEST_IMAGE`), and EKS → DB network access (the restored instance gets the same SGs as the primary).
+
+Safety properties of `full`:
+- Refuses `DR_ENV=prod`; asks you to type `sandbox`.
+- Never writes to `$SECRET_ID`, the app namespace, the primary or the replica. It reads the app secret once to copy the credentials.
+- `trap cleanup EXIT` always deletes the namespace, the secret (force delete) and the restored instance (deletion protection removed first), even on failure or Ctrl-C.
+- Writes a report `tests/aws/sandbox-report-<env>-<ts>.md`, including the **measured snapshot-restore time** (input for risk R3 / the 30 min RTO).

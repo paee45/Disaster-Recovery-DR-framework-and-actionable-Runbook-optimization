@@ -3,6 +3,10 @@
 # CP-03: show configuration differences between the old/reference instance and the new primary.
 # If the reference instance no longer exists, set REFERENCE_JSON=<saved describe-db-instances output> (from P2-S01 evidence).
 set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=dr-lib.sh
+source "$HERE/dr-lib.sh"
+dr_guard || exit 1
 ALARMS=0; [[ "${1:-}" == "--alarms" ]] && { ALARMS=1; shift; }
 REF="${1:?reference db id}"; NEW="${2:?new db id}"
 

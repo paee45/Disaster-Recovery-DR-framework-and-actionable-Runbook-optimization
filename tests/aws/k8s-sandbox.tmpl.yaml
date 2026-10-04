@@ -1,0 +1,25 @@
+# Sandbox workloads for the real-AWS test. Rendered by sandbox-test.sh (placeholders __X__). Namespace is throw-away.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __NS__
+  labels: { reloader: enabled, purpose: dr-sandbox-test }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: __SECRET__, namespace: __NS__ }
+spec:
+  refreshInterval: 1m
+  secretStoreRef: { kind: __STORE_KIND__, name: __STORE_NAME__ }
+  target:
+    name: __SECRET__
+    creationPolicy: Owner
+    template:
+      data:
+        POSTGRES_DB_HOST: "{{ .host }}"
+        POSTGRES_DB_PORT: "{{ .port }}"
+        POSTGRES_DB_NAME: "{{ .dbname }}"
+        POSTGRES_DB_USER: "{{ .username }}"
+        POSTGRES_DB_PASSWORD: "{{ .password }}"
+  dataFrom: [ { extract: { key: __REMOTE_KEY__ } } ]
+__APPS__
