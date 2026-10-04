@@ -63,6 +63,17 @@ rds =
 ec2 =
   endpoint_url = http://127.0.0.1:$MOTO_PORT
 
+[profile dr-sso-expired]
+sso_session = drtest
+sso_account_id = 000000000000
+sso_role_name = lab_admin
+region = eu-west-1
+
+[sso-session drtest]
+sso_start_url = https://drtest.invalid/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+
 [profile dr-decoy]
 region = eu-west-1
 endpoint_url = http://127.0.0.1:$MOTO_PORT

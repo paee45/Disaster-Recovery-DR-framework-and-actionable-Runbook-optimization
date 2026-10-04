@@ -110,14 +110,58 @@ export -f aws kubectl _dr_flag _dr_refuse _dr_audit_line _dr_exec
 
 _dr_die() { echo "GUARD FAIL: $*" >&2; return 1; }
 
+# ───────────── AWS authentication: SSO, assumed role, credential_process, or a static key in a NAMED profile ─────────────
+# _dr_auth_type <profile> → sso | role | process | key | none   (what the profile uses; read from the AWS config files)
+_dr_auth_type() {
+  local p="$1" k
+  local cfg="${AWS_CONFIG_FILE:-$HOME/.aws/config}" cred="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"      # works on AWS CLI v1 and v2
+  { grep -qsFx "[profile $p]" "$cfg" || grep -qsFx "[$p]" "$cfg" "$cred"; } || { echo none; return; }
+  for k in sso_session sso_start_url; do [[ -n "$(command aws configure get "$k" --profile "$p" 2>/dev/null)" ]] && { echo sso; return; }; done
+  [[ -n "$(command aws configure get credential_process --profile "$p" 2>/dev/null)" ]] && { echo process; return; }
+  [[ -n "$(command aws configure get role_arn --profile "$p" 2>/dev/null)" ]] && { echo role; return; }
+  [[ -n "$(command aws configure get aws_access_key_id --profile "$p" 2>/dev/null)" ]] && { echo key; return; }
+  echo none
+}
+# the profile whose SSO login refreshes $AWS_PROFILE: itself (sso) or its source_profile (role chained on an SSO profile)
+_dr_login_profile() {
+  local p="${1:-$AWS_PROFILE}" src
+  [[ "$(_dr_auth_type "$p")" == sso ]] && { echo "$p"; return; }
+  src="$(command aws configure get source_profile --profile "$p" 2>/dev/null)"
+  [[ -n "$src" && "$(_dr_auth_type "$src")" == sso ]] && echo "$src"
+  return 0
+}
+_dr_whoami() { command aws --profile "$AWS_PROFILE" --region "$AWS_REGION" sts get-caller-identity --query '[Account,Arn]' --output text 2>/dev/null; }
+dr_auth_ok() { [[ -n "$(_dr_whoami)" ]]; }
+# dr_reauth — SSO session expired/missing: opens the browser (aws sso login) and WAITS until you finish there, then returns 0.
+#   Asks first (DR_AUTO_SSO_LOGIN=1 = don't ask). Over SSH/remote: DR_SSO_NO_BROWSER=1 prints the URL + code instead.
+#   Static keys can't be refreshed: prints what to check. Non-interactive: prints the command and returns 1.
+dr_reauth() {
+  local lp a f=(); lp="$(_dr_login_profile)"
+  if [[ -z "$lp" ]]; then
+    echo "AUTH: credentials of profile '$AWS_PROFILE' ($(_dr_auth_type "$AWS_PROFILE")) were rejected — check the access key / role / MFA token (not an SSO profile, nothing to log in to)" >&2; return 1; fi
+  if [[ ! -t 0 || ! -t 2 ]]; then echo "AUTH: SSO session expired — run in a terminal: aws sso login --profile $lp   (then re-run)" >&2; return 1; fi   # pin-lint: ok (message text)
+  if [[ "${DR_AUTO_SSO_LOGIN:-0}" != 1 ]]; then
+    read -r -p "SSO login needed for profile '$lp' — open the browser now? [Y/n] " a </dev/tty; [[ "$a" =~ ^[Nn] ]] && return 1; fi
+  [[ "${DR_SSO_NO_BROWSER:-0}" == 1 ]] && f+=(--no-browser)
+  echo "AUTH: waiting for you to finish the login in the browser (this terminal continues automatically)…" >&2
+  command aws sso login --profile "$lp" "${f[@]}" >&2 && dr_auth_ok   # pin-lint: ok (login for an explicit profile)
+}
+
 # dr_guard — verify we are pointed at the intended account + cluster. Cached per (env, profile, context, account).
 dr_guard() {
-  local key="${DR_ENV}|${AWS_PROFILE}|${AWS_REGION}|${EKS_CONTEXT}|${ACCOUNT_ID:-}|${KUBECONFIG:-}|${DR_STRICT_PIN}"
+  local key="${DR_ENV}|${AWS_PROFILE}|${AWS_REGION}|${EKS_CONTEXT}|${ACCOUNT_ID:-}|${KUBECONFIG:-}|${DR_STRICT_PIN}|${DR_AUTH_ALLOWED:-}"
   [[ "${DR_GUARD_OK:-}" == "$key" ]] && return 0
   : "${ACCOUNT_ID:?ACCOUNT_ID must be set in env/<env>.env}"
   local acct arn server want_server cm_env cm_acct cfg cred kcfg other
-  read -r acct arn <<<"$(command aws --profile "$AWS_PROFILE" --region "$AWS_REGION" sts get-caller-identity --query '[Account,Arn]' --output text 2>/dev/null)"
-  [[ "$acct" == "$ACCOUNT_ID" ]] || { _dr_die "AWS profile '$AWS_PROFILE' is account '${acct:-<no credentials>}', expected $ACCOUNT_ID (env $DR_ENV)"; return 1; }
+  local at; at="$(_dr_auth_type "$AWS_PROFILE")"
+  [[ "$at" != none ]] || { _dr_die "AWS profile '$AWS_PROFILE' not found (or has no credential source) in ${AWS_CONFIG_FILE:-~/.aws/config} / the credentials file"; return 1; }
+  [[ ",${DR_AUTH_ALLOWED:-sso,role,process,key}," == *",$at,"* ]] \
+    || { _dr_die "profile '$AWS_PROFILE' uses '$at' credentials; allowed here: ${DR_AUTH_ALLOWED:-sso,role,process,key} (DR_AUTH_ALLOWED in env/$DR_ENV.env — PROD should be SSO or an assumed role)"; return 1; }
+  read -r acct arn <<<"$(_dr_whoami)"
+  if [[ -z "$acct" ]]; then       # not logged in / expired: offer the browser login (SSO) and continue afterwards
+    dr_reauth && read -r acct arn <<<"$(_dr_whoami)"
+  fi
+  [[ "$acct" == "$ACCOUNT_ID" ]] || { _dr_die "AWS profile '$AWS_PROFILE' ($at) is account '${acct:-<no valid credentials>}', expected $ACCOUNT_ID (env $DR_ENV)$([[ -z "$acct" && -n "$(_dr_login_profile)" ]] && echo " — run: aws sso login --profile $(_dr_login_profile)")"; return 1; }   # pin-lint: ok (message text)
   if [[ -n "${AWS_ROLE_PATTERN:-}" && ! "$arn" =~ $AWS_ROLE_PATTERN ]]; then _dr_die "caller $arn does not match AWS_ROLE_PATTERN '$AWS_ROLE_PATTERN'"; return 1; fi
   server="$(command kubectl config view -o jsonpath="{.clusters[?(@.name==\"$(command kubectl config view -o jsonpath="{.contexts[?(@.name==\"$EKS_CONTEXT\")].context.cluster}")\")].cluster.server}" 2>/dev/null)"
   [[ -n "$server" ]] || { _dr_die "kube context '$EKS_CONTEXT' not found in ${KUBECONFIG:-~/.kube/config}"; return 1; }
@@ -143,7 +187,7 @@ dr_guard() {
   if [[ -n "$other" && "${DR_ALLOW_FOREIGN_CONTEXTS:-0}" != 1 ]]; then
     _dr_die "kubeconfig $kcfg (env $DR_ENV) also holds context(s) of other environments: $other— use one kubeconfig per env"; return 1; fi
   export DR_GUARD_OK="$key"
-  echo "GUARD OK: env=$DR_ENV account=$acct caller=$arn region=$AWS_REGION context=$EKS_CONTEXT ($server)" >&2
+  echo "GUARD OK: env=$DR_ENV account=$acct caller=$arn auth=$at$([[ $at == key ]] && echo ' (long-lived static key: rotate regularly, prefer SSO)') region=$AWS_REGION context=$EKS_CONTEXT ($server)" >&2
 }
 
 # dr_confirm "<action>" — typed confirmation for PROD changes (anti-accident, not an approval gate).

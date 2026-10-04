@@ -4,7 +4,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 
 | Level | What | Changes anything real? | Command |
 |---|---|---|---|
-| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 91 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 97 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
@@ -51,7 +51,7 @@ What is covered:
 
 | Group | Tests |
 |---|---|
-| A. Guardrails | Pinned profile passes; wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; local seam refused outside local; PROD confirmation blocks non-interactive runs; **strict pinning**: `aws` without `--profile/--region` → 97, `--profile dr-decoy` → 97 (even with `DR_STRICT_PIN=0`), `kubectl` without/with decoy `--context` → 97; `[default]` profile, kube `current-context`, a `dr-prod` context in the kubeconfig, exported keys → refused; pinning lint; fill-in mode ignores a decoy current-context |
+| A. Guardrails | Pinned profile passes; **authentication kinds** (static key in a named profile and SSO both detected; `DR_AUTH_ALLOWED=sso,role` refuses a key; expired SSO names the exact `aws sso login` command; unknown profile refused; a rejected key says it is not an SSO profile); wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; local seam refused outside local; PROD confirmation blocks non-interactive runs; **strict pinning**: `aws` without `--profile/--region` → 97, `--profile dr-decoy` → 97 (even with `DR_STRICT_PIN=0`), `kubectl` without/with decoy `--context` → 97; `[default]` profile, kube `current-context`, a `dr-prod` context in the kubeconfig, exported keys → refused; pinning lint; fill-in mode ignores a decoy current-context |
 | B. Checks | `dr-env-check.sh`, inventory (**app-c flagged `reloader=NO`**), pre-flight restore + replica |
 | C. S3 restore | **baseline capture** of the source (describe + 4 tags incl. a value with spaces + `pg_settings`), `plan` (request has 3 SGs, subnets, PG, retention 7, backup window, log exports, tags; nothing created), restore with `--cli-input-json`, wait, `validate` **fails** before harden (maintenance window), simulated CLI-default **retention 1 day + lost tag → detected**, `harden` → **VALIDATED**, password trap (precheck fails → `fix-password`), `validate-pg` equal + detects a changed `work_mem`, row counts, DB verification SQL |
 | D. Cutover | `apply` with `RESTART_UNANNOTATED=false`: secret → ESO → **Reloader restarts app-a + app-b**; **app-c untouched** (same pod, same generation) and still connected to the old DB; standalone **`k8s-secret-consumers.sh`**: refuses without `--context` / wrong env, `check` shows **app-c STALE** and app-a/app-b UP-TO-DATE, `restart-stale` restarts **only app-c** (app-a/app-b generation unchanged), `check` clean afterwards; `rollback`/`apply` with `RESTART_UNANNOTATED=true`: app-c restarted by the script; session checks in Postgres |
@@ -127,7 +127,7 @@ Rehearsed locally in your exact configuration (SECRET_MODE=k8s, two host keys, n
 (after `source tests/local/.state/local.env`) → 33/33 PASS. `SANDBOX_ALLOW_LOCAL` is honoured only with `DR_ENV=local`.
 
 Before running:
-1. Log in with your SSO profile (`aws sso login --profile dr-uat`); set `AWS_ROLE_PATTERN` to your role (a regex, e.g. `assumed-role/AWSReservedSSO_lab_admin_`) so the guard accepts it and nothing else.
+1. Log in with your SSO profile (`aws sso login --profile dr-uat` — or just start the script: if the session expired it offers the login, waits for the browser, and continues). A static key in a **named** profile also works for UAT/DEV (not PROD): see [docs/12](../docs/12-account-and-cluster-safety.md). Set `AWS_ROLE_PATTERN` to your role (a regex, e.g. `assumed-role/AWSReservedSSO_lab_admin_`) so the guard accepts it and nothing else.
 2. Set up isolation and pinning per [docs/12](../docs/12-account-and-cluster-safety.md): named profile, separate kubeconfig (no current-context), `kube-system/dr-cluster-identity` ConfigMap, `env/<env>.env`.
 3. `readonly` first; it must be all green.
 4. For `full`: Reloader installed, the sample image pullable (`DRTEST_IMAGE`, default `postgres:16-alpine`), EKS → DB network access (the restored instance gets the same SGs as the primary). `SECRET_MODE=eso` only: an ESO store that can read `<env>/dr-test/*` (`DRTEST_STORE_KIND`/`DRTEST_STORE_NAME`).

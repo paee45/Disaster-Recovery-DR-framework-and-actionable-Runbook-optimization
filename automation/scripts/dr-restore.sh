@@ -133,6 +133,10 @@ wait_available() {
     printf '%s  %-12s elapsed %dm%02ds\n' "$(date -u +%H:%M:%SZ)" "$st" $(( (now-start)/60 )) $(( (now-start)%60 ))
     [[ "$st" == "available" ]] && break
     [[ "$st" == failed || "$st" == incompatible-* || "$st" == storage-full ]] && { echo "FAIL $db status $st — see CP-07"; return 1; }
+    if [[ "$st" == not-found ]] && ! dr_auth_ok; then      # logged out mid-wait (SSO expiry) is not "instance missing"
+      dr_reauth || { echo "FAIL AWS credentials expired during the wait. The restore keeps running — log in again, then: $0 wait $db"; return 1; }
+      miss=0; continue
+    fi
     if [[ "$st" == not-found ]]; then miss=$((miss+1)); (( miss < ${WAIT_NOTFOUND_MAX:-10} )) || { echo "FAIL $db does not exist (did the restore call fail?)"; return 1; }; fi
     sleep "${WAIT_POLL_S:-30}"
   done

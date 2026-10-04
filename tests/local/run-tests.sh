@@ -65,6 +65,13 @@ a16() { local kc="$STATE/kubeconfig.foreign"; cp "$KUBECONFIG" "$kc"
 tf A16 "kubeconfig holding another env's context (dr-prod) makes the guard fail" "other environments" a16
 tf A17 "exported static AWS keys are refused (strict)"   "REFUSED: AWS_ACCESS_KEY_ID" env AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY=x bash -c "source '$S/dr-lib.sh'"
 t  A18 "pinning lint: every aws/kubectl call in the scripts is pinned" "$ROOT/tests/lint/pinning-lint.sh"
+# authentication kinds: static key in a named profile (dr-local) and SSO are both accepted; PROD can forbid keys; expiry is explained
+t  A19 "auth types detected: dr-local = key, dr-sso-expired = sso"     bash -c "source '$S/dr-lib.sh' && [[ \$(_dr_auth_type dr-local) == key && \$(_dr_auth_type dr-sso-expired) == sso && \$(_dr_auth_type nope) == none ]]"
+t  A20 "guard OK line shows auth=key (static key in a named profile)"   bash -c "DR_GUARD_OK= bash -c \"source '$S/dr-lib.sh' && dr_guard\" 2>&1 | grep -q 'auth=key'"
+tf A21 "DR_AUTH_ALLOWED=sso,role refuses a static-key profile"           "uses 'key' credentials; allowed here: sso,role" env DR_AUTH_ALLOWED=sso,role DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"
+tf A22 "expired SSO (no tty): tells you the exact login command"         "aws sso login --profile dr-sso-expired" env AWS_PROFILE=dr-sso-expired DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard </dev/null"
+tf A23 "unknown profile name is refused (no silent fallback)"            "not found" env AWS_PROFILE=no-such-profile DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"
+tf A24 "static key rejected → not an SSO profile, says what to check"    "not an SSO profile" env DR_GUARD_OK= bash -c "source '$S/dr-lib.sh'; AWS_PROFILE=dr-decoy; ACCOUNT_ID=000000000000; dr_reauth </dev/null"
 
 echo "=== B. Environment check, inventory, pre-flight"
 t  B01 "dr-env-check.sh S3 → PASS"                                   "$S/dr-env-check.sh" S3

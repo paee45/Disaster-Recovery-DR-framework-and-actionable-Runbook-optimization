@@ -73,10 +73,40 @@ Guard failures print `GUARD FAIL: …` and the script stops **before** any chang
 - `dr_confirm` asks you to type `prod` before PROD changes (restore, harden, secret apply/rollback/fix-password, fencing, mass restart). In non-interactive runs it **aborts** unless `DR_ASSUME_YES=1` is set explicitly (test A08).
 - Irreversible steps (promotion, cutover) also have the runbook gates (G2/G3) with recorded approvers (SSM `aws:approve`).
 
+## How you log in to AWS — SSO or a static key (both supported)
+
+The guard reads what the profile uses (`_dr_auth_type`) and checks it against `DR_AUTH_ALLOWED` in the env file:
+
+| Profile uses | Detected as | Where it lives | Notes |
+|---|---|---|---|
+| **IAM Identity Center (SSO)** | `sso` | `~/.aws/config`: `sso_session` / `sso_start_url` | Preferred: short-lived, MFA, central off-boarding |
+| Assumed role (e.g. on an SSO or key profile) | `role` | `role_arn` + `source_profile` (+ `mfa_serial`) | Good for a dedicated `DRExecutorRole` |
+| `credential_process` (aws-vault, 1Password, …) | `process` | `credential_process = …` | Keys never touch disk |
+| **Static access key** | `key` | `~/.aws/credentials` under a **named** `[dr-uat]` | Accepted for DEV/UAT; **long-lived** → rotate (≤ 90 days), least privilege, MFA on the user |
+
+Rules that apply to **every** type: the key/profile is selected by `--profile` on each command (never `[default]`, never
+exported `AWS_ACCESS_KEY_ID`/`AWS_SESSION_TOKEN` — those are refused). `AWS_ROLE_PATTERN` still decides *who* may run:
+for SSO `assumed-role/AWSReservedSSO_lab_admin_`, for a static key `user/<your-iam-user>`.
+`env/prod.env.example` sets `DR_AUTH_ALLOWED=sso,role` → a static-key profile is **refused for PROD**; dev/uat allow `key`.
+The `GUARD OK` line shows `auth=sso|key|…` (and a rotation reminder for keys).
+
+**SSO and the browser wait.** If the SSO session is missing/expired when a script starts, the guard asks
+`SSO login needed for profile 'X' — open the browser now? [Y/n]`, runs `aws sso login --profile X`, **waits in that terminal
+until you finish in the browser**, and then carries on with the same command (no re-typing). Options:
+- `DR_AUTO_SSO_LOGIN=1` — don't ask, just open the browser.
+- `DR_SSO_NO_BROWSER=1` — over SSH/remote: prints the URL + code to open on another machine, still waits here.
+- Without a terminal (CI, pipes) nothing can wait for a browser: it stops with `run: aws sso login --profile X`.
+- Expiry **during** a long `dr-restore.sh wait` (12+ min) is detected (it does not report "instance missing"): you are
+  offered the same login; the restore keeps running on AWS in the meantime. Log in before a DR with `aws sso login`, and ask
+  for a session length that covers the exercise (Identity Center → permission set → session duration).
+- Role chained on an SSO profile: the login is done for the `source_profile`.
+- A static key that is wrong/revoked says so ("not an SSO profile — check the access key / role / MFA") instead of offering a login.
+
 ## Your workstation (macOS) — one-time setup
 ```bash
 brew install bash coreutils jq libpq awscli kubectl helm            # dr-lib.sh needs bash>=4 + GNU date (auto-added to PATH)
-# ~/.aws/config: SSO profiles only — NO [default] (also remove [default] from ~/.aws/credentials)
+# ~/.aws/config: named profiles only — NO [default] (also remove [default] from ~/.aws/credentials). SSO shown; a static key goes
+# in ~/.aws/credentials as [dr-uat] aws_access_key_id/aws_secret_access_key (DEV/UAT only, see above)
 [profile dr-uat]
 sso_session = corp
 sso_account_id = 111122223333

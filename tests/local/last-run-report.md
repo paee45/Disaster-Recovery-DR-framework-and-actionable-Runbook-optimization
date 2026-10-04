@@ -18,6 +18,12 @@
 | A16 | kubeconfig holding another env's context (dr-prod) makes the guard fail | PASS | logs/A16.log |
 | A17 | exported static AWS keys are refused (strict) | PASS | logs/A17.log |
 | A18 | pinning lint: every aws/kubectl call in the scripts is pinned | PASS | logs/A18.log |
+| A19 | auth types detected: dr-local = key, dr-sso-expired = sso | PASS | logs/A19.log |
+| A20 | guard OK line shows auth=key (static key in a named profile) | PASS | logs/A20.log |
+| A21 | DR_AUTH_ALLOWED=sso,role refuses a static-key profile | PASS | logs/A21.log |
+| A22 | expired SSO (no tty): tells you the exact login command | PASS | logs/A22.log |
+| A23 | unknown profile name is refused (no silent fallback) | PASS | logs/A23.log |
+| A24 | static key rejected → not an SSO profile, says what to check | PASS | logs/A24.log |
 | B01 | dr-env-check.sh S3 → PASS | PASS | logs/B01.log |
 | B02 | inventory: app-a/app-b Reloader YES, app-c NO, CronJob listed | PASS | logs/B02.log |
 | B03 | preflight restore → PASS (inputs copied from source) | PASS | logs/B03.log |
@@ -81,17 +87,15 @@
 | H02 | refuses to patch an ESO-owned Secret (ESO would revert it) | PASS | logs/H02.log |
 | H03 | refuses an ID with spaces / bad characters | PASS | logs/H03.log |
 | H04 | preflight (SECRET_MODE=k8s): host keys present, not ESO-owned | PASS | logs/H04.log |
-| H05 | cutover #1 (id DR-20261004-0732-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
+| H05 | cutover #1 (id DR-20261004-0951-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
 | H06 | ledger entry #1: id, old→new endpoint per key, old/new DB identifier | PASS | logs/H06.log |
 | H07 | Reloader restarted app-d; app-e (no annotation) SKIPPED | PASS | logs/H07.log |
 | H08 | stale check finds app-e (HOST2), restart-stale → both apps on restored | PASS | logs/H08.log |
-| H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | **FAIL** | logs/H09.log |
-| H10 | cutover #2 (id DR-20261004-0732-local-S2): → promoted replica | PASS | logs/H10.log |
-| H11 | failback to the endpoint before #1 (id DR-20261004-0732-local-FB-S3S4 → ref DR-20261004-0732-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
+| H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | PASS | logs/H09.log |
+| H10 | cutover #2 (id DR-20261004-0951-local-S2): → promoted replica | PASS | logs/H10.log |
+| H11 | failback to the endpoint before #1 (id DR-20261004-0951-local-FB-S3S4 → ref DR-20261004-0951-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
 | H12 | history: #1 cutover, #2 cutover, #3 failback (ref #1) — who/when/from→to | PASS | logs/H12.log |
 | H13 | rollback undoes the latest change (failback) → replica again | PASS | logs/H13.log |
 | H14 | rollback refuses when the Secret was changed outside the ledger | PASS | logs/H14.log |
 
-**PASS=90 FAIL=1** · DR_ID=DR-localtest-20261004072715 · 2026-10-04T07:33:09Z
-
-> H09 failed only because the check read the last 200 log lines of the alert sink; the alert had been received (verified in the sink log). Check now reads the whole log; verified against this run.
+**PASS=97 FAIL=0** · DR_ID=DR-localtest-20261004094553 · 2026-10-04T09:52:11Z
