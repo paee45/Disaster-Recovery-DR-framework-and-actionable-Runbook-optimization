@@ -172,7 +172,7 @@ g00() { printf 'aws --profile dr-local --region eu-west-1 sts get-caller-identit
           | "$S/dr-session.sh" "$STATE/local.env" S3; local L; L="$(ls -t "$DR_EVIDENCE_DIR"/terminal/session-*.log | head -1)"
         grep -q 000000000000 "$L" && grep -q 'REFUSED aws' "$L" && grep -q 'PGPASSWORD=\*\*\*' "$L" && ! grep -q 'ersecret' "$L" \
         && grep -q 'get-caller-identity' "$DR_EVIDENCE_DIR"/terminal/history-*.txt && [[ ! -e "${L%.log}.raw" ]] \
-        && command aws --profile dr-local s3 ls "s3://$EVIDENCE_BUCKET/local/" --recursive | grep -q "$DR_ID/terminal/session-"; }
+        && command aws --profile dr-local s3 ls "s3://$EVIDENCE_BUCKET/local/" --recursive | grep "$DR_ID/terminal/session-" >/dev/null; }
 t  G00 "recorded session: transcript + history, password redacted, REFUSED shown, synced to S3" g00
 g00b() { lib 'aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager create-secret --name local/dr-test/redact-$RANDOM --secret-string "{\"password\":\"pw-must-not-appear\"}" >/dev/null' \
          && ! grep -q 'pw-must-not-appear' "$DR_EVIDENCE_DIR/commands.jsonl" && grep -q '"--secret-string","\*\*\*"' "$DR_EVIDENCE_DIR/commands.jsonl" \

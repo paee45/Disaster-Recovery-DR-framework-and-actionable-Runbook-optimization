@@ -64,7 +64,7 @@
 | F01 | S2 promote replica + wait-promoted (standalone + writable) | PASS | logs/F01.log |
 | F02 | S4 PITR latest → restore request from baseline with 3 SGs | PASS | logs/F02.log |
 | F03 | S4 PITR: wait + harden → VALIDATED against the baseline | PASS | logs/F03.log |
-| G00 | recorded session: transcript + history, password redacted, REFUSED shown, synced to S3 | PASS | logs/G00.log |
+| G00 | recorded session: transcript + history, password redacted, REFUSED shown, synced to S3 | **FAIL** | logs/G00.log |
 | G00b | audit log commands.jsonl: every call, secret-string redacted, refusals recorded | PASS | logs/G00b.log |
 | G01 | phase timer + summary | PASS | logs/G01.log |
 | G01b | dr_phase end syncs the evidence folder to S3 (timeline already off the machine) | PASS | logs/G01b.log |
@@ -76,15 +76,17 @@
 | H02 | refuses to patch an ESO-owned Secret (ESO would revert it) | PASS | logs/H02.log |
 | H03 | refuses an ID with spaces / bad characters | PASS | logs/H03.log |
 | H04 | preflight (SECRET_MODE=k8s): host keys present, not ESO-owned | PASS | logs/H04.log |
-| H05 | cutover #1 (id DR-20261004-0621-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
+| H05 | cutover #1 (id DR-20261004-0650-local-S3): BOTH keys → restored, annotations cutover-id + db-id | PASS | logs/H05.log |
 | H06 | ledger entry #1: id, old→new endpoint per key, old/new DB identifier | PASS | logs/H06.log |
 | H07 | Reloader restarted app-d; app-e (no annotation) SKIPPED | PASS | logs/H07.log |
 | H08 | stale check finds app-e (HOST2), restart-stale → both apps on restored | PASS | logs/H08.log |
 | H09 | Reloader ALERT webhook received the reload (secret, app-d, cluster info) | PASS | logs/H09.log |
-| H10 | cutover #2 (id DR-20261004-0621-local-S2): → promoted replica | PASS | logs/H10.log |
-| H11 | failback to the endpoint before #1 (id DR-20261004-0621-local-FB-S3S4 → ref DR-20261004-0621-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
+| H10 | cutover #2 (id DR-20261004-0650-local-S2): → promoted replica | PASS | logs/H10.log |
+| H11 | failback to the endpoint before #1 (id DR-20261004-0650-local-FB-S3S4 → ref DR-20261004-0650-local-S3): both keys + both apps on old primary | PASS | logs/H11.log |
 | H12 | history: #1 cutover, #2 cutover, #3 failback (ref #1) — who/when/from→to | PASS | logs/H12.log |
 | H13 | rollback undoes the latest change (failback) → replica again | PASS | logs/H13.log |
 | H14 | rollback refuses when the Secret was changed outside the ledger | PASS | logs/H14.log |
 
-**PASS=86 FAIL=0** · DR_ID=DR-localtest-20261004061607 · 2026-10-04T06:21:55Z
+**PASS=85 FAIL=1** · DR_ID=DR-localtest-20261004064443 · 2026-10-04T06:50:22Z
+
+> G00 failed only at its final S3 check: `aws s3 ls | grep -q` under pipefail → SIGPIPE ("Broken pipe") once the bucket held ~100 objects. Test fixed (grep without -q); the session/redaction/sync behaviour itself passed and the fixed check was verified against this run's evidence.

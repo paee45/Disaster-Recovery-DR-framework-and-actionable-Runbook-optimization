@@ -105,6 +105,7 @@ app-pg-local             $IP_OLD       5432
 app-pg-local-replica     $IP_REPLICA   5432
 app-pg-local-r*          $IP_RESTORED  5432
 app-pg-local-p*          $IP_RESTORED  5432
+app-pg-local-drtest-*    $IP_RESTORED  5432
 MAP
 
 K3S_MODE="${K3S_MODE:-docker}"     # docker = k3s in a container (default) · existing = use EXISTING_KUBECONFIG (k3s/k3d/kind/Rancher Desktop)

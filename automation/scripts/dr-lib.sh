@@ -16,7 +16,10 @@ if (( BASH_VERSINFO[0] < 4 )) || ! date -u -d '2020-01-01T00:00:00Z' +%s >/dev/n
 fi
 
 : "${DR_ENV:?source env/<env>.env first}"
-: "${SECRET_ID:?SECRET_ID missing in env profile}"
+SECRET_MODE="${SECRET_MODE:-eso}"; export SECRET_MODE
+# eso: app credentials live in Secrets Manager ($SECRET_ID) · k8s: in the Kubernetes Secret $K8S_SECRET (no SECRET_ID needed)
+if [[ "$SECRET_MODE" == k8s ]]; then : "${K8S_SECRET:?K8S_SECRET missing in env profile (SECRET_MODE=k8s)}" "${K8S_NS:?K8S_NS missing}"
+else : "${SECRET_ID:?SECRET_ID missing in env profile (or set SECRET_MODE=k8s)}"; fi
 
 # ─────────────────────────── Safety guardrails (wrong account / wrong cluster) ───────────────────────────
 # 1. Every `aws` call is pinned to $AWS_PROFILE + $AWS_REGION; every `kubectl` call to $EKS_CONTEXT.
@@ -165,7 +168,7 @@ dr_init() {
   export OLD_DB="${OLD_DB:-$PRIMARY_DB}"
   dr_mark RUNBOOK_START "scenario=${DR_SCENARIO} env=${DR_ENV} git=$(git rev-parse --short HEAD 2>/dev/null || echo n/a) mode=${DR_MODE:-unplanned}"
   echo "DR_ID=${DR_ID}  evidence=${DR_EVIDENCE_DIR}"
-  echo "ENV=${DR_ENV} PRIMARY_DB=${PRIMARY_DB:-} OLD_DB=${OLD_DB:-} REPLICA_DB=${REPLICA_DB:-} SECRET_ID=${SECRET_ID} EKS_CONTEXT=${EKS_CONTEXT:-} K8S_SECRET=${K8S_SECRET:-}/${K8S_HOST_KEY:-DB_HOST}"
+  echo "ENV=${DR_ENV} PRIMARY_DB=${PRIMARY_DB:-} OLD_DB=${OLD_DB:-} REPLICA_DB=${REPLICA_DB:-} SECRET_MODE=${SECRET_MODE} SECRET_ID=${SECRET_ID:-} EKS_CONTEXT=${EKS_CONTEXT:-} K8S_SECRET=${K8S_SECRET:-}/${K8S_HOST_KEY:-DB_HOST}"
   echo "All timestamps are UTC. Next: dr_set_target <instance> once the target exists."
 }
 
@@ -222,12 +225,24 @@ _dr_pgpass_add() { # host port db user password
     printf '%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$esc" >> "$PGPASSFILE.tmp"; mv "$PGPASSFILE.tmp" "$PGPASSFILE" )
 }
 
-# dr_dsn <db-id> — libpq conninfo (no password) for an instance endpoint, with the APP credentials from $SECRET_ID.
+# dr_app_secret — app credentials as JSON {username,password}: Secrets Manager $SECRET_ID (eso) or K8s Secret (k8s)
+dr_app_secret() {
+  if [[ "$SECRET_MODE" == k8s ]]; then
+    kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" -o json \
+      | jq -c --arg u "${K8S_USER_KEY:-POSTGRES_DB_USER}" --arg p "${K8S_PASSWORD_KEY:-POSTGRES_DB_PASSWORD}" \
+          '{username: (.data[$u] // "" | @base64d), password: (.data[$p] // "" | @base64d)}'
+  else
+    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "${SECRET_ID}" --query SecretString --output text
+  fi
+}
+
+# dr_dsn <db-id> — libpq conninfo (no password) for an instance endpoint, with the APP credentials (dr_app_secret).
 dr_dsn() {
   local addr port secret user
   read -r addr port <<<"$(dr_endpoint "$1")"
   [[ -z "$addr" || "$addr" == "None" ]] && return 1
-  secret="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "${SECRET_ID}" --query SecretString --output text)" || return 1
+  secret="$(dr_app_secret)" || return 1
+  [[ -n "$(jq -r '.username // empty' <<<"$secret")" ]] || { echo "dr_dsn: no app username in the secret" >&2; return 1; }
   user="$(jq -r .username <<<"$secret")"
   _dr_pgpass_add "$addr" "${port:-5432}" "${DB_NAME:-app}" "$user" "$(jq -r .password <<<"$secret")"
   echo "host=${addr} port=${port:-5432} dbname=${DB_NAME:-app} user=${user} sslmode=${DR_PGSSLMODE:-verify-full} sslrootcert=${PGSSLROOTCERT:-$HOME/.postgresql/global-bundle.pem} connect_timeout=5 application_name=dr-runbook"

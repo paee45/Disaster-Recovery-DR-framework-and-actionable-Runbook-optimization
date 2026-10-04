@@ -24,9 +24,10 @@ dr_guard || exit 1
 SECRET_MODE="${SECRET_MODE:-eso}"; [[ "$SECRET_MODE" =~ ^(k8s|eso)$ ]] || { echo "SECRET_MODE must be k8s or eso"; exit 2; }
 CMD="${1:-}"
 
-if [[ -n "${SECRET_ID_RO:-}" && "$SECRET_ID" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
+if [[ -n "${SECRET_ID_RO:-}" && "${SECRET_ID:-}" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
 : "${K8S_SECRET:?}"
-SAFE_ID="${SECRET_ID//\//_}"
+[[ "$SECRET_MODE" == k8s ]] || : "${SECRET_ID:?SECRET_ID required for SECRET_MODE=eso}"
+SAFE_ID="${SECRET_ID:-k8s}"; SAFE_ID="${SAFE_ID//\//_}"
 STATE="${DR_EVIDENCE_DIR}/aws/secret-${SAFE_ID}"
 K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
 

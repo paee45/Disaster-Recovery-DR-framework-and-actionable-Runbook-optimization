@@ -1,3 +1,4 @@
 evidence/
 env/*.env
 __pycache__/
+tests/aws/reports/

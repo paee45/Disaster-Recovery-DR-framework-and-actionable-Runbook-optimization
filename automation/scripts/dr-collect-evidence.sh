@@ -24,7 +24,11 @@ for db in ${TARGET_DB:-} ${OLD_DB:-} ${REPLICA_DB:-}; do
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$db" > "$D/describe-${db}.json" 2>/dev/null || echo "{\"absent\":\"$db\"}" > "$D/describe-${db}.json"
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-events --source-type db-instance --source-identifier "$db" --duration 2880 > "$D/rds-events-${db}.json" 2>/dev/null || true
 done
-for s in "$SECRET_ID" ${SECRET_ID_RO:-}; do
+if [[ "${SECRET_MODE:-eso}" == k8s ]]; then   # annotations + ledger only — never the Secret data
+  kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" -o json | jq '{name: .metadata.name, annotations: .metadata.annotations, keys: (.data | keys)}' > "$A/k8s-secret-meta-${K8S_SECRET}.json" || true
+  kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get configmap "dr-endpoint-ledger-${K8S_SECRET}" -o json > "$A/endpoint-ledger-${K8S_SECRET}.json" 2>/dev/null || true
+fi
+for s in ${SECRET_ID:-} ${SECRET_ID_RO:-}; do
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$s" \
     --query '{name:Name,rotation:RotationEnabled,lastChanged:LastChangedDate,stages:VersionIdsToStages}' > "$A/secret-meta-${s//\//_}.json" || true
 done

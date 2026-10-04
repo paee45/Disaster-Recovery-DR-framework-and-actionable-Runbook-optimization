@@ -4,7 +4,7 @@
 #   restore : S3/S4 — restore window, snapshots, config inputs, EKS/ESO/Reloader
 set -uo pipefail
 MODE="${1:?usage: dr-preflight.sh replica|restore}"
-: "${PRIMARY_DB:?}" "${SECRET_ID:?}" "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${K8S_SECRET:?}"
+: "${PRIMARY_DB:?}" "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${K8S_SECRET:?}"
 REPLICA_LAG_MAX_S="${REPLICA_LAG_MAX_S:-300}"   # operational threshold; the RPO target (24 h) is far looser
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
@@ -41,9 +41,9 @@ check_replica() {
 
   local dsn; dsn="$(dr_dsn "$REPLICA_DB")"
   if out="$(psql "$dsn" -XAtq -F' | ' -f "$HERE/../sql/10-preflight-replica.sql" 2>&1)"; then
-    echo "$out" | sed 's/^/      /'; pass "app credentials from $SECRET_ID work on the replica"
+    echo "$out" | sed 's/^/      /'; pass "app credentials ($SECRET_MODE secret) work on the replica"
   else
-    fail "cannot query replica with $SECRET_ID: $out"
+    fail "cannot query replica with the app credentials ($SECRET_MODE secret): $out"
   fi
 }
 
@@ -100,8 +100,12 @@ case "$MODE" in
   *) echo "usage: $0 replica|restore"; exit 2 ;;
 esac
 check_k8s
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" --query '{rotation:RotationEnabled,stages:VersionIdsToStages}' --output json \
-  | sed 's/^/      /'
+if [[ "${SECRET_MODE:-eso}" == k8s ]]; then
+  "$HERE/k8s-secret-endpoint.sh" --context "$EKS_CONTEXT" -n "$K8S_NS" -s "$K8S_SECRET" -k "${K8S_HOST_KEY:-DB_HOST}" show | sed 's/^/      /'
+else
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" --query '{rotation:RotationEnabled,stages:VersionIdsToStages}' --output json \
+    | sed 's/^/      /'
+fi
 
 echo "----"
 (( fails == 0 )) && { echo "PRE-FLIGHT: PASS"; exit 0; } || { echo "PRE-FLIGHT: ${fails} FAIL(s) — waiver required to proceed"; exit 1; }

@@ -11,7 +11,8 @@ warn() { printf 'WARN  %s\n' "$*"; }
 
 for t in aws jq psql kubectl python3; do command -v "$t" >/dev/null && ok "tool $t" || bad "tool $t missing"; done
 
-req=(DR_ENV AWS_PROFILE AWS_REGION ACCOUNT_ID PRIMARY_DB DB_NAME SECRET_ID EKS_CONTEXT K8S_NS K8S_SECRET EVIDENCE_BUCKET RTO_TARGET_MIN RPO_TARGET_S)
+req=(DR_ENV AWS_PROFILE AWS_REGION ACCOUNT_ID PRIMARY_DB DB_NAME EKS_CONTEXT K8S_NS K8S_SECRET EVIDENCE_BUCKET RTO_TARGET_MIN RPO_TARGET_S)
+[[ "${SECRET_MODE:-eso}" == k8s ]] || req+=(SECRET_ID)
 [[ "$SC" == "S2" ]] && req+=(REPLICA_DB)
 [[ "$SC" == "S3" || "$SC" == "S4" ]] && req+=(MASTER_SECRET_ID)
 for v in "${req[@]}"; do
@@ -32,7 +33,11 @@ unset DR_GUARD_OK
 if dr_guard; then ok "identity guard (account, cluster identity, context)"; else bad "identity guard — see GUARD FAIL above"; fi
 aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && ok "instance $PRIMARY_DB exists" || warn "instance $PRIMARY_DB not found (expected if it was lost/deleted)"
 [[ -n "${REPLICA_DB:-}" ]] && { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$REPLICA_DB" >/dev/null 2>&1 && ok "replica $REPLICA_DB exists" || bad "replica $REPLICA_DB not found"; }
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" >/dev/null 2>&1 && ok "secret $SECRET_ID readable" || bad "secret $SECRET_ID not readable"
+if [[ "${SECRET_MODE:-eso}" == k8s ]]; then
+  kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" >/dev/null 2>&1 && ok "K8s Secret $K8S_NS/$K8S_SECRET readable (SECRET_MODE=k8s)" || bad "K8s Secret $K8S_NS/$K8S_SECRET not readable"
+else
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" >/dev/null 2>&1 && ok "secret $SECRET_ID readable" || bad "secret $SECRET_ID not readable"
+fi
 kubectl config get-contexts -o name 2>/dev/null | grep -qx "$EKS_CONTEXT" && ok "kube context $EKS_CONTEXT present" || bad "kube context $EKS_CONTEXT missing (aws --profile $AWS_PROFILE --region $AWS_REGION eks update-kubeconfig --name <cluster> --alias $EKS_CONTEXT)"
 kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" >/dev/null 2>&1 && ok "K8s secret $K8S_NS/$K8S_SECRET" || bad "K8s secret $K8S_NS/$K8S_SECRET not found"
 

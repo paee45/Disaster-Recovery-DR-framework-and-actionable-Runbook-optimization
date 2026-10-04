@@ -76,14 +76,58 @@ Mock limitations (documented, not hidden): moto keeps the replica link after pro
 
 ## 2. Real AWS (`tests/aws/sandbox-test.sh`)
 
+### Your env file (`env/uat.env`) — on YOUR machine only
+`env/<env>.env` is **not in Git** (`.gitignore`: `env/*.env`) — it holds account IDs, instance names, role patterns. Create
+it in your own clone, from the example:
+```bash
+cd ~/src/Disaster-Recovery-DR-framework-and-actionable-Runbook-optimization     # your clone on the Mac
+cp env/uat.env.example env/uat.env && $EDITOR env/uat.env
+```
+Fill in at least: `ACCOUNT_ID`, `AWS_PROFILE` (your SSO profile), `AWS_ROLE_PATTERN='assumed-role/AWSReservedSSO_lab_admin_'`,
+`AWS_REGION`, `KUBECONFIG`, `EKS_CONTEXT`, `EKS_CLUSTER_NAME`, `PRIMARY_DB`, `REPLICA_DB`, `DB_NAME`, `K8S_NS`,
+`SECRET_MODE=k8s`, `K8S_SECRET`, `K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2`, `K8S_PORT_KEY`, `K8S_USER_KEY`,
+`K8S_PASSWORD_KEY`, `MASTER_SECRET_ID` (password fix / fencing), `EVIDENCE_BUCKET`. With `SECRET_MODE=k8s`, `SECRET_ID` is not needed.
+
+### Running — step by step, with live output
+```bash
+aws sso login --profile dr-uat && source env/uat.env
+tests/aws/sandbox-test.sh --list                   # all steps (R01…R13 read-only, W01…W22 sandbox) + their prerequisites
+tests/aws/sandbox-test.sh readonly                 # every step shows its output live (indented); -q for ✅/❌ only
+tests/aws/sandbox-test.sh readonly --only R01,R02  # just these steps
+tests/aws/sandbox-test.sh readonly --skip R03      # all but these
+tests/aws/sandbox-test.sh full                     # R + W (asks you to type 'sandbox' before creating anything)
+tests/aws/sandbox-test.sh full --keep              # keep the sandbox at the end (or after an abort) …
+SB_TS=<ts> tests/aws/sandbox-test.sh full --from W12 --keep   # … fix the cause, resume from a step with the same names
+SB_TS=<ts> tests/aws/sandbox-test.sh cleanup       # … and remove it when done
+```
+Reports: `tests/aws/reports/sandbox-report-<env>-<ts>.md` (table per step, PASS/FAIL/blocked, duration, measured restore
+time) and `….md.log` (full output of every step). Local only (git-ignored) — they contain account details.
+
+**When a step fails** (`--on-fail`):
+| Mode | Default when | Behaviour |
+|---|---|---|
+| `ask` | running in a terminal | `[r]etry` (fix something in another terminal, then retry) · `[s]kip` (count as failed, go on) · `[a]bort` (stop; cleanup runs unless `--keep`) |
+| `stop` | `full` without a terminal (CI) | stop at the first failure; cleanup runs |
+| `continue` | `readonly` without a terminal | record and go on (safe: read-only) |
+
+**Prerequisites are enforced in every mode:** a step whose prerequisite failed is **BLOCKED** and never runs (`--list`
+shows them). Example from the local rehearsal: W10 (app password on the restored DB) failed → W11 validate-pg, W12 cutover,
+W13 and W20 were blocked; the sandbox was still cleaned up. So a failed restore, harden/validate or password check can never
+be followed by a cutover. And all W steps act only on the throw-away namespace and instance — never on your app Secret,
+app namespace, primary or replica.
+
+Rehearsed locally in your exact configuration (SECRET_MODE=k8s, two host keys, no SECRET_ID):
+`SANDBOX_ALLOW_LOCAL=1 SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2 DRTEST_PGSSLMODE=disable tests/aws/sandbox-test.sh full`
+(after `source tests/local/.state/local.env`) → 33/33 PASS. `SANDBOX_ALLOW_LOCAL` is honoured only with `DR_ENV=local`.
+
 Before running:
 1. Log in with your SSO profile (`aws sso login --profile dr-uat`); set `AWS_ROLE_PATTERN` to your role (a regex, e.g. `assumed-role/AWSReservedSSO_lab_admin_`) so the guard accepts it and nothing else.
-1. Set up isolation and pinning per [docs/12](../docs/12-account-and-cluster-safety.md): named profile, separate kubeconfig, `kube-system/dr-cluster-identity` ConfigMap, `env/<env>.env`.
-2. `readonly` first; it must be all green.
-3. For `full`: an ESO store that can read `<env>/dr-test/*` (`DRTEST_STORE_KIND`/`DRTEST_STORE_NAME`), Reloader installed, the sample image pullable (`DRTEST_IMAGE`), and EKS → DB network access (the restored instance gets the same SGs as the primary).
+2. Set up isolation and pinning per [docs/12](../docs/12-account-and-cluster-safety.md): named profile, separate kubeconfig (no current-context), `kube-system/dr-cluster-identity` ConfigMap, `env/<env>.env`.
+3. `readonly` first; it must be all green.
+4. For `full`: Reloader installed, the sample image pullable (`DRTEST_IMAGE`, default `postgres:16-alpine`), EKS → DB network access (the restored instance gets the same SGs as the primary). `SECRET_MODE=eso` only: an ESO store that can read `<env>/dr-test/*` (`DRTEST_STORE_KIND`/`DRTEST_STORE_NAME`).
 
 Safety properties of `full`:
 - Refuses `DR_ENV=prod`; asks you to type `sandbox`.
-- Never writes to `$SECRET_ID`, the app namespace, the primary or the replica. It reads the app secret once to copy the credentials.
-- `trap cleanup EXIT` always deletes the namespace, the secret (force delete) and the restored instance (deletion protection removed first), even on failure or Ctrl-C.
-- Writes a report `tests/aws/sandbox-report-<env>-<ts>.md`, including the **measured snapshot-restore time** (input for risk R3 / the 30 min RTO).
+- Never writes to your app Secret, the app namespace, the primary or the replica. It reads the app Secret once to copy the credentials into the sandbox namespace.
+- Cleanup on exit always deletes the sandbox namespace (incl. its Secret and ledger), the Secrets Manager copy (eso mode) and the restored instance (deletion protection removed first), even on failure or Ctrl-C — unless `--keep`.
+- The report includes the **measured snapshot-restore time** (input for risk R3 / the 30 min RTO).
