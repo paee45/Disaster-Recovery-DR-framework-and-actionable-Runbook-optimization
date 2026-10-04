@@ -29,11 +29,19 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   request builders in `automation/scripts/rds-requests.jq`); backup retention floor 7; validate every setting.
 - Owner works on **macOS** (brew bash/coreutils/jq/libpq/awscli/kubectl); the real-AWS tests run on the Mac, not in a cloud container.
 
+## Lab on real AWS (owner decision)
+- Real UAT is in another account the owner's SSO cannot reach; the profile `beep` must **not** be used.
+- Tests on real AWS run in the owner's **sandbox account** via SSO profile `pa_sandbox` (region ap-southeast-1),
+  built with **Terraform only** (`iac/lab/aws` then `iac/lab/k8s`; anything reusable lives in git/IaC, no ad-hoc
+  shell builders). Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
+  Destroy after each session (EKS is ~0.10 USD/h). Terraform state stays local and git-ignored.
+
 ## Key entry points
 | Need | Use |
 |---|---|
 | Run a restore step by step (live output, evidence per step, gates, resume) | `automation/scripts/dr-run.sh S3\|S4` (`--list`, `--dry-run`, `--to P2-S05`, `--resume <DR_ID>`) |
 | Recorded manual shell | `automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` |
+| Build / destroy the sandbox lab (Terraform) | `iac/lab/README.md` |
 | Safe test against real AWS (dev/uat only) | `tests/aws/sandbox-test.sh readonly` then `full` |
 | Local end-to-end tests | `tests/local/up.sh && tests/local/run-tests.sh` (report `tests/local/.state/test-report.md`) |
 | Secret endpoint / consumers tools | `k8s-secret-endpoint.sh`, `k8s-secret-consumers.sh`, `dr-secret-cutover.sh`, `dr-eks-rollout.sh` |
@@ -51,7 +59,9 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 ## Status (update as you go)
 - Latest suite: v0.6 = **109/109** (clean rebuild, 2026-10-04; report `tests/local/last-run-report.md`). Group J = dr-run.sh.
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
-- **Next for the owner (on the Mac, UAT):** `cp env/uat.env.example env/uat.env`, fill values, `PRIMARY_STOPPED_OK=1`,
-  `REPLICA_DB=""`, `source env/uat.env`, then `tests/aws/sandbox-test.sh readonly`, then
-  `automation/scripts/dr-run.sh S3 --dry-run` and `--to P2-S05` (restore + verify, no cutover).
+- Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
+  zsh: paste blocks without inline `#` comments (or `setopt interactivecomments`).
+- **Next:** build the lab (`iac/lab/README.md`: `brew install hashicorp/tap/terraform helm`, tfvars, apply aws → k8s;
+  not yet applied, `terraform validate` passes), then `source env/uat.env`, `tests/aws/sandbox-test.sh readonly`,
+  `automation/scripts/dr-run.sh S3 --dry-run`, then `--to P2-S05`.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

@@ -14,3 +14,8 @@ jobs:
         run: shellcheck -S warning -x -P automation/scripts automation/scripts/*.sh tests/aws/*.sh tests/local/*.sh tests/lint/*.sh
       - name: runbook trackers build
         run: for f in runbooks/*/RB-*.md; do python3 automation/scripts/runbook-to-tracker.py "$f" -o /dev/null; done
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt + validate (iac/lab)
+        run: |
+          terraform fmt -check -recursive iac
+          for d in iac/lab/aws iac/lab/k8s; do (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform validate); done

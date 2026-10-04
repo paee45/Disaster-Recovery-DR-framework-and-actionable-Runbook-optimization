@@ -2,3 +2,10 @@ evidence/
 env/*.env
 __pycache__/
 tests/aws/reports/
+# Terraform: state and real variable values stay on the operator's machine
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

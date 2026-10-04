@@ -35,6 +35,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 | [`automation/`](automation/) | SSM Automation documents, scripts (cutover, Reloader wait, restore, fence, parity, evidence, KPIs, tracker generator), SQL, K8s manifests |
 | [`docs/`](docs/) | 00 strategy · 01 architecture · 02 runbook standards · 03 execution media/tooling · 04 RPO/RTO · 05 evidence/audit · 06 comms · 07 validation (no scheduled drills) · 08 capstone optimization · **09 ISO 27001 scope, control mapping & risk register** · **10 corrective action plan (UAT exercise 2026-08-04)** · 11 AWS CLI quick reference · **12 account & cluster safety (guardrails)** |
 | [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 109 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
+| [`iac/lab/`](iac/lab/) | **Terraform DR lab**: a UAT-like environment (VPC, RDS from the UAT fixture, EKS + Reloader, Secret with two host keys, sample apps, seed snapshot, `env/uat.env`) in a sandbox account — build, test on real AWS, destroy |
 | [`templates/`](templates/) | Comms (chat, leadership, vendor, customer/status page, planned drills), execution tracker, evidence manifest, drill report, PIR, runbook template |
 
 ## Ten rules this framework is built on
