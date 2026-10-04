@@ -16,11 +16,20 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args:
+            # nc -lk -e: persistent server, one handler process per connection. (A `while nc -l` loop serves one request
+            # at a time and drops alerts that arrive together — Reloader sends one per restarted workload.)
             - |
-              while true; do
-                printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' | nc -l -p 8080 -w 5
-                echo; echo "--- end of request"
-              done
+              cat > /tmp/handler.sh <<'H'
+              #!/bin/sh
+              len=0; cr="$(printf '\r')"
+              while IFS= read -r l; do l="${l%"$cr"}"; [ -z "$l" ] && break
+                case "$l" in [Cc]ontent-[Ll]ength:*) len="${l#*: }" ;; esac; done
+              body="$(head -c "$len")"
+              printf '%s\n--- end of request\n' "$body" > /proc/1/fd/1
+              printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'
+              H
+              chmod +x /tmp/handler.sh
+              exec nc -lk -p 8080 -e /tmp/handler.sh
           ports: [ { containerPort: 8080 } ]
           resources: { requests: { cpu: 5m, memory: 8Mi } }
 ---

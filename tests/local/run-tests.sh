@@ -263,8 +263,8 @@ h08() { local out rc; out="$("$S/k8s-secret-consumers.sh" --context dr-local -n 
         && "$S/k8s-secret-consumers.sh" --context dr-local -n app -s app-db-direct restart | tee /dev/stderr | grep -q '^restarted=1' \
         && wait_dsessions "$IP_RESTORED" direct-d,direct-e; }
 t  H08 "stale check finds app-e (HOST2), restart-stale → both apps on restored" h08
-h09() { local l; for _ in $(seq 1 20); do l="$(k -n reloader logs deploy/reloader-alert-sink --tail=-1 2>/dev/null)"; grep -q 'app-d' <<<"$l" && break; sleep 3; done
-        echo "$l" | tail -15; grep -q 'app-db-direct' <<<"$l" && grep -q 'app-d' <<<"$l" && grep -q 'cluster=dr-local' <<<"$l"; }
+h09() { local l; for _ in $(seq 1 20); do l="$(k -n reloader logs deploy/reloader-alert-sink --tail=-1 2>/dev/null)"; grep -q 'reloaded app-d of type' <<<"$l" && break; sleep 3; done
+        echo "$l" | tail -15; grep -q 'changes in app-db-direct of type SECRET' <<<"$l" && grep -q 'reloaded app-d of type' <<<"$l" && grep -q 'cluster=dr-local' <<<"$l"; }
 t  H09 "Reloader ALERT webhook received the reload (secret, app-d, cluster info)" h09
 t  H10 "cutover #2 (id $C2): → promoted replica"                         bash -c "$(declare -f dhosts k); ${KMODE[*]} CUTOVER_ID=$C2 TARGET_DB=$REPLICA_DB '$S/dr-secret-cutover.sh' apply && [[ \$(dhosts) == $IP_REPLICA,$IP_REPLICA ]]"
 h11() { "${KMODE[@]}" CUTOVER_ID="$FB" "$S/dr-secret-cutover.sh" failback "$C1" && [[ "$(dhosts)" == "$IP_OLD,$IP_OLD" ]] \
