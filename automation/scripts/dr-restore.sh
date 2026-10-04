@@ -227,7 +227,8 @@ validate_pg() { # TARGET_DSN vs live OLD_DSN (else the baseline's pgSettings)
   cur="$(psql "$TARGET_DSN" -XAtq -F$'\t' -c "$q" | tojs)"
   if [[ -n "${OLD_DSN:-}" ]] && ref="$(psql "$OLD_DSN" -XAtq -F$'\t' -c "$q" 2>/dev/null | tojs)" && [[ "$ref" != "{}" ]]; then src="live ${OLD_DB:-source}"
   else ref="$(jq '.pgSettings // {}' "$BASE")"; src="baseline $(jq -r .capturedAt "$BASE")"; fi
-  [[ "$ref" == "{}" ]] && { echo "no reference pg_settings (source unreachable, baseline has none)"; return 1; }
+  # exit 3 = N/A (not a failure): nothing to compare against, e.g. the source is intentionally stopped
+  [[ "$ref" == "{}" ]] && { echo "N/A: no reference pg_settings (source unreachable/stopped and the baseline has none) — validate-pg not performed"; return 3; }
   jq -rn --argjson r "$ref" --argjson c "$cur" --arg ign "$ign" --arg src "$src" '
     ([$r | keys[] | select(test($ign) | not)]) as $k
     | ([$k[] | select($r[.] != $c[.]) | "DIFF    \(.): source \($r[.] | tojson)  target \($c[.] | tojson)"]) as $d

@@ -14,6 +14,7 @@ dr_guard || exit 1
 fails=0
 pass() { printf 'PASS  %s\n' "$*"; }
 warn() { printf 'WARN  %s\n' "$*"; }
+info() { printf 'INFO  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*"; fails=$((fails+1)); }
 
 check_primary() {
@@ -21,8 +22,9 @@ check_primary() {
   echo "INFO  primary $PRIMARY_DB status=$st"
   if [[ "$st" == stopped ]]; then
     local rt; rt="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" --query 'DBInstances[0].[AutomaticRestartTime,LatestRestorableTime]' --output text 2>/dev/null)"
-    warn "primary is STOPPED: snapshot restore/PITR still work (restore point ≤ stop time: LatestRestorableTime ${rt##*$'\t'}),"
-    warn "  but pg_settings cannot be captured (validate-pg has no reference) and AWS auto-starts it at ${rt%%$'\t'*} (7-day limit)"
+    local say=warn; [[ "${PRIMARY_STOPPED_OK:-0}" == 1 ]] && say=info      # intentionally stopped (e.g. UAT cost saving)
+    $say "primary is STOPPED: snapshot restore/PITR still work (restore point ≤ stop time: LatestRestorableTime ${rt##*$'\t'}),"
+    $say "  but pg_settings cannot be captured (validate-pg = N/A) and AWS auto-starts it at ${rt%%$'\t'*} (7-day limit)"
   fi
 }
 

@@ -135,6 +135,7 @@ step() { # <id> → runs function s_<id>, live output indented, retry/skip/abort
     if (( QUIET )); then ( "s_$id" ) >> "$LOG" 2>&1; rc=$?
     else ( "s_$id" ) 2>&1 | tee -a "$LOG" | sed -u 's/^/   │ /'; rc=${PIPESTATUS[0]}; fi
     el=$(( $(date +%s) - t0 ))
+    if (( rc == 3 )); then STATUS[$id]=NA; SKIPN=$((SKIPN+1)); echo "➖ $id $name — N/A (nothing to test, see output)"; echo "| $id | $name | n/a | ${el}s |" >> "$REPORT"; return 0; fi
     if (( rc == 0 )); then STATUS[$id]=PASS; PASSN=$((PASSN+1)); echo "✅ $id $name (${el}s)"; echo "| $id | $name | PASS | ${el}s |" >> "$REPORT"; return 0; fi
     echo "❌ $id $name (rc=$rc, ${el}s) — output above / in $LOG"
     case "$ON_FAIL" in

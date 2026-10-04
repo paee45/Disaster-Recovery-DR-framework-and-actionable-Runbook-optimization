@@ -54,8 +54,10 @@ restore / `create-like` / `harden` / `validate` and by the local test bed). Exam
 **What the UAT describe tells us (2026-10):**
 - **Not encrypted at rest** (`StorageEncrypted: false`): every snapshot and restore is unencrypted too → ISO 27001 A.8.24 finding.
   Remediation: `copy-db-snapshot --kms-key-id …` then restore the encrypted copy (one-time migration, plan a window).
-- **Status `stopped`**: restores still work (restore point ≤ `LatestRestorableTime`), but `pg_settings` can't be captured and AWS
-  auto-starts it at `AutomaticRestartTime` (7-day limit). Pre-flight warns.
+- **Status `stopped` — intentional (cost saving), not a finding.** Restores still work (restore point ≤ `LatestRestorableTime`).
+  Set `PRIMARY_STOPPED_OK=1` in `env/uat.env`: pre-flight then reports INFO instead of WARN, and `validate-pg` (needs the
+  running source's `pg_settings`) reports **N/A**, not FAIL. AWS auto-starts a stopped instance after 7 days
+  (`AutomaticRestartTime`) — to keep it stopped, it has to be stopped again after that (manually or by a scheduled stop).
 - **Managed by CloudFormation** (`aws:cloudformation:stack-name` ev-uat-eks, logical id UatRDSInstance): a restored
   instance is **outside the stack** → IaC adoption (§3) or the stack keeps pointing at the old instance; never let a stack
   update "fix" the drift by replacing resources during the event.
