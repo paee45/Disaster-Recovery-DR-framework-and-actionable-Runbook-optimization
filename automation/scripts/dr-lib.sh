@@ -5,6 +5,16 @@
 # Requires: aws cli, jq, psql, kubectl. All timestamps are UTC ISO-8601.
 # Every script calls dr_guard first: wrong AWS account or wrong cluster → stop before doing anything.
 
+# macOS: the scripts need bash >= 4 and GNU date/sha256sum (brew install bash coreutils jq libpq awscli kubectl).
+if [[ "$(uname -s)" == Darwin ]]; then
+  for _d in /opt/homebrew/opt/coreutils/libexec/gnubin /usr/local/opt/coreutils/libexec/gnubin /opt/homebrew/opt/libpq/bin /usr/local/opt/libpq/bin; do
+    [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+  done; export PATH
+fi
+if (( BASH_VERSINFO[0] < 4 )) || ! date -u -d '2020-01-01T00:00:00Z' +%s >/dev/null 2>&1 || ! command -v sha256sum >/dev/null; then
+  echo "ERROR: need bash>=4 + GNU coreutils (macOS: brew install bash coreutils; run with the brew bash)" >&2; return 1 2>/dev/null || exit 1
+fi
+
 : "${DR_ENV:?source env/<env>.env first}"
 : "${SECRET_ID:?SECRET_ID missing in env profile}"
 

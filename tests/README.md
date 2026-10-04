@@ -4,7 +4,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 
 | Level | What | Changes anything real? | Command |
 |---|---|---|---|
-| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~45 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
+| 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; ~60 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
@@ -42,10 +42,10 @@ What is covered:
 |---|---|
 | A. Guardrails | Pinned profile passes; wrong-account profile refused; unknown and decoy contexts refused; cluster identity mismatch refused; the **current** context is a decoy and the scripts still hit the right cluster; local seam refused outside local; PROD confirmation blocks non-interactive runs |
 | B. Checks | `dr-env-check.sh`, inventory (**app-c flagged `reloader=NO`**), pre-flight restore + replica |
-| C. S3 restore | list snapshots, restore copying **all 3 SGs**, wait, harden (retention), password trap (precheck fails → `fix-password`), row counts old vs restored, DB verification SQL |
-| D. Cutover | `apply` with `RESTART_UNANNOTATED=false`: secret → ESO → **Reloader restarts app-a + app-b**; **app-c untouched** (same pod, same generation) and still connected to the old DB; `rollback`/`apply` with `RESTART_UNANNOTATED=true`: app-c restarted by the script; session checks in Postgres |
+| C. S3 restore | **baseline capture** of the source (describe + 4 tags incl. a value with spaces + `pg_settings`), `plan` (request has 3 SGs, subnets, PG, retention 7, backup window, log exports, tags; nothing created), restore with `--cli-input-json`, wait, `validate` **fails** before harden (maintenance window), simulated CLI-default **retention 1 day + lost tag → detected**, `harden` → **VALIDATED**, password trap (precheck fails → `fix-password`), `validate-pg` equal + detects a changed `work_mem`, row counts, DB verification SQL |
+| D. Cutover | `apply` with `RESTART_UNANNOTATED=false`: secret → ESO → **Reloader restarts app-a + app-b**; **app-c untouched** (same pod, same generation) and still connected to the old DB; standalone **`k8s-secret-consumers.sh`**: refuses without `--context` / wrong env, `check` shows **app-c STALE** and app-a/app-b UP-TO-DATE, `restart-stale` restarts **only app-c** (app-a/app-b generation unchanged), `check` clean afterwards; `rollback`/`apply` with `RESTART_UNANNOTATED=true`: app-c restarted by the script; session checks in Postgres |
 | E. Fencing | F1 read-only + F2 quarantine SG + un-fence; CronJob suspend/resume |
-| F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` with all SGs |
+| F. S2 / S4 | promote replica + `wait-promoted`; PITR `latest` from the baseline, harden → VALIDATED |
 | G. Evidence | phase timers, evidence bundle uploaded (S3), KPI report (RPO from snapshot time), SSM documents accepted, tracker for every runbook |
 
 Mock limitations (documented, not hidden): moto keeps the replica link after promotion (patched in `moto_launcher.py`, the mock is fixed, not the scripts); no real replication lag/WAL; CloudTrail lookups return nothing; SSM documents are stored but not executed.
@@ -55,9 +55,22 @@ Mock limitations (documented, not hidden): moto keeps the replica link after pro
 - Docker ≥ 28 drops pod → container traffic ("direct routing protection"). `up.sh` creates the test network with `gateway_mode_ipv4=nat-unprotected` and adds `DOCKER-USER` / raw-table accept rules for `10.42.0.0/16 ↔ 172.30.0.0/24`.
 - Behind an HTTP proxy, add the node IP to `NO_PROXY` for k3s, or `kubectl logs/exec` break.
 
+### Running on macOS
+- **The DR scripts themselves** (real AWS from a Mac) work with the Homebrew tools: `brew install bash coreutils jq libpq awscli kubectl helm`.
+  `dr-lib.sh` puts GNU coreutils/libpq on `PATH` automatically and stops with a clear error if bash < 4 or GNU `date` is missing.
+- **The local test bed (`up.sh`)** needs a Linux Docker host: it runs k3s with `--network host`, talks to container IPs
+  (172.30.0.x) from the host and adds iptables rules — none of that exists on the Mac side of Docker Desktop.
+  Run it inside a Linux VM on the Mac (same scripts, no changes), e.g.:
+  ```bash
+  brew install orbstack && orb create ubuntu drtest && orb -m drtest        # or: limactl start / colima ssh / multipass
+  # inside the VM: install docker, kubectl, helm, awscli, jq, postgresql-client, python3-venv + moto[server]
+  cd /path/to/repo && tests/local/up.sh && tests/local/run-tests.sh
+  ```
+
 ## 2. Real AWS (`tests/aws/sandbox-test.sh`)
 
 Before running:
+1. Log in with your SSO profile (`aws sso login --profile dr-uat`); set `AWS_ROLE_PATTERN` to your role (a regex, e.g. `assumed-role/AWSReservedSSO_lab_admin_`) so the guard accepts it and nothing else.
 1. Set up isolation and pinning per [docs/12](../docs/12-account-and-cluster-safety.md): named profile, separate kubeconfig, `kube-system/dr-cluster-identity` ConfigMap, `env/<env>.env`.
 2. `readonly` first; it must be all green.
 3. For `full`: an ESO store that can read `<env>/dr-test/*` (`DRTEST_STORE_KIND`/`DRTEST_STORE_NAME`), Reloader installed, the sample image pullable (`DRTEST_IMAGE`), and EKS → DB network access (the restored instance gets the same SGs as the primary).

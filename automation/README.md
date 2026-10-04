@@ -4,11 +4,12 @@
 |---|---|---|
 | `scripts/dr-lib.sh` | All | `dr_init <scenario>`, `dr_mark` (timeline), `dr_run` (evidence capture), `dr_set_target`, `dr_dsn` |
 | `scripts/dr-preflight.sh replica\|restore` | S2 / S3-S4 Phase 1 | Replica health/lag/LSN, PITR window, snapshots, restore inputs, EKS/ESO/Reloader, consumer inventory |
-| `scripts/dr-restore.sh` | S3/S4 | `list-snapshots`, `snapshot`, `pitr` with explicit hardening flags (`DRY_RUN=1` supported) |
+| `scripts/dr-restore.sh` | S3/S4 | `capture` (source baseline), `plan`, `snapshot`, `pitr` (request built from the baseline, `--cli-input-json`), `wait`, `harden` (converge to baseline), `validate` (all settings), `validate-pg` (pg_settings) |
 | `scripts/dr-verify.sh` | S2, CP-02/04 | `wait-promoted`, `db`, `connections` (TARGET vs OLD), `app` |
 | `scripts/dr-fence-instance.sh` | CP-04 | `readonly` (F1), `quarantine` (F2), `restore` |
 | `scripts/dr-secret-cutover.sh` | **CP-01** | `precheck`, `fix-password`, `apply` (secret → ESO → Reloader wait), `rollback` |
-| `scripts/dr-eks-rollout.sh` | CP-01, S1 | `inventory`, `snapshot-generations`, `wait` (verifies the Reloader bump, falls back to a restart), `restart`, `suspend/resume-cronjobs` |
+| `scripts/dr-eks-rollout.sh` | CP-01, S1 | `inventory`, `snapshot-generations`, `wait` (verifies the Reloader bump, falls back to a restart), `restart`, `check`, `restart-stale`, `suspend/resume-cronjobs` |
+| `scripts/k8s-secret-consumers.sh` | CP-01 (manual tool) | Standalone: `list`, `check` (STALE = pods older than the Secret change), `restart` (only STALE, in restart-order), `restart-one`. `--context` mandatory, `--expect-env` checks the cluster identity |
 | `scripts/rds-config-parity.sh [--alarms]` | CP-03 | Config + alarm diff between the old and new instance |
 | `scripts/dr-collect-evidence.sh` | CP-05 | CloudTrail/RDS/secret-metadata evidence, KPIs, SHA-256 manifest → S3 Object Lock |
 | `scripts/dr-rto-rpo-calc.py` | CP-05 | KPIs per scenario from `timeline.jsonl` |

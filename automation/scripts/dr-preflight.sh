@@ -54,10 +54,15 @@ check_restore() {
   local n; n="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --query 'length(DBSnapshots)' --output text 2>/dev/null)"
   (( ${n:-0} > 0 )) && pass "$n snapshots available for $PRIMARY_DB" || warn "no snapshots listed for $PRIMARY_DB (check AWS Backup vault / cross-account copies)"
   local src_ok=0; aws rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" >/dev/null 2>&1 && src_ok=1
+  # Restore settings come from a baseline of the source (dr-restore.sh capture): live if the source exists, else stored.
+  local bl="${BASELINE_DIR:-$HERE/../../evidence/baselines/$DR_ENV}/baseline-${PRIMARY_DB}.json" age
+  if (( src_ok )); then pass "restore baseline ← captured live from $PRIMARY_DB at restore time (all SGs, subnets, PG, tags, retention, …)"
+  elif [[ -f "$bl" ]]; then
+    age=$(( ($(date +%s) - $(date -d "$(jq -r .capturedAt "$bl")" +%s)) / 3600 ))
+    (( age <= 24 )) && pass "stored baseline $bl (${age} h old)" || warn "stored baseline $bl is ${age} h old — settings may have drifted"
+  else fail "$PRIMARY_DB not readable and no stored baseline $bl — run 'dr-restore.sh capture $PRIMARY_DB' on a schedule"; fi
   for v in DB_SUBNET_GROUP DB_SG DB_PARAM_GROUP DB_INSTANCE_CLASS; do
-    if [[ -n "${!v:-}" ]]; then pass "restore input $v=${!v} (profile)"
-    elif (( src_ok )); then pass "restore input $v ← copied from $PRIMARY_DB at restore time"
-    else fail "restore input $v empty in profile and $PRIMARY_DB not readable — set a fallback value"; fi
+    [[ -n "${!v:-}" ]] && warn "override $v=${!v} in env profile wins over the baseline (validate will report it)"
   done
   if [[ -n "${DB_PARAM_GROUP:-}" ]]; then
     aws rds describe-db-parameter-groups --db-parameter-group-name "$DB_PARAM_GROUP" >/dev/null 2>&1 \

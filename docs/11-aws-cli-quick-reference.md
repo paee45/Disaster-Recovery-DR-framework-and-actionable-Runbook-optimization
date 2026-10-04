@@ -24,10 +24,13 @@ aws rds describe-db-instance-automated-backups --db-instance-identifier "$PRIMAR
 
 ## RDS — act (script equivalents in brackets)
 ```bash
-# restore snapshot            [dr-restore.sh snapshot <snap> <new>]
+# baseline of the source      [dr-restore.sh capture <src>]  → evidence/baselines/<env>/baseline-<src>.json (schedule it daily)
+# preview the restore request [dr-restore.sh plan snapshot <snap> <new>]
+# restore snapshot            [dr-restore.sh snapshot <snap> <new>]  = aws rds restore-db-instance-from-db-snapshot --cli-input-json file://restore-request-<new>.json
 # point-in-time restore       [dr-restore.sh pitr <src> <new> <ISO8601|latest>]
 aws rds wait db-instance-available --db-instance-identifier <new>          # [dr-restore.sh wait <new>] (shows progress)
-aws rds modify-db-instance --db-instance-identifier <new> --backup-retention-period 7 --apply-immediately   # [dr-restore.sh harden]
+aws rds modify-db-instance --db-instance-identifier <new> --backup-retention-period 7 --apply-immediately   # [dr-restore.sh harden] (CLI default retention = 1 day!)
+# compare every setting with the baseline   [dr-restore.sh validate <new>] · pg_settings [dr-restore.sh validate-pg]
 aws rds modify-db-instance --db-instance-identifier <db> --vpc-security-group-ids sg-1 sg-2 sg-3 --apply-immediately  # ALL SGs, space-separated
 aws rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7          # S2 ⚠ irreversible
 aws rds reboot-db-instance --db-instance-identifier "$PRIMARY_DB" --force-failover                      # S1 test / FB-S1 ⚠ outage
@@ -52,6 +55,8 @@ $K get externalsecret "$K8S_SECRET" -o jsonpath='{.status.conditions[?(@.type=="
 $K annotate externalsecret "$K8S_SECRET" force-sync="$(date +%s)" --overwrite   # sync now
 $K get secret "$K8S_SECRET" -o jsonpath="{.data.$K8S_HOST_KEY}" | base64 -d; echo
 ./automation/scripts/dr-eks-rollout.sh inventory        # who uses the secret, annotated or not
+./automation/scripts/k8s-secret-consumers.sh --context $EKS_CONTEXT -n $K8S_NS -s $K8S_SECRET check     # STALE = still on the old secret
+./automation/scripts/k8s-secret-consumers.sh --context $EKS_CONTEXT -n $K8S_NS -s $K8S_SECRET restart   # restart only the STALE ones
 $K rollout restart deploy/<name> && $K rollout status deploy/<name> --timeout=300s
 $K get pods -o wide --sort-by=.status.startTime
 ```

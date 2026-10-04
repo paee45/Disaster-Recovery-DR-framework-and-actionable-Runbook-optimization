@@ -7,6 +7,9 @@
 #                                    RESTART_UNANNOTATED=true (default) restarts them manually, false leaves + reports them.
 #                                    Ordered by dr.example.com/restart-order (1 poolers → 2 APIs → 3 workers).
 #   restart [secret]               : manual ordered `rollout restart` of all consumers (Reloader down, or S1 stale pools)
+#   check [secret]                 : which consumers still run with the OLD secret (STALE) — exit 1 if any
+#   restart-stale [secret]         : restart only the STALE consumers (e.g. app-c left by RESTART_UNANNOTATED=false)
+#   (check/restart-stale use the standalone tool k8s-secret-consumers.sh, which can also be run by hand)
 #   suspend-cronjobs | resume-cronjobs [secret]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -18,6 +21,7 @@ CMD="${1:-}"; SECRET="${2:-${K8S_SECRET:?}}"
 K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
 OUT="${DR_EVIDENCE_DIR:-$(pwd)/evidence/adhoc}/k8s"; mkdir -p "$OUT"
 RELOADER_GRACE_S="${RELOADER_GRACE_S:-90}"
+SC=("$HERE/k8s-secret-consumers.sh" --context "$EKS_CONTEXT" -n "$K8S_NS" -s "$SECRET")
 
 # kind/name <TAB> restart-order <TAB> reloader(YES|NO) for consumers of $SECRET
 consumers() {
@@ -80,6 +84,8 @@ wait_rollouts() {
   $K get pods -o wide > "$OUT/pods-wide.txt"
   $K get events --sort-by=.lastTimestamp > "$OUT/events.txt"
   echo "--- reload report: $report"; cat "$report"
+  echo "--- stale check (pods still holding the old secret):"
+  "${SC[@]}" check | tee "$OUT/stale-check-${SECRET}.txt" || echo "STALE consumers remain → '$0 restart-stale' when allowed (see report)"
 }
 
 restart_all() {
@@ -104,7 +110,9 @@ case "$CMD" in
   snapshot-generations)  snapshot_generations ;;
   wait)                  wait_rollouts ;;
   restart)               dr_confirm "rolling restart of all consumers of $SECRET" && restart_all ;;
+  check)                 "${SC[@]}" check | tee "$OUT/stale-check-${SECRET}.txt"; exit "${PIPESTATUS[0]}" ;;
+  restart-stale)         dr_confirm "restart STALE consumers of $SECRET" && "${SC[@]}" restart | tee "$OUT/restart-stale-${SECRET}.txt" ;;
   suspend-cronjobs)      cronjobs true ;;
   resume-cronjobs)       cronjobs false ;;
-  *) echo "usage: $0 {inventory|snapshot-generations|wait|restart|suspend-cronjobs|resume-cronjobs} [k8s-secret]"; exit 2 ;;
+  *) echo "usage: $0 {inventory|snapshot-generations|wait|restart|check|restart-stale|suspend-cronjobs|resume-cronjobs} [k8s-secret]"; exit 2 ;;
 esac

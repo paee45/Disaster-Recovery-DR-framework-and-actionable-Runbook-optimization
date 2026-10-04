@@ -24,7 +24,7 @@ export OLD_DB=$PRIMARY_DB RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 | P1-S04 | Choose the mode: **B** if the damage is limited to known tables and other teams' newer UAT data must survive; else **A** | DBA + QA lead | 5 | `DECISION: mode=…` |
 | P1-G1 ⛳ | GO (SRE on-call + QA lead) with `RESTORE_TS` and the loss window. `dr_mark T2`. Email the UAT users | SRE on-call | 5 | Recorded / sent |
 | P2-S01 | `dr_mark T4` · `./automation/scripts/dr-restore.sh pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"` | Executor | 2 | API 200 |
-| P2-S02 | `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (progress + elapsed time; records `T5`), then `./automation/scripts/dr-restore.sh harden "$RESTORED_DB"` (backup retention, deletion protection, parity diff); `dr_set_target "$RESTORED_DB"`; `dr_mark T5` | Executor | size | available |
+| P2-S02 | `./automation/scripts/dr-restore.sh wait "$RESTORED_DB"` (progress + elapsed time; records `T5`), then `./automation/scripts/dr-restore.sh harden "$RESTORED_DB"` (converge to the baseline + `validate`; gate before cutover); `dr_set_target "$RESTORED_DB"`; `dr_mark T5` | Executor | size | available |
 | P2-S03 | Restore-point check `05-restore-point-check.sql` (bad change absent) | DBA + QA | 10 | Signed off |
 | P3B-S01 | **Mode B:** export the affected tables/rows from RESTORED_DB (`pg_dump --data-only -t …` / `\copy`), apply a reviewed repair script on `$PRIMARY_DB` in one transaction; release F1; delete RESTORED_DB after 3 days | DBA | 30 | Data repaired; T9/T10 via CP-02 |
 | P3A-S01 | **Mode A:** [CP-03](../common/CP-03-restored-instance-config-parity.md) S01–S02 | DBA | 10 | Parity OK |

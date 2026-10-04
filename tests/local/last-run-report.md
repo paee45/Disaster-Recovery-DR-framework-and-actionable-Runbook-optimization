@@ -1,5 +1,3 @@
-# Local test run — 2026-10-04 (k3s v1.31.4 · LocalStack 4.0 · moto 5.2.3 · ESO 2.11.0 · Reloader 1.4.22 · Postgres 16)
-
 | # | Test | Result | Log |
 |---|---|---|---|
 | A01 | guard passes with the pinned profile + context | PASS | logs/A01.log |
@@ -15,13 +13,19 @@
 | B02 | inventory: app-a/app-b Reloader YES, app-c NO, CronJob listed | PASS | logs/B02.log |
 | B03 | preflight restore → PASS (inputs copied from source) | PASS | logs/B03.log |
 | B04 | preflight replica → PASS | PASS | logs/B04.log |
+| C00 | capture baseline of the source (describe + 4 tags + pg_settings) | PASS | logs/C00.log |
 | C01 | list-snapshots | PASS | logs/C01.log |
-| C02 | restore snapshot → copies ALL 3 security groups from source | PASS | logs/C02.log |
+| C01b | plan: request from baseline (3 SGs, subnets, PG, retention 7, logs, tags) — no change made | PASS | logs/C01b.log |
+| C02 | restore snapshot with the baseline request (--cli-input-json) | PASS | logs/C02.log |
 | C03 | wait until available (progress + T5) | PASS | logs/C03.log |
-| C04 | harden: backup retention 7 + deletion protection | PASS | logs/C04.log |
-| C05 | restored instance has 3 SGs (exercise bug F3 fixed) | PASS | logs/C05.log |
+| C03b | validate before harden → NOT VALIDATED (maintenance window can't be set by a restore) | **FAIL** | logs/C03b.log |
+| C03c | CLI default retention 1 day + lost tag → validate detects both | PASS | logs/C03c.log |
+| C04 | harden converges to baseline (retention 7, window, tag) → VALIDATED | PASS | logs/C04.log |
+| C05 | restored instance: 3 SGs, retention 7, deletion protection, all source tags | PASS | logs/C05.log |
 | C06 | password trap: precheck FAILS (restored DB has the old password) | PASS | logs/C06.log |
 | C07 | fix-password → precheck OK | PASS | logs/C07.log |
+| C07b | validate-pg: pg_settings restored == source | PASS | logs/C07b.log |
+| C07c | validate-pg detects a changed parameter (work_mem), passes after reset | PASS | logs/C07c.log |
 | C08 | compare-counts: orders old=100 vs restored=80 | PASS | logs/C08.log |
 | C09 | DB verification SQL on restored | PASS | logs/C09.log |
 | D01 | apply with RESTART_UNANNOTATED=false | PASS | logs/D01.log |
@@ -31,6 +35,11 @@
 | D05 | Reloader did NOT touch app-c (same pod, same generation) | PASS | logs/D05.log |
 | D06 | sessions: restored = app-a,app-b · old = app-c | PASS | logs/D06.log |
 | D07 | dr-verify connections: TARGET has app-a (query must succeed) | PASS | logs/D07.log |
+| D07a | secret-consumers tool refuses without --context | PASS | logs/D07a.log |
+| D07b | secret-consumers tool refuses a cluster that is not env=prod | PASS | logs/D07b.log |
+| D07c | check: app-c STALE, app-a/app-b UP-TO-DATE (exit 1) | PASS | logs/D07c.log |
+| D07d | restart-stale restarts ONLY app-c (app-a/app-b generation unchanged) | PASS | logs/D07d.log |
+| D07e | check after restart: all UP-TO-DATE (exit 0), app-c on restored | PASS | logs/D07e.log |
 | D08 | rollback with RESTART_UNANNOTATED=true → secret back to old | PASS | logs/D08.log |
 | D09 | after rollback all 3 apps on old, none on restored | PASS | logs/D09.log |
 | D10 | re-apply with RESTART_UNANNOTATED=true | PASS | logs/D10.log |
@@ -44,11 +53,12 @@
 | E06 | suspend CronJobs | PASS | logs/E06.log |
 | E07 | resume CronJobs | PASS | logs/E07.log |
 | F01 | S2 promote replica + wait-promoted (standalone + writable) | PASS | logs/F01.log |
-| F02 | S4 PITR latest → hardened restore with 3 SGs | PASS | logs/F02.log |
+| F02 | S4 PITR latest → restore request from baseline with 3 SGs | PASS | logs/F02.log |
+| F03 | S4 PITR: wait + harden → VALIDATED against the baseline | PASS | logs/F03.log |
 | G01 | phase timer + summary | PASS | logs/G01.log |
 | G02 | collect evidence → manifest uploaded to the evidence bucket | PASS | logs/G02.log |
 | G03 | KPI report: RPO from snapshot time, RTO ~20 min | PASS | logs/G03.log |
 | G04 | SSM Automation documents accepted (create-document) | PASS | logs/G04.log |
 | G05 | tracker CSV generated for every runbook | PASS | logs/G05.log |
 
-**PASS=48 FAIL=0** · DR_ID=DR-localtest-20261004033316 · 2026-10-04T03:39:41Z
+**PASS=59 FAIL=1** · DR_ID=DR-localtest-20261004041809 · 2026-10-04T04:23:23Z

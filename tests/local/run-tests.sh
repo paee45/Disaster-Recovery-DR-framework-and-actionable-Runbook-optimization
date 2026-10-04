@@ -39,7 +39,7 @@ a05() { command kubectl --context dr-local -n kube-system patch configmap dr-clu
         command kubectl --context dr-local -n kube-system patch configmap dr-cluster-identity --type merge -p '{"data":{"env":"local"}}' >/dev/null; return $rc; }
 t  A05 "cluster whose identity says env=uat is refused"                a05
 a06() { [[ "$(command kubectl config current-context)" == decoy ]] || return 1          # the CURRENT context is the decoy...
-        command kubectl get ns >/dev/null 2>&1 && return 1                                # ...which is unreachable
+        command kubectl --request-timeout=5s get ns >/dev/null 2>&1 && return 1                                # ...which is unreachable
         lib "dr_guard && kubectl -n app get deploy app-a -o name"; }                       # but the wrapper pins dr-local
 t  A06 "kubectl wrapper ignores current-context (decoy) and uses EKS_CONTEXT" a06
 tf A07 "local endpoint-map seam refused outside DR_ENV=local" "local-test seam" env DR_ENV=uat REQUIRE_CLUSTER_IDENTITY=false DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"
@@ -61,15 +61,43 @@ echo "=== C. S3 snapshot restore (DR_ID=$DR_ID)"
 source "$S/dr-lib.sh"; dr_init S3 > "$LOGS/C00.log" 2>&1 || { echo "dr_init failed"; cat "$LOGS/C00.log"; exit 99; }
 export OLD_DB="$PRIMARY_DB"
 SNAP="$(aws rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --snapshot-type automated --query 'DBSnapshots[0].DBSnapshotIdentifier' --output text)"
+export WAIT_POLL_S=3 HARDEN_SETTLE_S=2
+c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e '(.tags | length) == 4 and (.pgSettings | length) > 100 and (.instance.VpcSecurityGroups | length) == 3' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
+t  C00 "capture baseline of the source (describe + 4 tags + pg_settings)" c00
 t  C01 "list-snapshots"                                              "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB"
+REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
+c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e '(.VpcSecurityGroupIds | length) == 3 and .BackupRetentionPeriod == 7
+           and .DBSubnetGroupName == "app-local-db-subnets" and .DBParameterGroupName == "app-pg16-local" and .PreferredBackupWindow == "01:00-01:30"
+           and (.EnableCloudwatchLogsExports | sort) == ["postgresql","upgrade"] and .CopyTagsToSnapshot and .DeletionProtection
+           and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)' "$REQ" \
+         && ! command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" >/dev/null 2>&1; }
+t  C01b "plan: request from baseline (3 SGs, subnets, PG, retention 7, logs, tags) — no change made" c01b
 c02() { "$S/dr-restore.sh" snapshot "$SNAP" "$RESTORED_DB" && has "sgs=\[sg-[0-9a-f]+ sg-[0-9a-f]+ sg-[0-9a-f]+\]" "$LOGS/C02.log"; }
-t  C02 "restore snapshot → copies ALL 3 security groups from source"   c02
+t  C02 "restore snapshot with the baseline request (--cli-input-json)"  c02
 t  C03 "wait until available (progress + T5)"                          "$S/dr-restore.sh" wait "$RESTORED_DB"
-t  C04 "harden: backup retention 7 + deletion protection"             bash -c "'$S/dr-restore.sh' harden '$RESTORED_DB' | grep -q '\"retention\": 7'"
-t  C05 "restored instance has 3 SGs (exercise bug F3 fixed)"           bash -c "[[ \$(command aws --profile dr-local rds describe-db-instances --db-instance-identifier '$RESTORED_DB' --query 'length(DBInstances[0].VpcSecurityGroups)') == 3 ]]"
+# right after the restore the request already carried SGs/subnets/PG/retention/tags (the maintenance window may still differ:
+# real AWS assigns a random one, moto copies the snapshot's → harden fixes it; not asserted here)
+c03b() { "$S/dr-restore.sh" validate "$RESTORED_DB"; ! grep -E '^DIFF +(VpcSecurityGroups|DBSubnetGroup|DBParameterGroups|BackupRetentionPeriod|PreferredBackupWindow|DeletionProtection|EnabledCloudwatchLogsExports|tag )' "$LOGS/C03b.log"; }
+t  C03b "validate right after restore: SGs, subnets, PG, retention 7, logs, tags already match" c03b
+c03c() { local arn; arn="$(command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" --query 'DBInstances[0].DBInstanceArn' --output text)"
+         command aws --profile dr-local rds modify-db-instance --db-instance-identifier "$RESTORED_DB" --backup-retention-period 1 --apply-immediately >/dev/null
+         command aws --profile dr-local rds remove-tags-from-resource --resource-name "$arn" --tag-keys cost-center
+         ! "$S/dr-restore.sh" validate "$RESTORED_DB" && has 'DIFF +BackupRetentionPeriod: expected 7 +actual 1' "$LOGS/C03c.log" && has 'DIFF +tag cost-center' "$LOGS/C03c.log"; }
+t  C03c "CLI default retention 1 day + lost tag → validate detects both"  c03c
+t  C04 "harden converges to baseline (retention 7, window, tag) → VALIDATED" bash -c "'$S/dr-restore.sh' harden '$RESTORED_DB' | grep -q '→ VALIDATED\$'"
+c05() { local j; j="$(command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" --query 'DBInstances[0]')"
+        jq -e '(.VpcSecurityGroups | length) == 3 and .BackupRetentionPeriod == 7 and .DeletionProtection' <<<"$j" \
+        && command aws --profile dr-local rds list-tags-for-resource --resource-name "$(jq -r .DBInstanceArn <<<"$j")" \
+           | jq -e '[.TagList[].Key] | contains(["app","owner","cost-center","backup-plan","dr-restore","dr-restored-from"])'; }
+t  C05 "restored instance: 3 SGs, retention 7, deletion protection, all source tags" c05
 dr_set_target "$RESTORED_DB" > "$LOGS/C06.log" 2>&1
 tf C06 "password trap: precheck FAILS (restored DB has the old password)" "LOGIN FAILED" "$S/dr-secret-cutover.sh" precheck
 t  C07 "fix-password → precheck OK"                                    "$S/dr-secret-cutover.sh" fix-password
+t  C07b "validate-pg: pg_settings restored == source"                    "$S/dr-restore.sh" validate-pg
+mpsql() { PGPASSWORD=masterpw psql "host=$1 dbname=app user=postgres sslmode=disable" -XAtqc "$2"; }
+c07c() { mpsql "$IP_RESTORED" "alter database app set work_mem = '7MB'" && ! "$S/dr-restore.sh" validate-pg; local rc=$?
+         mpsql "$IP_RESTORED" "alter database app reset work_mem"; (( rc == 0 )) && has 'DIFF +work_mem' "$LOGS/C07c.log" && "$S/dr-restore.sh" validate-pg; }
+t  C07c "validate-pg detects a changed parameter (work_mem), passes after reset" c07c
 t  C08 "compare-counts: orders old=100 vs restored=80"                 bash -c "'$S/dr-verify.sh' compare-counts | grep -Eq 'public.orders +100 +80'"
 t  C09 "DB verification SQL on restored"                               bash -c "psql \"\$TARGET_DSN\" -f '$ROOT/automation/sql/20-postfailover-verify.sql' | grep -vq FAIL"
 
@@ -84,6 +112,19 @@ t  D04 "app-c reported as UNANNOTATED → SKIPPED"                        grep -
 t  D05 "Reloader did NOT touch app-c (same pod, same generation)"       bash -c "[[ \$(command kubectl --context dr-local -n app get pods -l app=app-c -o jsonpath='{.items[0].metadata.name}') == $APPC_POD_BEFORE && \$(command kubectl --context dr-local -n app get deploy app-c -o jsonpath='{.metadata.generation}') == $APPC_GEN_BEFORE ]]"
 t  D06 "sessions: restored = app-a,app-b · old = app-c"                 bash -c "$(declare -f sessions wait_sessions); wait_sessions $IP_RESTORED app-a,app-b && wait_sessions $IP_OLD app-c"
 t  D07 "dr-verify connections: TARGET has app-a (query must succeed)"   bash -c "'$S/dr-verify.sh' connections | grep -A4 '== TARGET' | grep -q '^app-a'"
+SCT=("$S/k8s-secret-consumers.sh" --context dr-local -n app -s "$K8S_SECRET")
+tf D07a "secret-consumers tool refuses without --context"              "context.*mandatory" env -u EKS_CONTEXT "$S/k8s-secret-consumers.sh" -n app -s "$K8S_SECRET" check
+tf D07b "secret-consumers tool refuses a cluster that is not env=prod"   "REFUSED" "${SCT[@]}" --expect-env prod check
+d07c() { ! "${SCT[@]}" --expect-env local check && has '^STALE +deployment/app-c' "$LOGS/D07c.log" \
+         && has '^UP-TO-DATE +deployment/app-a' "$LOGS/D07c.log" && has '^UP-TO-DATE +statefulset/app-b' "$LOGS/D07c.log" && has '^stale=1' "$LOGS/D07c.log"; }
+t  D07c "check: app-c STALE, app-a/app-b UP-TO-DATE (exit 1)"           d07c
+d07d() { local ga gb gc; ga=$(k get deploy app-a -o jsonpath='{.metadata.generation}'); gb=$(k get sts app-b -o jsonpath='{.metadata.generation}')
+         gc=$(k get deploy app-c -o jsonpath='{.metadata.generation}')
+         "$S/dr-eks-rollout.sh" restart-stale && has 'restarting deployment/app-c' "$LOGS/D07d.log" && has '^restarted=1' "$LOGS/D07d.log" \
+         && [[ $(k get deploy app-a -o jsonpath='{.metadata.generation}') == "$ga" && $(k get sts app-b -o jsonpath='{.metadata.generation}') == "$gb" \
+               && $(k get deploy app-c -o jsonpath='{.metadata.generation}') -gt "$gc" ]]; }
+t  D07d "restart-stale restarts ONLY app-c (app-a/app-b generation unchanged)" d07d
+t  D07e "check after restart: all UP-TO-DATE (exit 0), app-c on restored" bash -c "$(declare -f sessions wait_sessions); '${SCT[0]}' ${SCT[*]:1} check && wait_sessions $IP_RESTORED app-a,app-b,app-c"
 t  D08 "rollback with RESTART_UNANNOTATED=true → secret back to old"   env RESTART_UNANNOTATED=true "$S/dr-secret-cutover.sh" rollback
 t  D09 "after rollback all 3 apps on old, none on restored"            bash -c "$(declare -f sessions wait_sessions); wait_sessions $IP_OLD app-a,app-b,app-c && wait_sessions $IP_RESTORED ''"
 t  D10 "re-apply with RESTART_UNANNOTATED=true"                        env RESTART_UNANNOTATED=true "$S/dr-secret-cutover.sh" apply
@@ -103,7 +144,8 @@ echo "=== F. S2 promotion, S4 PITR"
 f01() { dr_set_target "$REPLICA_DB" && aws rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7 >/dev/null \
         && TIMEOUT_SECONDS=120 "$S/dr-verify.sh" wait-promoted; }
 t  F01 "S2 promote replica + wait-promoted (standalone + writable)"     f01
-t  F02 "S4 PITR latest → hardened restore with 3 SGs"                   bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest | grep -Eq 'sgs=\[sg-[0-9a-f]+ sg-[0-9a-f]+ sg-[0-9a-f]+\]'"
+t  F02 "S4 PITR latest → restore request from baseline with 3 SGs"      bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and .BackupRetentionPeriod == 7' '$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json'"
+t  F03 "S4 PITR: wait + harden → VALIDATED against the baseline"        bash -c "'$S/dr-restore.sh' wait '$PITR_DB' && '$S/dr-restore.sh' harden '$PITR_DB' | grep -q '→ VALIDATED\$'"
 
 echo "=== G. Evidence, KPIs, SSM documents, tracker"
 dr_mark T0 --at "$(date -u -d '-20 min' +%FT%T.000Z)" >/dev/null; dr_mark T9 >/dev/null; dr_mark T10 >/dev/null

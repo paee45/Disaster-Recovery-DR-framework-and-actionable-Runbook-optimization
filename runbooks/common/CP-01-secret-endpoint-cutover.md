@@ -44,7 +44,8 @@
 | CP01-S06 | **Force ESO sync** (do not wait up to `refreshInterval`): run by the script: `kubectl annotate externalsecret $K8S_SECRET force-sync=$(date +%s) --overwrite` | Executor | 1 | ExternalSecret `Ready=True`, `refreshTime` after T6; K8s Secret `DB_HOST` = new endpoint |
 | CP01-S07 | **Wait for the Reloader rollouts**: `./automation/scripts/dr-eks-rollout.sh wait` (waits on `rollout status` for every annotated consumer, in `restart-order`). Fallback if Reloader is down or not annotated: `./automation/scripts/dr-eks-rollout.sh restart`. Then `dr_mark T7` | Executor | 5 | All `successfully rolled out`; 0 pods older than T6 among consumers |
 | CP01-S08 | **Read-only secret** (UAT/PROD, if `SECRET_ID_RO` is used by read paths that pointed at the replica, which is gone, stale or now primary): `SECRET_ID=$SECRET_ID_RO ./automation/scripts/dr-secret-cutover.sh apply` (temporarily points reads at TARGET_DB). Restore a proper replica in the FB runbook | Executor | 3 | Reader pods rolled; no connections to the old replica |
-| CP01-S09 | Restart **unannotated consumers** from S01, delete/re-run in-flight Jobs, and **resume CronJobs** *after* CP-02 passes: `./automation/scripts/dr-eks-rollout.sh resume-cronjobs` | Executor | 3 | Done |
+| CP01-S08b | **Stale check**: `./automation/scripts/dr-eks-rollout.sh check` (or by hand: `k8s-secret-consumers.sh --context $EKS_CONTEXT -n $K8S_NS -s $K8S_SECRET check`) lists every consumer still running pods older than the Secret change | Executor | 1 | `stale=0`, or only the unannotated ones you chose to leave |
+| CP01-S09 | Restart **unannotated consumers** from S01 (`./automation/scripts/dr-eks-rollout.sh restart-stale` restarts only the STALE ones), delete/re-run in-flight Jobs, and **resume CronJobs** *after* CP-02 passes: `./automation/scripts/dr-eks-rollout.sh resume-cronjobs` | Executor | 3 | Done |
 
 ## Rollback (switch the apps back to the previous endpoint)
 

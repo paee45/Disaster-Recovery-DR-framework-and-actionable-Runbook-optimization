@@ -82,7 +82,10 @@ A rds create-db-parameter-group --db-parameter-group-name app-pg16-local --db-pa
 # shellcheck disable=SC2086
 A rds create-db-instance --db-instance-identifier app-pg-local --engine postgres --db-instance-class db.t4g.micro --allocated-storage 20 \
   --master-username postgres --master-user-password masterpw --db-subnet-group-name app-local-db-subnets --vpc-security-group-ids $SGS \
-  --db-parameter-group-name app-pg16-local --backup-retention-period 7 --deletion-protection >/dev/null
+  --db-parameter-group-name app-pg16-local --backup-retention-period 7 --deletion-protection \
+  --copy-tags-to-snapshot --preferred-maintenance-window sun:03:00-sun:03:30 --preferred-backup-window 01:00-01:30 \
+  --enable-cloudwatch-logs-exports postgresql upgrade \
+  --tags '[{"Key":"app","Value":"orders"},{"Key":"owner","Value":"sre-team"},{"Key":"cost-center","Value":"CC 1234 / retail"},{"Key":"backup-plan","Value":"local-daily"}]' >/dev/null
 A rds create-db-instance-read-replica --db-instance-identifier app-pg-local-replica --source-db-instance-identifier app-pg-local >/dev/null
 A secretsmanager create-secret --name local/app/db --secret-string \
   "{\"engine\":\"postgres\",\"host\":\"$IP_OLD\",\"port\":5432,\"dbname\":\"app\",\"username\":\"app_user\",\"password\":\"apppw-current\",\"dbInstanceIdentifier\":\"app-pg-local\"}" >/dev/null
@@ -154,6 +157,8 @@ helm --kube-context dr-local upgrade --install reloader stakater/reloader -n rel
 helm --kube-context dr-local list -A
 
 log "cluster identity, ESO store, sample apps"
+# after a down.sh the old CRDs can still be terminating while helm installs → wait until they exist again
+for _ in $(seq 1 60); do K get crd externalsecrets.external-secrets.io secretstores.external-secrets.io >/dev/null 2>&1 && break; sleep 3; done
 K wait --for condition=established --timeout=180s crd/externalsecrets.external-secrets.io crd/secretstores.external-secrets.io >/dev/null
 for _ in 1 2 3 4 5 6; do K apply -f "$HERE/k8s/" >/dev/null && break; sleep 10; done   # webhook may need a few seconds
 K -n app wait --for=condition=Ready externalsecret/app-db-credentials --timeout=180s \
@@ -168,6 +173,7 @@ export AWS_CONFIG_FILE="$STATE/aws-config" AWS_SHARED_CREDENTIALS_FILE="$STATE/a
 export AWS_PROFILE=dr-local AWS_REGION=eu-west-1 ACCOUNT_ID=000000000000
 export KUBECONFIG="$STATE/kubeconfig" EKS_CONTEXT=dr-local REQUIRE_CLUSTER_IDENTITY=true
 export PRIMARY_DB=app-pg-local REPLICA_DB=app-pg-local-replica MULTI_AZ=false BACKUP_RETENTION_DAYS=7
+export BASELINE_DIR=$STATE/baselines
 export DB_NAME=app APP_DB_USER=app_user
 export SECRET_ID=local/app/db SECRET_ID_RO= MASTER_SECRET_ID=local/app/db-master
 export K8S_NS=app K8S_SECRET=app-db-credentials K8S_HOST_KEY=POSTGRES_DB_HOST
