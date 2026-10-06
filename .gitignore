@@ -6,6 +6,8 @@ tests/aws/reports/
 .terraform/
 *.tfstate
 *.tfstate.*
+*.plan
+*.tfplan
 *.tfvars
 !*.tfvars.example
 crash.log
