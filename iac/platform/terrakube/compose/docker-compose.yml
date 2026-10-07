@@ -246,7 +246,7 @@ services:
     restart: unless-stopped
   terrakube-api:
     restart: unless-stopped
-    mem_limit: 750m
+    mem_limit: 1000m # 750m was OOM-killed every few minutes (heap 384m + metaspace 160m + threads + OTel agent)
     image: azbuilder/api-server:${TK_VERSION}
     container_name: terrakube-api
     environment:
