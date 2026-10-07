@@ -41,3 +41,8 @@ resource "aws_instance" "this" {
 
   lifecycle { ignore_changes = [ami] } # a newer AMI must not replace the running instance
 }
+
+resource "aws_ec2_instance_state" "this" {
+  instance_id = aws_instance.this.id
+  state       = var.running ? "running" : "stopped"
+}

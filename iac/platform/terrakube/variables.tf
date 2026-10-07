@@ -50,3 +50,8 @@ variable "vpc_cidr" {
   type    = string
   default = "10.70.0.0/24"
 }
+variable "running" {
+  description = "true = the instance runs; false = stopped (compute cost 0, disk + data kept). Apply from the Mac (iac/tf.sh platform/terrakube apply -var running=false) — Terrakube cannot stop the host it runs on."
+  type        = bool
+  default     = true
+}

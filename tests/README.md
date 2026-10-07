@@ -6,7 +6,7 @@ Two levels. Always run them in this order: **local first**, then **your real AWS
 |---|---|---|---|
 | 1. Local | k3s + LocalStack + moto + real Postgres + ESO + Reloader + 3 sample apps; 109 end-to-end tests | No (all local containers) | `tests/local/up.sh && tests/local/run-tests.sh` |
 | 2a. Real AWS, read-only | Guard, env check, pre-flight, inventory, list snapshots, DRY_RUN restore | **No** | `source env/uat.env && tests/aws/sandbox-test.sh readonly` |
-| 2·lab. Real AWS lab (no real UAT access) | Build a UAT-like environment in a sandbox account with Terraform ([iac/lab](../iac/lab/README.md)), then run 2a/2b and `dr-run.sh` against it | Lab resources only (~0.15 USD/h; destroy after) | `iac/lab/aws` + `iac/lab/k8s`: `terraform apply` |
+| 2·lab. Real AWS lab (no real UAT access) | Build a UAT-like environment in a sandbox account with Terraform ([iac/lab](../iac/lab/README.md)), then run 2a/2b and `dr-run.sh` against it | Lab resources only (~0.15 USD/h; destroy after) | `iac/tf.sh lab/network`, `eks`, `addons`, `db uat`, `app uat` ([iac/README.md](../iac/README.md)) |
 | 2b. Real AWS, sandbox | Restore latest snapshot to a throw-away instance, cutover a **throw-away** secret for 3 sample apps in a **throw-away** namespace, rollback, cleanup | Only throw-away resources (billable instance-hours) | `source env/uat.env && tests/aws/sandbox-test.sh full` |
 
 ## 1. Local test bed (`tests/local/`)

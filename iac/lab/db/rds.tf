@@ -2,21 +2,26 @@
 # parameter group and monitoring role are the lab's own. Restores made by the DR scripts are NOT in this state:
 # delete them first (runbook XF-S04) or `terraform destroy` cannot remove the subnet group / security groups.
 locals {
-  fx     = jsondecode(file("${path.module}/${var.fixture}"))
-  family = "postgres${split(".", local.fx.EngineVersion)[0]}"
-  gp3big = local.fx.StorageType == "gp3" && local.fx.AllocatedStorage >= 400
+  fixture_dir = "${path.module}/../../../tests/local/fixtures"
+  fixture_env = "${local.fixture_dir}/rds-primary-${var.env}-like.json"
+  fixture     = var.fixture != "" ? var.fixture : (fileexists(local.fixture_env) ? local.fixture_env : "${local.fixture_dir}/rds-primary-uat-like.json")
+  fx          = jsondecode(file(local.fixture))
+  p           = "${var.name}-${var.env}" # every name below carries the env, so dev/uat/prod coexist in one account
+  db_id       = "${local.p}-pg"
+  family      = "postgres${split(".", local.fx.EngineVersion)[0]}"
+  gp3big      = local.fx.StorageType == "gp3" && local.fx.AllocatedStorage >= 400
 }
 
 # Three SGs like the real UAT: app (from the VPC = EKS pods), admin (operator /32 only), monitoring (placeholder).
 resource "aws_security_group" "db_app" {
-  name        = "${var.name}-db-app"
+  name        = "${local.p}-db-app"
   description = "DR lab: Postgres from inside the VPC (EKS nodes)"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = local.net.vpc_id
   ingress {
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    cidr_blocks = [local.net.vpc_cidr]
   }
   egress {
     from_port   = 0
@@ -24,48 +29,48 @@ resource "aws_security_group" "db_app" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = { Name = "${var.name}-db-app" }
+  tags = { Name = "${local.p}-db-app" }
 }
 
 resource "aws_security_group" "db_admin" {
-  name        = "${var.name}-db-admin"
+  name        = "${local.p}-db-admin"
   description = "DR lab: Postgres from the operator laptop only"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = local.net.vpc_id
   ingress {
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
     cidr_blocks = [var.operator_cidr]
   }
-  tags = { Name = "${var.name}-db-admin" }
+  tags = { Name = "${local.p}-db-admin" }
 }
 
 resource "aws_security_group" "db_monitoring" {
-  name        = "${var.name}-db-monitoring"
+  name        = "${local.p}-db-monitoring"
   description = "DR lab: monitoring placeholder (no rules)"
-  vpc_id      = aws_vpc.this.id
-  tags        = { Name = "${var.name}-db-monitoring" }
+  vpc_id      = local.net.vpc_id
+  tags        = { Name = "${local.p}-db-monitoring" }
 }
 
 resource "aws_security_group" "quarantine" {
-  name        = "${var.name}-quarantine"
+  name        = "${local.p}-quarantine"
   description = "DR lab: CP-04 F2 quarantine (no ingress, no egress)"
-  vpc_id      = aws_vpc.this.id
-  tags        = { Name = "${var.name}-quarantine" }
+  vpc_id      = local.net.vpc_id
+  tags        = { Name = "${local.p}-quarantine" }
 }
 
 resource "aws_db_subnet_group" "this" {
-  name       = "${var.name}-db-subnets"
-  subnet_ids = aws_subnet.public[*].id
+  name       = "${local.p}-db-subnets"
+  subnet_ids = local.net.public_subnet_ids
 }
 
 resource "aws_db_parameter_group" "this" {
-  name   = "${var.name}-${local.family}"
+  name   = "${local.p}-${local.family}"
   family = local.family
 }
 
 resource "aws_iam_role" "rds_monitoring" {
-  name = "${var.name}-rds-monitoring"
+  name = "${local.p}-rds-monitoring"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "monitoring.rds.amazonaws.com" }, Action = "sts:AssumeRole" }]
@@ -78,7 +83,7 @@ resource "aws_iam_role_policy_attachment" "rds_monitoring" {
 }
 
 resource "aws_db_instance" "primary" {
-  identifier     = var.db_identifier
+  identifier     = local.db_id
   engine         = local.fx.Engine
   engine_version = local.fx.EngineVersion
   instance_class = var.db_instance_class != "" ? var.db_instance_class : local.fx.DBInstanceClass
@@ -123,7 +128,7 @@ resource "aws_db_instance" "primary" {
   skip_final_snapshot = true
   apply_immediately   = true
 
-  tags = { app = "dr-lab", owner = "sre-team", backup-plan = "uat-daily" }
+  tags = { app = "dr-lab", owner = "sre-team", backup-plan = "${var.env}-daily" }
 
   depends_on = [aws_iam_role_policy_attachment.rds_monitoring]
 }

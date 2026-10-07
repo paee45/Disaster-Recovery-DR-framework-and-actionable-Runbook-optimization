@@ -3,14 +3,12 @@ terraform {
   required_providers {
     aws        = { source = "hashicorp/aws", version = "~> 6.0" }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.35" }
-    random     = { source = "hashicorp/random", version = "~> 3.6" }
-    local      = { source = "hashicorp/local", version = "~> 2.5" }
+    helm       = { source = "hashicorp/helm", version = "~> 2.17" }
   }
-  # One state per env (iac/tf.sh lab/app <env> ...). It holds the app password and the seed Job's copy of the
-  # master password — the state bucket is private + encrypted; keep access tight.
 }
 
-# Cluster and DB details come from the eks and db stacks (apply those, plus addons, first).
+# Cluster details come from the eks stack (apply that first). Separate stacks so the Kubernetes provider is never
+# configured before the cluster exists.
 data "terraform_remote_state" "eks" {
   backend = "s3"
   config = {
@@ -21,27 +19,15 @@ data "terraform_remote_state" "eks" {
   }
 }
 
-data "terraform_remote_state" "db" {
-  backend = "s3"
-  config = {
-    bucket  = var.state_bucket
-    key     = "lab/${var.env}/db/terraform.tfstate"
-    region  = var.region
-    profile = var.aws_profile
-  }
-}
-
 locals {
-  eks       = data.terraform_remote_state.eks.outputs
-  db        = data.terraform_remote_state.db.outputs
-  namespace = var.namespace != "" ? var.namespace : (var.env == "uat" ? "app" : "app-${var.env}")
+  eks = data.terraform_remote_state.eks.outputs
 }
 
 provider "aws" {
   profile             = var.aws_profile
   region              = var.region
   allowed_account_ids = [var.account_id]
-  default_tags { tags = { dr-lab = "true", managed-by = "terraform", repo-path = "iac/lab/app", dr-env = var.env } }
+  default_tags { tags = { dr-lab = "true", managed-by = "terraform", repo-path = "iac/lab/addons" } }
 }
 
 # Short-lived token from the AWS provider — no aws CLI needed (works on a Mac and inside the Terrakube executor).
@@ -53,4 +39,12 @@ provider "kubernetes" {
   host                   = local.eks.eks_endpoint
   cluster_ca_certificate = base64decode(local.eks.eks_ca)
   token                  = data.aws_eks_cluster_auth.this.token
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = local.eks.eks_endpoint
+    cluster_ca_certificate = base64decode(local.eks.eks_ca)
+    token                  = data.aws_eks_cluster_auth.this.token
+  }
 }

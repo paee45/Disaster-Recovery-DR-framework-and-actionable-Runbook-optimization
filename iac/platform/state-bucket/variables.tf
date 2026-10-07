@@ -15,7 +15,7 @@ variable "name_prefix" {
   default     = "dr"
 }
 variable "kms_key_arn" {
-  description = "Empty = SSE-S3 (AES256). Set a customer KMS key for SSE-KMS; then add kms_key_id to backend.hcl too."
+  description = "Empty = SSE-S3 (AES256). Set a customer KMS key for SSE-KMS; then add -backend-config=kms_key_id=... in iac/tf.sh too."
   type        = string
   default     = ""
 }

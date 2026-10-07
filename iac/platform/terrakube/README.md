@@ -13,8 +13,10 @@ on the instance and never leave it.
 **Size:** `t4g.small` (2 GB, ARM) works only with the memory caps + 2 GB swap in `compose/` — first boot ~10 min,
 plans slower. If it is too slow or containers restart (`docker ps` shows restarts): `instance_type = "t4g.medium"`
 and `terraform apply` (the instance is replaced → Terrakube data on it is lost; export first).
-Cost ≈ t4g.small 0.02 USD/h + 30 GB gp3 + 1 public IPv4 ≈ **20 USD/month if always on**. Stop it when idle:
-`aws ec2 stop-instances --profile pa_sandbox --region ap-southeast-1 --instance-ids <id>` (start again the same way).
+Cost ≈ t4g.small 0.02 USD/h + 30 GB gp3 + 1 public IPv4 ≈ **20 USD/month if always on**. Stop it when idle (disk and data are kept,
+compute cost 0): `iac/tf.sh platform/terrakube apply -var running=false` (start again with `-var running=true`).
+The Java containers crash-loop if merely restarted after a stop, so a systemd unit (`terrakube-recreate.service`, installed by
+`bootstrap.sh.tftpl`) recreates them on every boot.
 
 **Terraform runs by Terrakube:** with `executor_admin = true` the instance role (AdministratorAccess, sandbox account
 only) is what Terrakube workspaces use — no access keys stored. The lab stacks support it (`aws_profile` empty →
@@ -32,26 +34,28 @@ echo "127.0.0.1 terrakube.platform.local terrakube-api.platform.local terrakube-
 ```
 
 ## Build
+State is in S3 (`platform/shared/terrakube`); run it with `iac/tf.sh` (setup and layout: [../../README.md](../../README.md)).
 ```bash
-cd ~/dr-framework/iac/platform/terrakube
-cp terraform.tfvars.example terraform.tfvars      # account_id, aws_profile
-aws sso login --profile pa_sandbox
-terraform init && terraform plan -out tk.plan     # expect: N to add, 0 to change, 0 to destroy
-terraform apply tk.plan                           # ~2 min; the instance then boots Terrakube (~10 min)
+cd ~/dr-framework/iac
+./tf.sh platform/terrakube plan -out=tk.plan      # expect: N to add, 0 to change, 0 to destroy
+./tf.sh platform/terrakube apply tk.plan          # ~2 min; the instance then boots Terrakube (~10 min)
 ```
 Watch the boot (SSM shell, no SSH):
-`aws ssm start-session --profile pa_sandbox --region ap-southeast-1 --target $(terraform output -raw instance_id)` then
+`aws ssm start-session --profile pa_sandbox --region ap-southeast-1 --target $(./tf.sh platform/terrakube output -raw instance_id)` then
 `sudo tail -f /var/log/terrakube-bootstrap.log` until `TERRAKUBE BOOTSTRAP DONE`; `sudo docker ps` to see the containers.
+Changing `bootstrap.sh.tftpl`, `compose/` or a version replaces the instance (the plan says so).
 
 ## Open the UI
 ```bash
-cd ~/dr-framework/iac/platform/terrakube
-$(terraform output -raw tunnel)                   # keep this terminal open (port-forward 443)
+cd ~/dr-framework/iac
+./tf.sh platform/terrakube output -raw tunnel | sh     # keep this terminal open (port-forward 443)
 ```
-Browser: **https://terrakube.platform.local** · login `admin@example.com` / `terraform output -raw admin_password`.
+Browser: **https://terrakube.platform.local** · login `admin@example.com` / `./tf.sh platform/terrakube output -raw admin_password`.
+Then create an API token (user menu → Tokens), put it in `iac/sandbox.env` as `TF_VAR_terrakube_token`, and run
+`./tf.sh platform/terrakube-config plan -out=c.plan` → `apply c.plan` to create the organization, templates and workspaces.
 
 ## Destroy
-`terraform destroy` (removes the instance, VPC, role, config bucket and SSM parameters; the Terrakube data on the
+`./tf.sh platform/terrakube destroy` (removes the instance, VPC, role, config bucket and SSM parameters; the Terrakube data on the
 instance is gone — labs built by Terrakube should be destroyed from Terrakube first).
 
 Compose files in `compose/` are adapted from Terrakube 2.33.2 (Apache-2.0, `compose/LICENSE.terrakube`): pinned

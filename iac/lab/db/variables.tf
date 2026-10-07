@@ -28,28 +28,27 @@ variable "name" {
   type        = string
   default     = "dr-lab"
 }
-variable "db_identifier" {
-  type    = string
-  default = "dr-lab-uat-pg"
+variable "env" {
+  description = "Which environment this DB plays (dev | uat | prod). One state per env; names carry the env, so all three can live in the sandbox at once."
+  type        = string
+  validation {
+    condition     = contains(["dev", "uat", "prod"], var.env)
+    error_message = "env must be dev, uat or prod."
+  }
+}
+variable "state_bucket" {
+  description = "State bucket (output of iac/platform/state-bucket); iac/tf.sh sets it from sandbox.env."
+  type        = string
 }
 variable "fixture" {
-  description = "describe-db-instances .DBInstances[0] JSON (sanitised) the primary copies its settings from."
+  description = "describe-db-instances .DBInstances[0] JSON (sanitised) the primary copies its settings from. Empty = tests/local/fixtures/rds-primary-<env>-like.json, falling back to the uat one until a dev/prod fixture exists."
   type        = string
-  default     = "../../../tests/local/fixtures/rds-primary-uat-like.json"
+  default     = ""
 }
 variable "deletion_protection" {
   description = "Lab default false so `terraform destroy` works (the real UAT has true)."
   type        = bool
   default     = false
-}
-variable "vpc_cidr" {
-  type    = string
-  default = "10.60.0.0/16"
-}
-variable "node_instance_type" {
-  description = "EKS node. t3.small = smallest that fits (t3.micro allows only 4 pods: CNI, kube-proxy, CoreDNS, Reloader, 2 apps, seed job do not fit)."
-  type        = string
-  default     = "t3.small"
 }
 variable "db_instance_class" {
   description = "Free-tier eligible by default. Empty = the fixture's class (the real UAT: db.t4g.small)."
@@ -60,13 +59,4 @@ variable "performance_insights" {
   description = "Mirror the UAT's Performance Insights (fixture: on). Off by default for the micro class / free tier."
   type        = bool
   default     = false
-}
-variable "kubeconfig_path" {
-  description = "Separate kubeconfig for this env (the DR guard refuses foreign contexts and a current-context)."
-  type        = string
-  default     = "~/.kube/dr-uat.config"
-}
-variable "kube_context" {
-  type    = string
-  default = "dr-uat"
 }

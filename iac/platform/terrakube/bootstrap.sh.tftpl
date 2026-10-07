@@ -71,5 +71,23 @@ docker network inspect terrakube-network >/dev/null 2>&1 \
   || docker network create terrakube-network -d bridge --subnet 10.25.25.0/24 --gateway 10.25.25.254
 docker compose pull --quiet
 docker compose up -d
+
+# The Java images (Paketo) crash-loop with "empty keystore" when a STOPPED container is merely restarted (what the docker
+# restart policy does after an EC2 stop/start). Recreating them at every boot gives a fresh container and fixes it.
+cat > /etc/systemd/system/terrakube-recreate.service <<UNIT
+[Unit]
+Description=Recreate the Terrakube Java containers after a boot
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=oneshot
+WorkingDirectory=$DIR
+ExecStart=/usr/bin/docker compose up -d --force-recreate terrakube-api terrakube-executor terrakube-registry
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable terrakube-recreate.service
+
 docker compose ps
 echo "TERRAKUBE BOOTSTRAP DONE"

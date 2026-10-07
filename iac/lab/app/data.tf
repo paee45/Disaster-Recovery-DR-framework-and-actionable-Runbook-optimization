@@ -12,9 +12,9 @@ resource "kubernetes_secret_v1" "db" {
     namespace = kubernetes_namespace_v1.app.metadata[0].name
   }
   data = {
-    POSTGRES_DB_HOST1    = local.a.db_address
-    POSTGRES_DB_HOST2    = local.a.db_address
-    POSTGRES_DB_PORT     = tostring(local.a.db_port)
+    POSTGRES_DB_HOST1    = local.db.db_address
+    POSTGRES_DB_HOST2    = local.db.db_address
+    POSTGRES_DB_PORT     = tostring(local.db.db_port)
     POSTGRES_DB_NAME     = "app"
     POSTGRES_DB_USER     = "app_user"
     POSTGRES_DB_PASSWORD = random_password.app.result
@@ -24,7 +24,7 @@ resource "kubernetes_secret_v1" "db" {
 
 # Seed runs INSIDE the cluster (VPC → RDS), as the RDS master user read from Secrets Manager. Idempotent SQL.
 data "aws_secretsmanager_secret_version" "master" {
-  secret_id = local.a.master_secret_arn
+  secret_id = local.db.master_secret_arn
 }
 
 resource "kubernetes_secret_v1" "seed" {
@@ -33,8 +33,8 @@ resource "kubernetes_secret_v1" "seed" {
     namespace = kubernetes_namespace_v1.app.metadata[0].name
   }
   data = {
-    PGHOST     = local.a.db_address
-    PGPORT     = tostring(local.a.db_port)
+    PGHOST     = local.db.db_address
+    PGPORT     = tostring(local.db.db_port)
     PGUSER     = jsondecode(data.aws_secretsmanager_secret_version.master.secret_string).username
     PGPASSWORD = jsondecode(data.aws_secretsmanager_secret_version.master.secret_string).password
     APP_PW     = random_password.app.result
@@ -84,7 +84,7 @@ resource "kubernetes_job_v1" "seed" {
 
 # Manual snapshot AFTER the seed: the restore drill uses it (the automated snapshot predates the seed).
 resource "aws_db_snapshot" "seed" {
-  db_instance_identifier = local.a.db_identifier
-  db_snapshot_identifier = var.seed_snapshot_id
+  db_instance_identifier = local.db.db_identifier
+  db_snapshot_identifier = local.snapshot_id
   depends_on             = [kubernetes_job_v1.seed]
 }

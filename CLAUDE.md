@@ -32,9 +32,12 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 ## Lab on real AWS (owner decision)
 - Real UAT is in another account the owner's SSO cannot reach; the profile `beep` must **not** be used.
 - Tests on real AWS run in the owner's **sandbox account** via SSO profile `pa_sandbox` (region ap-southeast-1),
-  built with **Terraform only** (`iac/lab/aws` then `iac/lab/k8s`; anything reusable lives in git/IaC, no ad-hoc
-  shell builders). Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
-  Destroy after each session (EKS is ~0.10 USD/h). Terraform state stays local and git-ignored.
+  built with **Terraform only** (stacks `iac/lab/{network,eks,addons,db,app}`, run with `iac/tf.sh`; anything reusable
+  lives in git/IaC, no ad-hoc shell builders). dev/uat/prod all play in the sandbox: one shared VPC + EKS, `db` and `app`
+  once per env. Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
+  Destroy or pause after each session (EKS is ~0.10 USD/h). **Terraform state is in S3** (bucket per account, key
+  `<project>/<env|shared>/<component>/terraform.tfstate`, native locking); layout in `iac/README.md`.
+  Always plan to a file, show it to the owner, then apply that file (owner asked for this; no `-auto-approve`).
 - Terraform UI = **Terrakube on one EC2 `t4g.small`** (owner choice: cheap, with swap + JVM caps; `t4g.medium` if too
   slow; t4g.micro is too small) — `iac/platform/terrakube`. No inbound ports: SSM port-forward + mkcert + /etc/hosts
   `*.platform.local`. Built BEFORE the DR lab (owner choice). Instance role AdministratorAccess (sandbox only) so
@@ -45,8 +48,9 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 |---|---|
 | Run a restore step by step (live output, evidence per step, gates, resume) | `automation/scripts/dr-run.sh S3\|S4` (`--list`, `--dry-run`, `--to P2-S05`, `--resume <DR_ID>`) |
 | Recorded manual shell | `automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` |
+| Run any Terraform stack (state in S3, plan/apply, stop/start DB) | `iac/tf.sh <stack> [env] <cmd>`, guide `iac/README.md` |
 | Build / destroy the sandbox lab (Terraform) | `iac/lab/README.md` |
-| Terraform UI for the sandbox (Terrakube on EC2) | `iac/platform/terrakube/README.md` |
+| Terraform UI for the sandbox (Terrakube on EC2) | `iac/platform/terrakube/README.md`, config as code `iac/platform/terrakube-config` |
 | Safe test against real AWS (dev/uat only) | `tests/aws/sandbox-test.sh readonly` then `full` |
 | Local end-to-end tests | `tests/local/up.sh && tests/local/run-tests.sh` (report `tests/local/.state/test-report.md`) |
 | Secret endpoint / consumers tools | `k8s-secret-endpoint.sh`, `k8s-secret-consumers.sh`, `dr-secret-cutover.sh`, `dr-eks-rollout.sh` |
@@ -66,8 +70,15 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
   zsh: paste blocks without inline `#` comments (or `setopt interactivecomments`).
-- **Next:** build Terrakube first (`iac/platform/terrakube/README.md`: mkcert certs, /etc/hosts, tfvars, plan, apply,
-  tunnel), then the lab (`iac/lab/README.md`: `brew install hashicorp/tap/terraform helm`, tfvars, apply aws → k8s;
-  not yet applied, `terraform validate` passes), then `source env/uat.env`, `tests/aws/sandbox-test.sh readonly`,
-  `automation/scripts/dr-run.sh S3 --dry-run`, then `--to P2-S05`.
+- **Done (2026-10-07):** state bucket created; its state and Terrakube's state moved to S3; lab split into network / eks /
+  addons / db / app (all `terraform validate`, none applied); Terrakube EC2 rebuilt with the boot fix
+  (`terrakube-recreate.service`; Paketo Java containers crash-loop on a plain restart); `platform/terrakube-config`
+  written (org, deploy/destroy templates, one workspace per lab stack), not applied.
+- **Open question:** Terrakube docs do not say whether a run keeps `backend "s3"` from the code. Test with the
+  `lab-network` workspace (S3 object at `lab/shared/network/terraform.tfstate`, `tf.sh lab/network plan` = no changes);
+  fallback = Terrakube storage backend on S3 and Terrakube as the only runner.
+- **Next:** wait for the new Terrakube boot, tunnel + login, API token into `iac/sandbox.env`, apply `terrakube-config`;
+  in parallel the DR test path from the Mac: `lab/network` → `lab/db uat` (DB first, cheapest) →
+  `source env/uat.env`-style checks, later `lab/eks` → `lab/addons` → `lab/app uat`, then
+  `tests/aws/sandbox-test.sh readonly`, `automation/scripts/dr-run.sh S3 --dry-run`, then `--to P2-S05`.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

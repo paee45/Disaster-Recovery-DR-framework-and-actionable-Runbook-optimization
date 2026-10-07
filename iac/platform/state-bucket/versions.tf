@@ -3,8 +3,9 @@ terraform {
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 6.0" }
   }
-  # Bootstrap stack: it creates the bucket the other stacks keep their state in, so ITS OWN state stays local
-  # (git-ignored, tiny, no secrets). Never destroy it while other stacks still store state in the bucket.
+  # Bootstrap: iac/tf.sh first runs this stack on a local backend (it creates the bucket), then moves its own state
+  # into that bucket (key platform/shared/state-bucket). prevent_destroy guards the bucket; never destroy it while
+  # other stacks keep their state in it.
 }
 
 provider "aws" {

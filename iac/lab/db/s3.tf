@@ -1,6 +1,6 @@
 # Evidence bucket (lab: versioned, private, force_destroy so the lab can be removed; the real one uses Object Lock).
 resource "aws_s3_bucket" "evidence" {
-  bucket        = "${var.name}-evidence-${var.account_id}-${var.region}"
+  bucket        = "${local.p}-evidence-${var.account_id}-${var.region}"
   force_destroy = true
 }
 

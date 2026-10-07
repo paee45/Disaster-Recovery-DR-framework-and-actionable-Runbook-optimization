@@ -1,8 +1,9 @@
 # Enterprise DR Framework — AWS RDS PostgreSQL + EKS
 
 Capstone: **Enterprise Disaster Recovery framework and actionable runbook optimization** for RDS PostgreSQL, where
-recovery = a new/promoted DB endpoint written into **Secrets Manager**, synced by **External Secrets Operator**, with pods
-restarted automatically by **Stakater Reloader** (no DNS change).
+recovery = a new/promoted DB endpoint written into the **app's secret** (today a plain Kubernetes Secret, `SECRET_MODE=k8s`;
+Secrets Manager + External Secrets Operator is the planned mode, `SECRET_MODE=eso`), with pods restarted automatically by
+**Stakater Reloader** (no DNS change).
 
 > Status: **v0.5**. Includes the corrective action plan for the 2026-08-04 UAT exercise (RTO 39:55 vs 30 min) → [docs/10](docs/10-corrective-action-plan-2026-08-04.md).
 > v0.5: baseline-driven restore (`capture` → `plan` → restore → `harden` → `validate`/`validate-pg`), standalone stale-pod tool
@@ -11,6 +12,7 @@ restarted automatically by **Stakater Reloader** (no DNS change).
 > v0.6: **step-by-step runner** `dr-run.sh S3|S4` (runbook step IDs, live output, per-step evidence + timeline, gates, resume),
 > `SECRET_MODE=k8s` (plain Secret, every host key, change IDs + failback by ID), SSO or key login with browser wait.
 > Targets: **RPO 24 h** (RDS daily backup, 7-day retention), **RTO 30 min** (aim). No DR drills are scheduled.
+> Test infrastructure (sandbox AWS account) is Terraform with state in S3: see [iac/README.md](iac/README.md).
 > Runbooks are ISMS documents (ISO/IEC 27001:2022), reviewed by the SRE lead and approved by the CTO. Fill in the placeholders (`{{…}}`, `TODO`) and `env/<env>.env`.
 
 ## Topology in scope
@@ -35,8 +37,8 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 | [`automation/`](automation/) | SSM Automation documents, scripts (cutover, Reloader wait, restore, fence, parity, evidence, KPIs, tracker generator), SQL, K8s manifests |
 | [`docs/`](docs/) | 00 strategy · 01 architecture · 02 runbook standards · 03 execution media/tooling · 04 RPO/RTO · 05 evidence/audit · 06 comms · 07 validation (no scheduled drills) · 08 capstone optimization · **09 ISO 27001 scope, control mapping & risk register** · **10 corrective action plan (UAT exercise 2026-08-04)** · 11 AWS CLI quick reference · **12 account & cluster safety (guardrails)** |
 | [`tests/`](tests/) | **Local test bed** (k3s + LocalStack + moto + Postgres + ESO + Reloader + 3 sample apps; 109 end-to-end tests, [last run](tests/local/last-run-report.md)) and the **real-AWS sandbox test** |
-| [`iac/lab/`](iac/lab/) | **Terraform DR lab**: a UAT-like environment (VPC, RDS from the UAT fixture, EKS + Reloader, Secret with two host keys, sample apps, seed snapshot, `env/uat.env`) in a sandbox account — build, test on real AWS, destroy |
-| [`iac/platform/terrakube/`](iac/platform/terrakube/) | **Terrakube** (Terraform UI) on one EC2 (t4g.small, no inbound ports, SSM port-forward) to see and run every lab in the sandbox account |
+| [`iac/`](iac/README.md) | **Sandbox infrastructure as code** (Terraform, state in S3, one command: `iac/tf.sh`). `iac/lab/` = the DR lab: a UAT-like environment (VPC, RDS from the UAT fixture, EKS + Reloader, Secret with two host keys, sample apps, seed snapshot, `env/<env>.env`) for dev/uat/prod in one sandbox account — build, test on real AWS, pause, destroy |
+| [`iac/platform/`](iac/platform/) | State bucket, **Terrakube** (Terraform UI) on one EC2 (t4g.small, no inbound ports, SSM port-forward) and its config as code (organization, templates, one workspace per lab stack) |
 | [`templates/`](templates/) | Comms (chat, leadership, vendor, customer/status page, planned drills), execution tracker, evidence manifest, drill report, PIR, runbook template |
 
 ## Ten rules this framework is built on

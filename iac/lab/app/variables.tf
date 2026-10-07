@@ -1,40 +1,54 @@
-variable "state_bucket" {
-  description = "S3 bucket holding the lab-aws state (output of iac/platform/state-bucket)."
+variable "account_id" {
+  description = "The SANDBOX account id. The AWS provider refuses to run in any other account."
   type        = string
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.account_id))
+    error_message = "account_id must be 12 digits."
+  }
 }
-variable "state_key" {
-  type    = string
-  default = "dr-framework/sandbox/lab-aws/terraform.tfstate"
+variable "aws_profile" {
+  description = "Named AWS CLI profile (SSO). null = default credential chain (e.g. the Terrakube instance role)."
+  type        = string
+  default     = null
 }
-variable "state_region" {
+variable "region" {
   type    = string
   default = "ap-southeast-1"
 }
-variable "state_profile" {
-  description = "AWS profile to read that state. Empty = default credential chain (e.g. the Terrakube instance role)."
+variable "env" {
+  description = "Which environment this app namespace plays (dev | uat | prod); must match the lab/db state of the same env."
   type        = string
-  default     = "pa_sandbox"
+  validation {
+    condition     = contains(["dev", "uat", "prod"], var.env)
+    error_message = "env must be dev, uat or prod."
+  }
+}
+variable "state_bucket" {
+  description = "State bucket (output of iac/platform/state-bucket); iac/tf.sh sets it from sandbox.env."
+  type        = string
 }
 variable "namespace" {
-  type    = string
-  default = "app"
+  description = "Empty = app for uat (like the real UAT), app-<env> for the others (they share one cluster)."
+  type        = string
+  default     = ""
 }
 variable "secret_name" {
   description = "The app's DB Secret (SECRET_MODE=k8s). Two host keys, like the real UAT."
   type        = string
   default     = "db-creds"
 }
-variable "reloader_chart_version" {
-  description = "Pin the Stakater Reloader chart (empty = latest; pin it once tested)."
+variable "cluster_identity_env" {
+  description = "The env the shared cluster identifies as (lab/addons identity_env). Other envs get REQUIRE_CLUSTER_IDENTITY=false in their env file."
+  type        = string
+  default     = "uat"
+}
+variable "env_file" {
+  description = "Where to write the DR env profile (git-ignored). Empty = env/<env>.env in the repo."
   type        = string
   default     = ""
 }
-variable "env_file" {
-  description = "Where to write the DR env profile (git-ignored)."
-  type        = string
-  default     = "../../../env/uat.env"
-}
 variable "seed_snapshot_id" {
-  type    = string
-  default = "dr-lab-seed"
+  description = "Empty = dr-lab-<env>-seed."
+  type        = string
+  default     = ""
 }

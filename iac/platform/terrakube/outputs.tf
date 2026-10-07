@@ -1,5 +1,5 @@
 output "instance_id" { value = aws_instance.this.id }
-output "admin_login" { value = "admin@example.com  (password: terraform output -raw admin_password)" }
+output "admin_login" { value = "admin@example.com  (password: iac/tf.sh platform/terrakube output -raw admin_password)" }
 output "admin_password" {
   value     = random_password.admin.result
   sensitive = true

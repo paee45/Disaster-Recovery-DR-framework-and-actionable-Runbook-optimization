@@ -18,4 +18,4 @@ jobs:
       - name: terraform fmt + validate (iac)
         run: |
           terraform fmt -check -recursive iac
-          for d in iac/lab/aws iac/lab/k8s iac/platform/terrakube; do (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform validate); done
+          for d in iac/platform/state-bucket iac/platform/terrakube iac/platform/terrakube-config iac/lab/network iac/lab/eks iac/lab/addons iac/lab/db iac/lab/app; do (cd "$d" && terraform init -backend=false -input=false >/dev/null && terraform validate); done

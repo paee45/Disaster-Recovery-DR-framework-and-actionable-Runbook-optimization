@@ -12,18 +12,11 @@ resource "helm_release" "reloader" {
   timeout          = 300
 }
 
-# What dr_guard checks before ANY action: this cluster says env=uat and the expected account.
+# What dr_guard checks before ANY action: this cluster says env=<identity_env> and the expected account.
 resource "kubernetes_config_map_v1" "identity" {
   metadata {
     name      = "dr-cluster-identity"
     namespace = "kube-system"
   }
-  data = { env = "uat", account = local.a.account_id, cluster = local.a.eks_cluster_name }
-}
-
-resource "kubernetes_namespace_v1" "app" {
-  metadata {
-    name   = var.namespace
-    labels = { reloader = "enabled" }
-  }
+  data = { env = var.identity_env, account = var.account_id, cluster = local.eks.eks_cluster_name }
 }

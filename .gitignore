@@ -11,4 +11,6 @@ tests/aws/reports/
 *.tfvars
 !*.tfvars.example
 backend.hcl
+zz_bootstrap_override.tf
+sandbox.env
 crash.log
