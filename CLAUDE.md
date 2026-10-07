@@ -30,8 +30,8 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Owner works on **macOS** (brew bash/coreutils/jq/libpq/awscli/kubectl); the real-AWS tests run on the Mac, not in a cloud container.
 
 ## Lab on real AWS (owner decision)
-- Real UAT is in another account the owner's SSO cannot reach; the profile `beep` must **not** be used.
-- Tests on real AWS run in the owner's **sandbox account** via SSO profile `pa_sandbox` (region ap-southeast-1),
+- Real UAT is in another account the owner's SSO cannot reach; no profile of a real account may be used for the lab.
+- Tests on real AWS run in the owner's **sandbox account** via SSO profile `lab_sandbox` (region ap-southeast-1),
   built with **Terraform only** (stacks `iac/lab/{network,eks,addons,db,app}`, run with `iac/tf.sh`; anything reusable
   lives in git/IaC, no ad-hoc shell builders). dev/uat/prod all play in the sandbox: one shared VPC + EKS, `db` and `app`
   once per env. Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
@@ -46,6 +46,7 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 ## Key entry points
 | Need | Use |
 |---|---|
+| Build `env/<env>.env` from what exists in AWS/the cluster (no manual lookups) | `automation/scripts/dr-env-discover.sh <env> --profile P --region R` (then `dr-env-check.sh`) |
 | Run a restore step by step (live output, evidence per step, gates, resume) | `automation/scripts/dr-run.sh S3\|S4` (`--list`, `--dry-run`, `--to P2-S05`, `--resume <DR_ID>`) |
 | Recorded manual shell | `automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` |
 | Run any Terraform stack (state in S3, plan/apply, stop/start DB) | `iac/tf.sh <stack> [env] <cmd>`, guide `iac/README.md` |

@@ -1,2 +1,2 @@
 account_id  = "000000000000"
-aws_profile = "pa_sandbox"
+aws_profile = "lab_sandbox"

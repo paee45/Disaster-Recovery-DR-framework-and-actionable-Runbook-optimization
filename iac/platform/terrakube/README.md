@@ -35,24 +35,45 @@ echo "127.0.0.1 terrakube.platform.local terrakube-api.platform.local terrakube-
 
 ## Build
 State is in S3 (`platform/shared/terrakube`); run it with `iac/tf.sh` (setup and layout: [../../README.md](../../README.md)).
-```bash
-cd ~/dr-framework/iac
-./tf.sh platform/terrakube plan -out=tk.plan      # expect: N to add, 0 to change, 0 to destroy
-./tf.sh platform/terrakube apply tk.plan          # ~2 min; the instance then boots Terrakube (~10 min)
-```
-Watch the boot (SSM shell, no SSH):
-`aws ssm start-session --profile pa_sandbox --region ap-southeast-1 --target $(./tf.sh platform/terrakube output -raw instance_id)` then
-`sudo tail -f /var/log/terrakube-bootstrap.log` until `TERRAKUBE BOOTSTRAP DONE`; `sudo docker ps` to see the containers.
-Changing `bootstrap.sh.tftpl`, `compose/` or a version replaces the instance (the plan says so).
+
+1. Plan and apply (read the plan first; it should only add resources on a first build):
+   ```bash
+   cd ~/dr-framework/iac
+   ./tf.sh platform/terrakube plan -out=tk.plan
+   ./tf.sh platform/terrakube apply tk.plan        # ~2 min; the instance then boots Terrakube (~10 min)
+   ```
+2. Wait for the boot. It is finished when the bootstrap log ends with `TERRAKUBE BOOTSTRAP DONE` and every container is `Up`.
+   Check from your Mac, no shell needed:
+   ```bash
+   ID=$(./tf.sh platform/terrakube output -raw instance_id 2>/dev/null)
+   CID=$(aws --profile lab_sandbox --region ap-southeast-1 ssm send-command --instance-ids "$ID" \
+     --document-name AWS-RunShellScript --query Command.CommandId --output text \
+     --parameters 'commands=["tail -2 /var/log/terrakube-bootstrap.log","docker ps --format \"{{.Names}} {{.Status}}\""]')
+   sleep 6; aws --profile lab_sandbox --region ap-southeast-1 ssm get-command-invocation \
+     --command-id "$CID" --instance-id "$ID" --query StandardOutputContent --output text
+   ```
+   To follow the log live instead, open a shell on the instance (SSM, no SSH):
+   `aws ssm start-session --profile lab_sandbox --region ap-southeast-1 --target "$ID"`, then `sudo tail -f /var/log/terrakube-bootstrap.log`.
+
+Changing `bootstrap.sh.tftpl`, anything in `compose/`, or a version **replaces the instance** (the plan says so).
 
 ## Open the UI
-```bash
-cd ~/dr-framework/iac
-./tf.sh platform/terrakube output -raw tunnel | sh     # keep this terminal open (port-forward 443)
-```
-Browser: **https://terrakube.platform.local** · login `admin@example.com` / `./tf.sh platform/terrakube output -raw admin_password`.
-Then create an API token (user menu → Tokens), put it in `iac/sandbox.env` as `TF_VAR_terrakube_token`, and run
-`./tf.sh platform/terrakube-config plan -out=c.plan` → `apply c.plan` to create the organization, templates and workspaces.
+1. Open the tunnel. macOS does not let a normal user listen on `127.0.0.1:443`, so it runs with `sudo` (asks for your
+   password). Without it the session hangs at "Starting session…". Keep this terminal open:
+   ```bash
+   cd ~/dr-framework/iac
+   sudo env "PATH=$PATH" "HOME=$HOME" bash -c "$(./tf.sh platform/terrakube output -raw tunnel 2>/dev/null)"
+   ```
+   It prints `Port 443 opened … Waiting for connections`.
+2. Check from another terminal: `curl -sS https://terrakube-api.platform.local/actuator/health` → `{"status":"UP"}`.
+3. Browser: **https://terrakube.platform.local**, login `admin@example.com` and the password from
+   `./tf.sh platform/terrakube output -raw admin_password`.
+4. Create an API token (user menu → Tokens) and put it in `iac/sandbox.env` as `TF_VAR_terrakube_token`.
+5. Create the organization, templates and workspaces as code:
+   ```bash
+   ./tf.sh platform/terrakube-config plan -out=c.plan
+   ./tf.sh platform/terrakube-config apply c.plan
+   ```
 
 ## Destroy
 `./tf.sh platform/terrakube destroy` (removes the instance, VPC, role, config bucket and SSM parameters; the Terrakube data on the

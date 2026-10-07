@@ -30,8 +30,13 @@ s3://dr-tfstate-<account>-<region>/
     └── prod/{db,app}/terraform.tfstate
 ```
 Key = `<project>/<env or shared>/<component>/terraform.tfstate`. The same layout will be used in the real UAT and PROD
-accounts, each with its own bucket. The state of the state-bucket stack lives in the bucket it created (`tf.sh` moves it
-in on the first run after the bucket exists).
+accounts, each with its own bucket. The state of the state-bucket stack lives in the bucket it created.
+
+**S3 is the source of truth.** On every run `tf.sh` checks the bucket first:
+- state already in S3 → it is used, from any machine; a leftover local `terraform.tfstate` is set aside as `*.bak`;
+- no state in S3 yet and a local `terraform.tfstate` exists → it is copied into S3 (initial setup / bootstrap);
+- neither → a fresh stack.
+If S3 cannot be checked (login, permissions, network) it stops instead of guessing.
 
 ## One-time setup on the Mac
 Do this once per machine. Every step is safe to repeat.
@@ -40,22 +45,42 @@ Do this once per machine. Every step is safe to repeat.
 brew install hashicorp/tap/terraform awscli kubectl jq libpq
 brew install mkcert && brew install --cask session-manager-plugin      # only for the Terrakube UI
 
-# 2. AWS login: the profile pa_sandbox must exist in ~/.aws/config (SSO)
-aws sso login --profile pa_sandbox
+# 2. AWS login: create the profile lab_sandbox once (see "AWS login" below), then log in
+aws sso login --profile lab_sandbox            # SSO profiles only; an access-key profile needs no login
 
 # 3. Settings file (git-ignored; holds the account id): fill in the 4 values
 cd ~/dr-framework/iac
 cp sandbox.env.example sandbox.env
 ```
-In `sandbox.env`: `TF_VAR_account_id` (12 digits), `TF_VAR_aws_profile=pa_sandbox`, `TF_VAR_region`, and
+In `sandbox.env`: `TF_VAR_account_id` (12 digits), `TF_VAR_aws_profile=lab_sandbox`, `TF_VAR_region`, and
 `TF_VAR_state_bucket=dr-tfstate-<account>-<region>`. For the Terrakube UI also do the one-time certificate and
 `/etc/hosts` steps in [platform/terrakube/README.md](platform/terrakube/README.md#one-time-on-the-mac).
+
+### AWS login (SSO or access key)
+`tf.sh`, the DR scripts and Terraform all use one **named profile** from `~/.aws/config`. Both login kinds work. The real
+environments may use access keys, so pick the profile type that matches the account.
+
+| Profile type | Create it | Log in | Use for |
+|---|---|---|---|
+| **SSO** (preferred) | `aws configure sso` (answer: SSO start URL, region, pick the account and role; session name e.g. `lab_admin`, profile name `lab_sandbox`) | `aws sso login --profile lab_sandbox` (browser; `tf.sh` does it for you when expired) | sandbox, PROD |
+| **Access key** (IAM user) | `aws configure --profile real_uat` (asks access key id, secret, region) | none (the key does not expire; rotate it) | dev / UAT of a real account |
+| **Assumed role** | `~/.aws/config`: `role_arn = …`, `source_profile = <an SSO or key profile>` (+ `mfa_serial` if required) | follows the source profile | PROD when keys are not allowed |
+
+Rules (the same ones the DR scripts enforce):
+- Never `export AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`: exported keys can point at any account, so
+  `tf.sh` and the DR scripts refuse to run. Keep keys in the named profile only (`~/.aws/credentials`).
+- Do not rely on the `[default]` profile; always name the profile.
+- Which kinds are allowed is set per environment: `DR_AUTH_ALLOWED` in `env/<env>.env` (dev/uat `sso,role,key`; prod `sso,role`)
+  and, for `tf.sh`, `TF_AUTH_ALLOWED` in `sandbox.env` (default: all kinds; set `sso,role` for a real PROD account).
+- The account id in `sandbox.env` must match the profile's account; the AWS provider stops Terraform otherwise.
+- An IAM user (access key) needs permissions too: read access to what the stacks manage, and `s3:ListBucket` plus
+  `s3:GetObject/PutObject/DeleteObject` on the state bucket (S3 locking writes a small `.tflock` object, even for a plan).
 
 Quick check that the machine is ready (all lines should print a path, `1` or `OK`):
 ```bash
 for t in terraform aws kubectl jq mkcert session-manager-plugin; do command -v $t || echo "MISSING $t"; done
 grep -c terrakube.platform.local /etc/hosts; ls ~/.terrakube-tls
-aws --profile pa_sandbox --region ap-southeast-1 sts get-caller-identity --query Arn --output text
+aws --profile lab_sandbox --region ap-southeast-1 sts get-caller-identity --query Arn --output text
 ```
 `sandbox.env` holds the account id, so it is never committed. The bucket name is `dr-tfstate-<account>-<region>`.
 
@@ -98,6 +123,19 @@ block the subnet group, see [lab/README.md](lab/README.md)) → `lab/addons` →
   state behaviour first (see below).
 - No account ids, ARNs or hostnames in git. `sandbox.env`, `*.tfvars`, `*.plan` and `env/*.env` are git-ignored.
 - The AWS provider has `allowed_account_ids`: Terraform refuses to run in any other account.
+
+## Resources exist but there is no state
+`./tf.sh status` shows `ORPHAN` for a stack when AWS holds its resources but S3 has no state for it. `tf.sh` then
+warns on `plan` and **stops** `apply` / `destroy`, because Terraform would try to create what already exists.
+Typical errors you would otherwise see: `DBInstanceAlreadyExists`, `EntityAlreadyExists` (IAM role),
+`ResourceInUseException` (EKS cluster), `... already exists` (security group, subnet group, bucket).
+
+Choose one:
+1. **Restore the state.** It was lost or is under another key: bring back an earlier object version in the state
+   bucket (S3 versioning is on), or run with the right key, then run again.
+2. **Import the resources** (to keep them): `./tf.sh <stack> [env] import <address> <id>` (or `import {}` blocks in
+   the code), then `plan` until it says "No changes". Set `TF_ADOPT=1` for these runs so the guard does not stop you.
+3. **Delete and rebuild** (throw-away lab only): delete them as in [lab/README.md](lab/README.md) (Destroy), then build normally.
 
 ## Terrakube (the UI)
 [`platform/terrakube/README.md`](platform/terrakube/README.md) builds the UI host; `platform/terrakube-config` creates the

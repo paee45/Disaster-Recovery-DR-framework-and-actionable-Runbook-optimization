@@ -2,6 +2,7 @@
 
 | Path | Used in | Purpose |
 |---|---|---|
+| `scripts/dr-env-discover.sh <env> --profile P --region R` | Setup (once per env) | **Builds `env/<env>.env` from what exists** (read-only): account, RDS primary/replica/tags/Multi-AZ, master secret, quarantine SG, evidence bucket, EKS cluster, and the app Secret (namespace, name, host/port/user/password keys; names only, never values). Copies `env/<env>.env.example`, leaves what it cannot find empty with `# TODO`, and lists it. `--print` shows it without writing; `--force` overwrites (keeps `.bak`). Then run `dr-env-check.sh` |
 | `scripts/dr-lib.sh` | All | `dr_init <scenario>`, `dr_mark` (timeline), `dr_run` (evidence capture), `dr_set_target`, `dr_dsn` |
 | `scripts/dr-preflight.sh replica\|restore` | S2 / S3-S4 Phase 1 | Replica health/lag/LSN, PITR window, snapshots, restore inputs, EKS/ESO/Reloader, consumer inventory |
 | `scripts/dr-restore.sh` | S3/S4 | `capture` (source baseline), `plan`, `snapshot`, `pitr` (request built from the baseline, `--cli-input-json`), `wait`, `harden` (converge to baseline), `validate` (all settings), `validate-pg` (pg_settings) |

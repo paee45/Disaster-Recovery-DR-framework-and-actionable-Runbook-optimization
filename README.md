@@ -56,7 +56,8 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 
 ## Quick start
 ```bash
-cp env/uat.env.example env/uat.env && $EDITOR env/uat.env
+cp env/uat.env.example env/uat.env && $EDITOR env/uat.env    # or let the script find the values:
+./automation/scripts/dr-env-discover.sh uat --profile <named-profile> --region <region>   # read-only; writes env/uat.env, lists what is still TODO
 source env/uat.env && source automation/scripts/dr-lib.sh && dr_init S2
 ./automation/scripts/dr-preflight.sh replica                 # read-only checks
 ./automation/scripts/dr-run.sh S3 --list                     # S3/S4 step by step: --dry-run, then run it (gates ask GO + names)

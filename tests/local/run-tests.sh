@@ -203,7 +203,7 @@ t  G05 "tracker CSV generated for every runbook"                        bash -c 
 echo "=== I. UAT-shaped requests (offline, from the sanitised UAT describe) + create-like round trip"
 ireq() { jq -S --argjson ov '{}' "$JQL"' (.TagList | userTags) as $t | expected($ov; "uat"; 7; false) | '"$1" "$FX"; }
 i01() { ireq 'restore_req({DBInstanceIdentifier:"x", DBSnapshotIdentifier:"s"}; $t)' | tee /dev/stderr | jq -e '
-          (.VpcSecurityGroupIds | length) == 3 and .DBSubnetGroupName == "ev-uat-eks-rdssubnetgroup-example" and .DBParameterGroupName == "ev-postgres-17"
+          (.VpcSecurityGroupIds | length) == 3 and .DBSubnetGroupName == "app-uat-rdssubnetgroup-example" and .DBParameterGroupName == "app-postgres-17"
           and (has("OptionGroupName") | not) and (has("Iops") | not) and (has("StorageThroughput") | not) and .Port == 5432
           and .BackupRetentionPeriod == 7 and .PreferredBackupWindow == "17:58-18:28" and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
           and .EnableCloudwatchLogsExports == ["postgresql"] and .DeletionProtection and (.CopyTagsToSnapshot == false)

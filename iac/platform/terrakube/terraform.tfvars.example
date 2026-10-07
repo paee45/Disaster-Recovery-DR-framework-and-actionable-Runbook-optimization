@@ -1,6 +1,6 @@
 # copy to terraform.tfvars (git-ignored)
 account_id    = "123456789012"   # the sandbox account
-aws_profile   = "pa_sandbox"
+aws_profile   = "lab_sandbox"
 region        = "ap-southeast-1"
 # instance_type  = "t4g.small"   # t4g.medium if the small one is too slow
 # executor_admin = true          # Terrakube builds labs with the instance role (sandbox only)

@@ -1,11 +1,11 @@
 {
   "_comment": "SANITISED copy of a real UAT describe-db-instances (DBInstances[0]): account id, ARNs, resource ids, endpoint and VPC/SG/subnet ids replaced; every setting kept. Used by tests/local/up.sh to create the local primary (UAT-shaped) and by run-tests.sh group I for offline request checks.",
-  "DBInstanceIdentifier": "ev-uat-postgres",
+  "DBInstanceIdentifier": "app-uat-postgres",
   "DBInstanceClass": "db.t4g.small",
   "Engine": "postgres",
   "DBInstanceStatus": "stopped",
   "MasterUsername": "postgres",
-  "Endpoint": { "Address": "ev-uat-postgres.example0000.ap-southeast-1.rds.amazonaws.com", "Port": 5432, "HostedZoneId": "Z2G0U3KFCY8NZ5" },
+  "Endpoint": { "Address": "app-uat-postgres.example0000.ap-southeast-1.rds.amazonaws.com", "Port": 5432, "HostedZoneId": "Z2G0U3KFCY8NZ5" },
   "AllocatedStorage": 20,
   "InstanceCreateTime": "2023-09-27T08:33:26.951000+00:00",
   "PreferredBackupWindow": "17:58-18:28",
@@ -16,11 +16,11 @@
     { "VpcSecurityGroupId": "sg-0000000000000a002", "Status": "active" },
     { "VpcSecurityGroupId": "sg-0000000000000a003", "Status": "active" }
   ],
-  "DBParameterGroups": [ { "DBParameterGroupName": "ev-postgres-17", "ParameterApplyStatus": "in-sync" } ],
+  "DBParameterGroups": [ { "DBParameterGroupName": "app-postgres-17", "ParameterApplyStatus": "in-sync" } ],
   "AvailabilityZone": "ap-southeast-1a",
   "DBSubnetGroup": {
-    "DBSubnetGroupName": "ev-uat-eks-rdssubnetgroup-example",
-    "DBSubnetGroupDescription": "DB Subnet Group for EV RDS Instances",
+    "DBSubnetGroupName": "app-uat-rdssubnetgroup-example",
+    "DBSubnetGroupDescription": "DB Subnet Group for application RDS Instances",
     "VpcId": "vpc-00000000000000001",
     "SubnetGroupStatus": "Complete",
     "Subnets": [
@@ -52,7 +52,7 @@
   "MonitoringInterval": 60,
   "EnhancedMonitoringResourceArn": "arn:aws:logs:ap-southeast-1:000000000000:log-group:RDSOSMetrics:log-stream:db-EXAMPLE0000000000000000000",
   "MonitoringRoleArn": "arn:aws:iam::000000000000:role/rds-monitoring-role",
-  "DBInstanceArn": "arn:aws:rds:ap-southeast-1:000000000000:db:ev-uat-postgres",
+  "DBInstanceArn": "arn:aws:rds:ap-southeast-1:000000000000:db:app-uat-postgres",
   "IAMDatabaseAuthenticationEnabled": false,
   "DatabaseInsightsMode": "standard",
   "PerformanceInsightsEnabled": true,
@@ -62,8 +62,8 @@
   "DeletionProtection": true,
   "AssociatedRoles": [],
   "TagList": [
-    { "Key": "aws:cloudformation:stack-id", "Value": "arn:aws:cloudformation:ap-southeast-1:000000000000:stack/ev-uat-eks/00000000-0000-0000-0000-000000000000" },
-    { "Key": "aws:cloudformation:stack-name", "Value": "ev-uat-eks" },
+    { "Key": "aws:cloudformation:stack-id", "Value": "arn:aws:cloudformation:ap-southeast-1:000000000000:stack/app-uat-eks/00000000-0000-0000-0000-000000000000" },
+    { "Key": "aws:cloudformation:stack-name", "Value": "app-uat-eks" },
     { "Key": "aws:cloudformation:logical-id", "Value": "UatRDSInstance" }
   ],
   "CustomerOwnedIpEnabled": false,

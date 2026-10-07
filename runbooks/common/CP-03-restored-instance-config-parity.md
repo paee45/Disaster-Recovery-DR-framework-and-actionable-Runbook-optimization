@@ -35,7 +35,7 @@ restore / `create-like` / `harden` / `validate` and by the local test bed). Exam
 | `DBInstanceClass` db.t4g.small · `MultiAZ` false | ✔ | converge if different | ✔ |
 | `VpcSecurityGroups` (3 SGs) | ✔ **all** SG ids | converge (sorted) | ✔ |
 | `DBSubnetGroup` (name; 3 subnets in 1a/1b/1b) | ✔ group **name** (the group carries its subnets) | — | ✔ name, VPC, subnet ids |
-| `DBParameterGroups` ev-postgres-17 | ✔ | converge; **reboot** if `pending-reboot` | ✔ incl. `in-sync` |
+| `DBParameterGroups` app-postgres-17 | ✔ | converge; **reboot** if `pending-reboot` | ✔ incl. `in-sync` |
 | `OptionGroupMemberships` default:postgres-17 | only if **custom** (default:* is automatic) | converge if custom | ✔ |
 | `Endpoint.Port` 5432 (`DbInstancePort` 0) | ✔ `Port` from the endpoint (0 is never sent) | — | ✔ |
 | `StorageType` gp3 · `AllocatedStorage` 20 | ✔ type; size = snapshot size (or larger baseline) | `MaxAllocatedStorage` | ✔ |
@@ -58,7 +58,7 @@ restore / `create-like` / `harden` / `validate` and by the local test bed). Exam
   Set `PRIMARY_STOPPED_OK=1` in `env/uat.env`: pre-flight then reports INFO instead of WARN, and `validate-pg` (needs the
   running source's `pg_settings`) reports **N/A**, not FAIL. AWS auto-starts a stopped instance after 7 days
   (`AutomaticRestartTime`) — to keep it stopped, it has to be stopped again after that (manually or by a scheduled stop).
-- **Managed by CloudFormation** (`aws:cloudformation:stack-name` ev-uat-eks, logical id UatRDSInstance): a restored
+- **Managed by CloudFormation** (`aws:cloudformation:stack-name` app-uat-eks, logical id UatRDSInstance): a restored
   instance is **outside the stack** → IaC adoption (§3) or the stack keeps pointing at the old instance; never let a stack
   update "fix" the drift by replacing resources during the event.
 - **No read replica** (`ReadReplicaDBInstanceIdentifiers: []`): S2 (promote replica) is not available in UAT today →
