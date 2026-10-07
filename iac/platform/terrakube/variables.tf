@@ -9,6 +9,10 @@ variable "region" {
   type    = string
   default = "ap-southeast-1"
 }
+variable "state_bucket" {
+  description = "The Terraform state bucket (iac/platform/state-bucket). Terrakube keeps its logs, outputs and binary cache there, and its runs write state there."
+  type        = string
+}
 variable "name" {
   type    = string
   default = "dr-platform"

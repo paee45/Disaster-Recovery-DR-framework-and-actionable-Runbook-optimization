@@ -19,7 +19,7 @@ x-terrakube_hosts: &terrakube_hosts
 #### Container Environment Variables #####
 
 x-api: &api_env
-  JAVA_TOOL_OPTIONS: "-Xms128m -Xmx384m -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC -Xss512k -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=32m"
+  JAVA_TOOL_OPTIONS: "-Xms128m -Xmx576m -XX:MaxMetaspaceSize=256m -XX:+UseSerialGC -Xss512k -XX:ReservedCodeCacheSize=64m -XX:MaxDirectMemorySize=32m"
   BPL_JVM_THREAD_COUNT: "50"
   ApiDataSourceType: POSTGRESQL
   DatasourceHostname: postgresql-service
@@ -35,11 +35,9 @@ x-api: &api_env
   InternalSecret: ${INTERNAL_SECRET}
   DexIssuerUri: https://terrakube-dex.${DOMAIN}/dex
   StorageType: AWS
-  AwsStorageAccessKey: $TK_OUTPUT_ACCESS_KEY
-  AwsStorageSecretKey: $TK_OUTPUT_SECRET_KEY
-  AwsStorageBucketName: $TK_OUTPUT_BUCKET_NAME
-  AwsStorageRegion: $TK_OUTPUT_STORAGE_REGION
-  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  AwsEnableRoleAuth: "true"
+  AwsStorageBucketName: ${TK_STATE_BUCKET}
+  AwsStorageRegion: ${TK_STATE_REGION}
   TerrakubeUiURL: https://terrakube.${DOMAIN}
   spring_profiles_active: demo
   DexClientId: terrakube-app
@@ -57,16 +55,15 @@ x-executor: &executor_env
   TerrakubeEnableSecurity: "true"
   InternalSecret: ${INTERNAL_SECRET}
   TerraformStateType: AwsTerraformStateImpl
-  AwsTerraformStateAccessKey: $TK_OUTPUT_ACCESS_KEY
-  AwsTerraformStateSecretKey: $TK_OUTPUT_SECRET_KEY
-  AwsTerraformStateBucketName: $TK_OUTPUT_BUCKET_NAME
-  AwsTerraformStateRegion: ${TK_OUTPUT_BUCKET_REGION}
-  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  # Real S3 via the instance role; the run's own backend (our TF_CLI_ARGS_init) picks bucket + key, so no static keys here.
+  AwsEnableRoleAuth: "true"
+  AwsIncludeBackendKeys: "false"
+  AwsEndpoint: https://s3.${TK_STATE_REGION}.amazonaws.com # the generated backend file needs a value here; empty leaves a literal ${AwsEndpoint}
+  AwsTerraformStateBucketName: ${TK_STATE_BUCKET}
+  AwsTerraformStateRegion: ${TK_STATE_REGION}
   TerraformOutputType: AwsTerraformOutputImpl
-  AwsTerraformOutputAccessKey: $TK_OUTPUT_ACCESS_KEY
-  AwsTerraformOutputSecretKey: $TK_OUTPUT_SECRET_KEY
-  AwsTerraformOutputBucketName: $TK_OUTPUT_BUCKET_NAME
-  AwsTerraformOutputRegion: ${TK_OUTPUT_BUCKET_REGION}
+  AwsTerraformOutputBucketName: ${TK_STATE_BUCKET}
+  AwsTerraformOutputRegion: ${TK_STATE_REGION}
   AzBuilderApiUrl: https://terrakube-api.${DOMAIN}
   ExecutorFlagBatch: "false"
   ExecutorFlagDisableAcknowledge: "false"
@@ -92,11 +89,9 @@ x-registry: &registry_env
   PatSecret: ${PAT_SECRET}
   InternalSecret: ${INTERNAL_SECRET}
   RegistryStorageType: AwsStorageImpl
-  AwsStorageAccessKey: $TK_OUTPUT_ACCESS_KEY
-  AwsStorageSecretKey: $TK_OUTPUT_SECRET_KEY
-  AwsStorageBucketName: $TK_OUTPUT_BUCKET_NAME
-  AwsStorageRegion: $TK_OUTPUT_STORAGE_REGION
-  AwsEndpoint: $TK_OUTPUT_ENDPOINT
+  AwsEnableRoleAuth: "true"
+  AwsStorageBucketName: ${TK_STATE_BUCKET}
+  AwsStorageRegion: ${TK_STATE_REGION}
   AppClientId: terrakube-app
   AppIssuerUri: https://terrakube-dex.${DOMAIN}/dex
   SERVICE_BINDING_ROOT: /mnt/platform/bindings
@@ -246,7 +241,7 @@ services:
     restart: unless-stopped
   terrakube-api:
     restart: unless-stopped
-    mem_limit: 1000m # 750m was OOM-killed every few minutes (heap 384m + metaspace 160m + threads + OTel agent)
+    mem_limit: 1200m # heap 384m and metaspace 160m both ran out (OutOfMemoryError, exit 3); 55k classes are loaded
     image: azbuilder/api-server:${TK_VERSION}
     container_name: terrakube-api
     environment:

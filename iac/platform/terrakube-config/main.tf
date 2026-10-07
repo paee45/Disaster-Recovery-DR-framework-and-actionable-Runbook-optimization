@@ -10,8 +10,27 @@ resource "terrakube_organization" "this" {
   execution_mode = "remote"
 }
 
+# Terrakube grants rights inside an organization only through a team named like the user's Dex group.
+resource "terrakube_team" "admin" {
+  organization_id = terrakube_organization.this.id
+  name            = var.approver_team
+  # Explicit flags: with role = "admin" alone Terrakube 2.33 stores every flag as false and the UI hides runs and templates.
+  role              = "custom"
+  manage_workspace  = true
+  manage_state      = true
+  manage_module     = true
+  manage_provider   = true
+  manage_vcs        = true
+  manage_template   = true
+  manage_collection = true
+  manage_job        = true
+  plan_job          = true
+  approve_job       = true
+}
+
 # Click-to-deploy: plan, wait for approval, apply.
 resource "terrakube_organization_template" "deploy" {
+  depends_on      = [terrakube_team.admin]
   organization_id = terrakube_organization.this.id
   name            = "deploy"
   description     = "Plan, approve, apply"
@@ -33,6 +52,7 @@ resource "terrakube_organization_template" "deploy" {
 
 # Click-to-destroy: plan the destroy, wait for approval, apply it.
 resource "terrakube_organization_template" "destroy" {
+  depends_on      = [terrakube_team.admin]
   organization_id = terrakube_organization.this.id
   name            = "destroy"
   description     = "Plan destroy, approve, apply"
@@ -89,6 +109,7 @@ locals {
 resource "terrakube_workspace_vcs" "this" {
   for_each = local.stacks
 
+  depends_on         = [terrakube_team.admin]
   organization_id    = terrakube_organization.this.id
   name               = each.key
   description        = "iac/lab/${each.value.component} (${each.value.env})"

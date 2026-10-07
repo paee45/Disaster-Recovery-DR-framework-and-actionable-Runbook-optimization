@@ -27,6 +27,7 @@ resource "aws_instance" "this" {
   user_data = templatefile("${path.module}/bootstrap.sh.tftpl", {
     region       = var.region
     bucket       = aws_s3_bucket.config.id
+    state_bucket = var.state_bucket
     param_prefix = "/${var.name}/terrakube"
     tk_version   = var.terrakube_version
     silo_version = var.silo_version
