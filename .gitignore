@@ -10,4 +10,5 @@ tests/aws/reports/
 *.tfplan
 *.tfvars
 !*.tfvars.example
+backend.hcl
 crash.log

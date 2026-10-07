@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
   required_providers {
     aws        = { source = "hashicorp/aws", version = "~> 6.0" }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.35" }
@@ -12,8 +12,13 @@ terraform {
 # Everything about the cluster/DB comes from the aws stack (apply that first). Separate stacks so the Kubernetes
 # provider is never configured before the cluster exists.
 data "terraform_remote_state" "aws" {
-  backend = "local"
-  config  = { path = "${path.module}/../aws/terraform.tfstate" }
+  backend = "s3"
+  config = {
+    bucket  = var.state_bucket
+    key     = var.state_key
+    region  = var.state_region
+    profile = var.state_profile == "" ? null : var.state_profile
+  }
 }
 
 locals {
