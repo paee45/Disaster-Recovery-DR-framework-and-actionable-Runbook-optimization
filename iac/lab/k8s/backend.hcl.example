@@ -1,9 +1,0 @@
-# cp backend.hcl.example backend.hcl, then: terraform init -backend-config=backend.hcl   (add -migrate-state the first time)
-# Bucket name = output "bucket" of iac/platform/state-bucket (it contains the account id, so backend.hcl is git-ignored).
-# Also set state_bucket in terraform.tfvars: this stack reads the lab-aws state from the same bucket.
-bucket       = "dr-tfstate-000000000000-ap-southeast-1"
-key          = "dr-framework/sandbox/lab-k8s/terraform.tfstate"
-region       = "ap-southeast-1"
-profile      = "pa_sandbox"
-encrypt      = true
-use_lockfile = true
