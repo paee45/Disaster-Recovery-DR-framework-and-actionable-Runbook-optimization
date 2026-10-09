@@ -151,7 +151,7 @@ source_of() {
 }
 
 harden() {
-  local db="$1" t e mod req roles tags arn
+  local db="$1" t e mod req roles tags arn warn
   t="$(describe "$db")"; e="$(expected_json)"
   # Modify request: only attributes that differ from the expected baseline (converge, don't churn).
   mod="$(jq -S --argjson t "$t" --arg db "$db" "$JQLIB"' harden_req($t; $db)' <<<"$e")"
@@ -159,6 +159,13 @@ harden() {
   if [[ "$mod" == "{}" ]]; then echo "harden: no setting differs from the baseline"
   else
     echo "harden: modify request (only differing settings) → $req"; jq . "$req"
+    # The baseline is the live source as captured now; where the snapshot disagrees, the baseline wins and the change is logged.
+    warn="$(jq -r --argjson t "$t" 'to_entries[] | select(.key | IN("DBInstanceIdentifier", "ApplyImmediately") | not)
+        | "  \(.key): restored instance \($t[.key] // "(see request)" | tojson)  →  baseline \(.value | tojson)"' <<<"$mod")"
+    { echo "WARN harden: $(grep -c . <<<"$warn") setting(s) of $db differ from the CURRENT baseline of ${SOURCE_DB:-$PRIMARY_DB}"
+      echo "     (changed on the source after the snapshot was taken, or not carried by the restore); the baseline is applied:"
+      echo "$warn"; } | tee "$OUT/harden-diff-${db}.txt"
+    [[ -n "${DR_TIMELINE:-}" ]] && dr_mark HARDEN_DIFF "$(jq -c 'keys - ["DBInstanceIdentifier", "ApplyImmediately"]' <<<"$mod") applied from the current baseline" || true
     [[ "${DRY_RUN:-0}" == "1" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds modify-db-instance --cli-input-json "file://$req" --query 'DBInstance.PendingModifiedValues' --output json
   fi
   # IAM roles (S3 import/export, Lambda, …) — not carried by a restore
@@ -174,6 +181,7 @@ harden() {
   tags="$(jq -c --argjson have "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$arn" --query TagList --output json)" "$JQLIB"'
            (.tags | userTags) - $have' "$BASE")"
   if [[ "$tags" != "[]" ]]; then
+    echo "WARN harden: tags missing on $db compared with the current baseline, added: $(jq -c 'map(.Key)' <<<"$tags")"
     echo "+ add-tags-to-resource $(jq -c 'map(.Key)' <<<"$tags")"
     [[ "${DRY_RUN:-0}" == "1" ]] || aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds add-tags-to-resource --resource-name "$arn" --tags "$tags"
   fi

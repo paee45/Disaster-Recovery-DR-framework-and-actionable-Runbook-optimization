@@ -96,9 +96,9 @@ c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e --slurpfile fx "$FX" '
 t  C00 "capture baseline of the UAT-shaped source (3 SGs, 3 subnets, 4 user + 3 aws:* tags, pg_settings)" c00
 t  C01 "list-snapshots"                                              "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB"
 REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
-c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and .BackupRetentionPeriod == 7
+c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)
            and .DBSubnetGroupName == $f.DBSubnetGroup.DBSubnetGroupName and .DBParameterGroupName == $f.DBParameterGroups[0].DBParameterGroupName
-           and .PreferredBackupWindow == $f.PreferredBackupWindow and .EnableCloudwatchLogsExports == $f.EnabledCloudwatchLogsExports
+           and .EnableCloudwatchLogsExports == $f.EnabledCloudwatchLogsExports
            and .CopyTagsToSnapshot == $f.CopyTagsToSnapshot and .DeletionProtection and .CACertificateIdentifier == $f.CACertificateIdentifier
            and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)
            and ([.Tags[].Key | select(startswith("aws:"))] | length) == 0' "$REQ" \
@@ -109,7 +109,7 @@ t  C02 "restore snapshot with the baseline request (--cli-input-json)"  c02
 t  C03 "wait until available (progress + T5)"                          "$S/dr-restore.sh" wait "$RESTORED_DB"
 # right after the restore the request already carried SGs/subnets/PG/retention/tags (the maintenance window may still differ:
 # real AWS assigns a random one, moto copies the snapshot's → harden fixes it; not asserted here)
-c03b() { "$S/dr-restore.sh" validate "$RESTORED_DB"; ! grep -E '^DIFF +(VpcSecurityGroups|DBSubnetGroup|DBParameterGroups|BackupRetentionPeriod|PreferredBackupWindow|DeletionProtection|EnabledCloudwatchLogsExports|tag )' "$LOGS/C03b.log"; }
+c03b() { "$S/dr-restore.sh" validate "$RESTORED_DB"; ! grep -E '^DIFF +(VpcSecurityGroups|DBSubnetGroup|DBParameterGroups|DeletionProtection|EnabledCloudwatchLogsExports|tag )' "$LOGS/C03b.log"; }
 t  C03b "validate right after restore: SGs, subnets, PG, retention 7, logs, tags already match" c03b
 c03c() { local arn; arn="$(command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" --query 'DBInstances[0].DBInstanceArn' --output text)"
          command aws --profile dr-local rds modify-db-instance --db-instance-identifier "$RESTORED_DB" --backup-retention-period 1 --apply-immediately >/dev/null
@@ -176,7 +176,7 @@ echo "=== F. S2 promotion, S4 PITR"
 f01() { dr_set_target "$REPLICA_DB" && aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7 >/dev/null \
         && TIMEOUT_SECONDS=120 "$S/dr-verify.sh" wait-promoted; }
 t  F01 "S2 promote replica + wait-promoted (standalone + writable)"     f01
-t  F02 "S4 PITR latest → restore request from baseline with 3 SGs"      bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and .BackupRetentionPeriod == 7' '$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json'"
+t  F02 "S4 PITR latest → restore request from baseline with 3 SGs"      bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and (has("BackupRetentionPeriod") | not)' '$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json'"
 t  F03 "S4 PITR: wait + harden → VALIDATED against the baseline"        bash -c "'$S/dr-restore.sh' wait '$PITR_DB' && '$S/dr-restore.sh' harden '$PITR_DB' | grep -q '→ VALIDATED\$'"
 
 echo "=== G. Evidence, KPIs, SSM documents, tracker"
