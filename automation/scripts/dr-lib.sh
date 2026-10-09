@@ -185,7 +185,7 @@ dr_guard() {
     _dr_die "kubeconfig $kcfg has current-context '$(command kubectl config current-context)' — fix: kubectl config unset current-context (or DR_ALLOW_CURRENT_CONTEXT=1)"; return 1; fi
   other="$(command kubectl config get-contexts -o name 2>/dev/null | grep -E '^dr-(dev|uat|prod|local)$' | grep -vx "$EKS_CONTEXT" | tr '\n' ' ' || true)"
   if [[ -n "$other" && "${DR_ALLOW_FOREIGN_CONTEXTS:-0}" != 1 ]]; then
-    _dr_die "kubeconfig $kcfg (env $DR_ENV) also holds context(s) of other environments: $other— use one kubeconfig per env"; return 1; fi
+    _dr_die "kubeconfig $kcfg (env $DR_ENV) also holds context(s) of other environments: ${other}— use one kubeconfig per env"; return 1; fi
   export DR_GUARD_OK="$key"
   echo "GUARD OK: env=$DR_ENV account=$acct caller=$arn auth=$at$([[ $at == key ]] && echo ' (long-lived static key: rotate regularly, prefer SSO)') region=$AWS_REGION context=$EKS_CONTEXT ($server)" >&2
 }

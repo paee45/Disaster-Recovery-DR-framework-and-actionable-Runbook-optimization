@@ -41,6 +41,7 @@ inventory() {
 }
 
 snapshot_generations() {
+  [[ "${KEEP_GENERATIONS:-0}" == 1 && -s "$OUT/generations-${SECRET}.tsv" ]] && { echo "keeping the generation snapshot from the first attempt (retry)"; return 0; }
   consumers | grep -v '^cronjob/' | while IFS=$'\t' read -r obj _ _; do
     printf '%s\t%s\n' "$obj" "$($K get "$obj" -o jsonpath='{.metadata.generation}')"
   done > "$OUT/generations-${SECRET}.tsv"
@@ -70,7 +71,7 @@ wait_rollouts() {
         deadline=$(( $(date +%s) + RELOADER_GRACE_S ))
         while :; do
           now="$($K get "$obj" -o jsonpath='{.metadata.generation}')"
-          (( now > before )) && { echo "$obj: RELOADED by Reloader (generation $before→$now)" | tee -a "$report"; break; }
+          (( now > before )) && { echo "$obj: RELOADED by Reloader (generation ${before}→${now})" | tee -a "$report"; break; }
           if (( $(date +%s) > deadline )); then
             echo "$obj: RELOADER FAILED (no restart after ${RELOADER_GRACE_S}s) → manual rollout restart" | tee -a "$report"
             $K rollout restart "$obj"; break

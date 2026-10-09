@@ -98,8 +98,10 @@ wait_k8s_secret_host() { # every key in K8S_HOST_KEY must hold the new host
 }
 
 apply_k8s() {
-  local id="${CUTOVER_ID:-$DR_ID}"
-  "$HERE/dr-eks-rollout.sh" snapshot-generations "$K8S_SECRET"
+  local id="${CUTOVER_ID:-$DR_ID}" cur keep=0
+  cur="$($K get secret "$K8S_SECRET" -o json | jq -r --arg k "${K8S_HOST_KEY%%,*}" '.data[$k] // "" | @base64d')"
+  [[ "$cur" == "$NEW_HOST" ]] && keep=1   # retry after a partial run: the first snapshot holds the real 'before' values
+  KEEP_GENERATIONS=$keep "$HERE/dr-eks-rollout.sh" snapshot-generations "$K8S_SECRET"
   "${EP[@]}" set --host "$NEW_HOST" ${K8S_PORT_KEY:+--port "${NEW_PORT:-5432}"} --db-id "$TARGET_DB" --from-db-id "${OLD_DB:-}" --id "$id" \
     | tee "$DR_EVIDENCE_DIR/k8s/endpoint-change-${id}.txt"
   dr_mark "SECRET_UPDATED:${K8S_NS}/${K8S_SECRET}" "id=${id} keys=${K8S_HOST_KEY} host=${NEW_HOST} db=${TARGET_DB}"
