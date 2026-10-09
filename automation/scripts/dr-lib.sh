@@ -234,6 +234,13 @@ dr_mark() {
   echo "[timeline] ${at:-$(_dr_now)} ${marker} ${note}"
 }
 
+# dr_mark_once <marker> [note…] — the KPIs read this marker: a retry or a later wait must not move it.
+dr_mark_once() {
+  if jq -es --arg m "$1" 'any(.[]; .marker == $m)' "${DR_TIMELINE:?run dr_init first}" 2>/dev/null | grep -Fx true >/dev/null; then
+    echo "[timeline] $1 already marked — first time kept"
+  else dr_mark "$@"; fi
+}
+
 # dr_run <name> <cmd...> — run a command, tee output into evidence, mark start/end + exit code.
 dr_run() {
   local name="$1"; shift
@@ -321,8 +328,9 @@ dr_phase() {
 }
 
 # dr_redact <file> — mask secrets in a text log in place (passwords, tokens, secret strings, PG/AWS keys)
+# LC_ALL=C: byte-wise, so a log line with a cut-off multi-byte character cannot make BSD sed stop and leave the file unredacted.
 dr_redact() {
-  sed -E -i.bak \
+  LC_ALL=C sed -E -i.bak \
     -e 's/("(password|Password|SecretString|secret|token|SessionToken|SecretAccessKey)"[[:space:]]*:[[:space:]]*")[^"]*"/\1***"/g' \
     -e 's/([A-Za-z_]*(PASS|SECRET|TOKEN|ACCESS_KEY)[A-Za-z_]*=).*$/\1*** (rest of line redacted)/I' \
     -e 's/(--(secret-string|master-user-password|password|token)[ =]).*$/\1*** (rest of line redacted)/' \

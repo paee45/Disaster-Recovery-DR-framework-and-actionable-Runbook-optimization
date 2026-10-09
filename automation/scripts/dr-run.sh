@@ -399,10 +399,11 @@ phase_start() { local var="DR_PHASE_START_${1//[^A-Za-z0-9]/_}"; [[ -n "${!var:-
 phase_end()   { local done_var="DR_PHASE_ENDED_${1//[^A-Za-z0-9]/_}"; [[ -n "${!done_var:-}" ]] && return 0
                 dr_phase end "$@"; printf -v "$done_var" 1; }
 run_fn() { # id fn kind → rc; live output + steps/<id>.log
-  local id="$1" fn="$2" kind="$3" log="$RUNDIR/steps/$1.log" rc
+  local id="$1" fn="$2" kind="$3" log="$RUNDIR/steps/$1.log" rc t_in=$SECONDS
   if [[ "$kind" =~ ^(input|gate|manual)$ ]]; then
     # main shell (it sets variables); prompts go straight to the terminal, the output is indented like the others
     "$fn" > >(tee -a "$log" | sed -u 's/^/   │ /') 2>&1; rc=$?; wait $! 2>/dev/null
+    dr_mark HUMAN_WAIT "step=$id secs=$(( SECONDS - t_in ))" >/dev/null   # the KPI report shows how much of the RTO was the operator
   elif (( QUIET )); then
     ( [[ "$kind" == change && "$DR_ENV" == prod ]] && export DR_ASSUME_YES=1; "$fn" ) >> "$log" 2>&1; rc=$?
   else

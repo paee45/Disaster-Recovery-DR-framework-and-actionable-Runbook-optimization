@@ -140,7 +140,7 @@ wait_available() {
     if [[ "$st" == not-found ]]; then miss=$((miss+1)); (( miss < ${WAIT_NOTFOUND_MAX:-10} )) || { echo "FAIL $db does not exist (did the restore call fail?)"; return 1; }; fi
     sleep "${WAIT_POLL_S:-30}"
   done
-  [[ -n "${DR_TIMELINE:-}" ]] && dr_mark T5 "$db available after $(( (now-start)/60 ))m$(( (now-start)%60 ))s" || true
+  [[ -n "${DR_TIMELINE:-}" ]] && dr_mark_once T5 "$db available after $(( (now-start)/60 ))m$(( (now-start)%60 ))s" || true
 }
 
 # baseline source of a restored instance: its dr-restored-from tag ("<db>" or "<db>@<snapshot|ts>"), else SOURCE_DB/PRIMARY_DB

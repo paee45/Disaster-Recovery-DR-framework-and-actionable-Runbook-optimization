@@ -42,6 +42,19 @@ def minutes(a, b):
     return round((b - a).total_seconds() / 60, 2) if a and b else None
 
 
+def operator_wait_min(path: Path, t0, t9):
+    """Minutes spent at prompts and gates between T0 and T9 (HUMAN_WAIT markers written by dr-run.sh)."""
+    secs = 0
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        m = re.search(r"secs=(\d+)", ev.get("note", ""))
+        if ev["marker"] == "HUMAN_WAIT" and m and t0 and t9 and t0 <= parse_ts(ev["ts"]) <= t9:
+            secs += int(m.group(1))
+    return round(secs / 60, 2)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("timeline", type=Path)
@@ -79,6 +92,7 @@ def main() -> int:
         "db_recovery_min": minutes(t.get("T4"), t.get("T5")),
         "app_recovery_min": minutes(t.get("T5"), t.get("T9")),
         "execution_min": minutes(t.get("T2"), t.get("T10")),
+        "operator_wait_min": operator_wait_min(args.timeline, t.get("T0"), t.get("T9")),
         "rpo_actual_s": max(rpo_s, 0.0) if rpo_s is not None else None,
         "rpo_method": rpo_method,
         "scenario": next(iter(mk.values())).get("scenario") if mk else None,
@@ -97,6 +111,7 @@ def main() -> int:
           f"| Decision (T2-T1) | {report['decision_min']} min | 15 min | |",
           f"| DB recovery: promote/restore (T5-T4) | {report['db_recovery_min']} min | | |",
           f"| App recovery (T9-T5) | {report['app_recovery_min']} min | | |",
+          f"| Of the RTO: waiting at prompts and gates (manual steps) | {report['operator_wait_min']} min | | |",
           f"| Missing markers | {', '.join(report['missing_markers']) or 'none'} | none | |"]
 
     print(json.dumps(report, indent=2))
