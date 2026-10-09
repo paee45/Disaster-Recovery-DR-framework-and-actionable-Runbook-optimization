@@ -1,6 +1,6 @@
 # Terrakube docker-compose, adapted from terrakube-io/terrakube tag 2.33.2 (Apache-2.0, docker-compose/).
-# Changes for the DR platform EC2 (iac/platform/terrakube): pinned images (Traefik v2.11; MinIO → pgsty/silo, the
-# minio/minio images were withdrawn), restart policies, memory limits + JVM heap caps for a 2 GB instance + swap.
+# Changes for the DR platform EC2 (iac/platform/terrakube): pinned images (Traefik v2.11), storage on real S3 instead of
+# MinIO, restart policies, memory limits + JVM heap caps.
 
 ### DNS ####
 
@@ -104,10 +104,6 @@ x-ldap: &ldap_env
   # Keep bootstrap config so osixia skips the post-setup rm, which fails on the
   # single-file LDIF bind mount ("Device or resource busy").
   LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
-
-x-minio: &minio_env
-  MINIO_ROOT_USER: ${TK_OUTPUT_ACCESS_KEY}
-  MINIO_ROOT_PASSWORD: ${TK_OUTPUT_SECRET_KEY}
 
 x-ui: &ui_env
   REACT_APP_TERRAKUBE_API_URL: https://terrakube-api.${DOMAIN}/api/v1/
@@ -308,21 +304,6 @@ services:
     environment: *ldap_env
     volumes:
       - ./ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom
-  minio:
-    restart: unless-stopped
-    mem_limit: 256m
-    container_name: terrakube-minio
-    image: pgsty/silo:${TK_MINIO_VERSION}
-    command: server /data --console-address ":9001"
-    environment: *minio_env
-    volumes:
-      - 'minio_data:/data'
-  minio-init:
-    image: pgsty/silo:${TK_MINIO_VERSION}
-    container_name: terrakube-minio-init
-    depends_on:
-      - minio
-    entrypoint: ["/bin/sh","-c","until /usr/bin/mc alias set tk http://minio:9000 ${TK_OUTPUT_ACCESS_KEY} ${TK_OUTPUT_SECRET_KEY}; do echo 'waiting for minio'; sleep 2; done; /usr/bin/mc mb --ignore-existing tk/${TK_OUTPUT_BUCKET_NAME}; exit 0;"]
   redis-service:
     restart: unless-stopped
     mem_limit: 64m
@@ -353,7 +334,6 @@ services:
     volumes:
       - postgresql_data:/var/lib/postgresql/data
 volumes:
-  minio_data:
   redis_data:
   postgresql_data:
     driver: local

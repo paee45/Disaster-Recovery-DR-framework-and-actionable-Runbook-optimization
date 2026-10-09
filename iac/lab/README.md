@@ -43,7 +43,22 @@ cd ~/dr-framework && source env/uat.env && tests/aws/sandbox-test.sh readonly
 If your IP changes, run `./tf.sh lab/db uat apply` again (it takes the new IP automatically).
 
 ## Destroy (in this order)
-Restores made by the DR scripts are **not** in Terraform state and block the subnet group / SGs — delete them first:
+**All at once:** `iac/lab/destroy-all.sh` removes what is deployed in the order below. It skips stacks with nothing in their
+state, saves a destroy plan per stack, shows what goes and asks before applying that file (type `prod` for prod). It keeps
+a shared stack while something that needs it is still deployed, and never touches `platform/*`.
+```bash
+iac/lab/destroy-all.sh --plan-only                 # look only: destroy plan of every deployed stack, nothing applied
+iac/lab/destroy-all.sh                             # dev + uat, then cluster and network if nothing else uses them
+iac/lab/destroy-all.sh --env uat --keep-shared     # only lab/app + lab/db of uat
+iac/lab/destroy-all.sh --env prod                  # prod only when named
+```
+It is idempotent: if one stack fails, fix it and run it again. The DB has `skip_final_snapshot = true`: **its data is gone**.
+To save money without losing data, pause instead (`./tf.sh lab/db uat stop`, `./tf.sh lab/eks apply -var node_desired_size=0`).
+
+**By hand**, one stack at a time (same order; in the Terrakube UI use the `destroy` template of each workspace):
+
+Restores made by the DR scripts are **not** in Terraform state and block the subnet group / SGs — delete them first
+(the script offers this):
 ```bash
 cd ~/dr-framework && source env/uat.env
 for db in $(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances \

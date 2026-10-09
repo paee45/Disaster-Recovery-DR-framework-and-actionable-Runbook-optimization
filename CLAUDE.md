@@ -71,15 +71,15 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
   zsh: paste blocks without inline `#` comments (or `setopt interactivecomments`).
-- **Done (2026-10-07):** state bucket created; its state and Terrakube's state moved to S3; lab split into network / eks /
-  addons / db / app (all `terraform validate`, none applied); Terrakube EC2 rebuilt with the boot fix
-  (`terrakube-recreate.service`; Paketo Java containers crash-loop on a plain restart); `platform/terrakube-config`
-  written (org, deploy/destroy templates, one workspace per lab stack), not applied.
-- **Open question:** Terrakube docs do not say whether a run keeps `backend "s3"` from the code. Test with the
-  `lab-network` workspace (S3 object at `lab/shared/network/terraform.tfstate`, `tf.sh lab/network plan` = no changes);
-  fallback = Terrakube storage backend on S3 and Terrakube as the only runner.
-- **Next:** wait for the new Terrakube boot, tunnel + login, API token into `iac/sandbox.env`, apply `terrakube-config`;
-  in parallel the DR test path from the Mac: `lab/network` → `lab/db uat` (DB first, cheapest) →
-  `source env/uat.env`-style checks, later `lab/eks` → `lab/addons` → `lab/app uat`, then
-  `tests/aws/sandbox-test.sh readonly`, `automation/scripts/dr-run.sh S3 --dry-run`, then `--to P2-S05`.
+- **Done (2026-10-09):** Terrakube runs on `t4g.medium` (resized in place; `user_data` is ignored so the instance and its
+  Postgres are never replaced by accident), MinIO removed, storage on the real S3 bucket with the instance role. Terrakube
+  replaces the code's `backend "s3"`, so state sharing relies on `TF_CLI_ARGS_init` (set in `terrakube-config`): UI and
+  `tf.sh` use the same S3 key (proved with `lab-network`). Built in the sandbox: `lab/network`, `lab/db uat`, `lab/eks`
+  (cluster `dr-lab-eks`, SSO admin access entry with the full SSO role ARN), `env/uat.env` from `dr-env-discover.sh`.
+  `iac/lab/destroy-all.sh` = ordered, confirmed destroy of what is deployed.
+- **Gotchas:** operator IP changes -> re-apply `lab/db <env>` and `terrakube-config` (`operator_cidr`). The EKS creator is the
+  only admin, so a cluster built from the UI needs the SSO access entry (in `eks.tf`). kubeconfig files are written where
+  the apply runs: after a UI apply of `lab-eks`, run `tf.sh lab/eks plan/apply` on the Mac for the 3 local files.
+- **Next:** `lab/addons` (UI or Mac), `lab/app uat`, then fill the empty `env/uat.env` keys with `dr-env-discover.sh uat --cluster
+  dr-lab-eks`, `tests/aws/sandbox-test.sh readonly`, `dr-run.sh S3 --dry-run`, then `--to P2-S05`. Destroy/pause after the session.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

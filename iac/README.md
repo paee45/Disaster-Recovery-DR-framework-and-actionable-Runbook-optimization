@@ -115,7 +115,8 @@ Always **plan to a file, read it, then apply that file**.
 | Terrakube EC2 | `./tf.sh platform/terrakube apply -var running=false` (`true` to start) | ~2.4 USD/month disk |
 
 **Destroy order:** `lab/app` → `lab/db` (first delete restores made by the DR scripts; they are not in Terraform and
-block the subnet group, see [lab/README.md](lab/README.md)) → `lab/addons` → `lab/eks` → `lab/network`. Never destroy
+block the subnet group, see [lab/README.md](lab/README.md)) → `lab/addons` → `lab/eks` → `lab/network`. `iac/lab/destroy-all.sh`
+does this for everything that is deployed, one confirmed plan per stack. Never destroy
 `platform/state-bucket` while any stack still keeps state in it (it has `prevent_destroy`).
 
 ## Rules

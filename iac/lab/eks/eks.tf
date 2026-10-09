@@ -40,6 +40,27 @@ resource "aws_eks_cluster" "this" {
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]
 }
 
+# Whoever creates the cluster (the Terrakube instance role from the UI, or the SSO role from the Mac) is its only admin;
+# the SSO admin role gets access explicitly so kubectl from the Mac works whichever one ran the apply.
+data "aws_iam_roles" "sso_admin" {
+  name_regex  = "^AWSReservedSSO_AdministratorAccess_"
+  path_prefix = "/aws-reserved/sso.amazonaws.com/"
+}
+
+resource "aws_eks_access_entry" "sso_admin" {
+  for_each      = toset(data.aws_iam_roles.sso_admin.arns)
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value # the real role ARN, including the SSO path (EKS rejects the stripped form)
+}
+
+resource "aws_eks_access_policy_association" "sso_admin" {
+  for_each      = aws_eks_access_entry.sso_admin
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value.principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope { type = "cluster" }
+}
+
 resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${var.name}-ng"

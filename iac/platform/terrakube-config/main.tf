@@ -112,7 +112,7 @@ resource "terrakube_workspace_vcs" "this" {
   depends_on         = [terrakube_team.admin]
   organization_id    = terrakube_organization.this.id
   name               = each.key
-  description        = "iac/lab/${each.value.component} (${each.value.env})"
+  description        = "iac/lab/${each.value.component} (${each.value.env}). Destroy order: app, db, addons, eks, network."
   execution_mode     = "remote"
   repository         = var.repository
   branch             = var.branch
@@ -141,6 +141,9 @@ resource "terrakube_workspace_variable" "state" {
     "-backend-config=region=${var.region}",
     "-backend-config=encrypt=true",
     "-backend-config=use_lockfile=true",
+    # Terrakube's generated backend file hard-codes these for MinIO; real S3 with the instance role needs them off.
+    "-backend-config=skip_metadata_api_check=false",
+    "-backend-config=use_path_style=false",
   ])
 }
 

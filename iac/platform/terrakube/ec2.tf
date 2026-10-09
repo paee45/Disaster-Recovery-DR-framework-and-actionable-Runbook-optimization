@@ -30,17 +30,17 @@ resource "aws_instance" "this" {
     state_bucket = var.state_bucket
     param_prefix = "/${var.name}/terrakube"
     tk_version   = var.terrakube_version
-    silo_version = var.silo_version
     swap_gb      = var.swap_gb
     config_hash  = sha1(join("", [for o in aws_s3_object.compose : o.etag]))
   })
-  user_data_replace_on_change = true # changed compose/ or versions → a fresh instance (Terrakube data lives on it: export first)
 
   tags = { Name = "${var.name}-terrakube" }
 
   depends_on = [aws_ssm_parameter.this, aws_s3_object.compose, aws_iam_role_policy.boot]
 
-  lifecycle { ignore_changes = [ami] } # a newer AMI must not replace the running instance
+  # Terrakube's database lives on this disk: a new AMI or boot script must not replace the instance (resize and compose
+  # changes are applied in place; for a deliberate rebuild use `apply -replace=aws_instance.this`, export first).
+  lifecycle { ignore_changes = [ami, user_data] }
 }
 
 resource "aws_ec2_instance_state" "this" {

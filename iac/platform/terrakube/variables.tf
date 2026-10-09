@@ -18,9 +18,9 @@ variable "name" {
   default = "dr-platform"
 }
 variable "instance_type" {
-  description = "t4g.small (2 GB) works only with the memory caps + swap in compose/; t4g.medium (4 GB) is comfortable. Graviton (t4g/*g) → arm64 AMI, others → x86_64."
+  description = "t4g.small (2 GB) works only with the memory caps + swap in compose/; t4g.medium (4 GB) is comfortable. Graviton (t4g/*g) → arm64 AMI, others → x86_64. Changing it stops and starts the instance (data kept)."
   type        = string
-  default     = "t4g.small"
+  default     = "t4g.medium"
 }
 variable "swap_gb" {
   type    = number
@@ -34,11 +34,6 @@ variable "terrakube_version" {
   description = "Image tag of azbuilder/* (compose/ is adapted from the same release)."
   type        = string
   default     = "2.33.2"
-}
-variable "silo_version" {
-  description = "pgsty/silo (MinIO-compatible storage) image tag."
-  type        = string
-  default     = "RELEASE.2026-09-16T00-00-00Z"
 }
 variable "tls_dir" {
   description = "Folder with cert.pem, key.pem, rootCA.pem made by mkcert on your Mac (see README)."

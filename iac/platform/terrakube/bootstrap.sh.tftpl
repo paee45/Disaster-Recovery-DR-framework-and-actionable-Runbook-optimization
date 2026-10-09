@@ -35,8 +35,6 @@ if [ ! -s secrets.env ]; then
   cat > secrets.env <<SECRETS
 PAT_SECRET=$(b64)
 INTERNAL_SECRET=$(b64)
-TK_OUTPUT_ACCESS_KEY=tk$(openssl rand -hex 8)
-TK_OUTPUT_SECRET_KEY=$(openssl rand -hex 20)
 TK_POSTGRESQL_PASSWORD=$(openssl rand -hex 16)
 TK_REDIS_PASSWORD=$(openssl rand -hex 16)
 SECRETS
@@ -54,11 +52,6 @@ DNS_IP_PUBLIC=
 TK_DEX_VERSION=v2.42.0
 TK_LDAP_VERSION=1.5.0
 TK_LDAP_ADMIN_PASSWORD=$LDAP_PW
-TK_MINIO_VERSION=${silo_version}
-TK_OUTPUT_ENDPOINT=http://terrakube-minio:9000
-TK_OUTPUT_STORAGE_REGION=us-east-1
-TK_OUTPUT_BUCKET_NAME=terrakube
-TK_OUTPUT_BUCKET_REGION=us-east-1
 TK_STATE_BUCKET=${state_bucket}
 TK_STATE_REGION=${region}
 TK_POSTGRESQL_VERSION=17
