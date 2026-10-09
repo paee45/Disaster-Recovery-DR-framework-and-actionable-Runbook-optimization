@@ -49,7 +49,7 @@ capture() { # <source-db> → prints the file path
   tags="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$arn" --query TagList --output json 2>/dev/null || jq -c '.TagList // []' <<<"$inst")"
   if dsn="$(dr_dsn "$src" 2>/dev/null)" && [[ -n "$dsn" ]]; then     # pg_settings as the DB actually runs them (best effort)
     pg="$(psql "$dsn" -XAtq -F$'\t' -c 'select name, setting from pg_settings order by 1' 2>/dev/null \
-          | jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries' 2>/dev/null || echo '{}')"
+          | jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries' 2>/dev/null)" || pg="{}"   # a failed psql must not leave two JSON values
   fi
   f="$BASELINE_DIR/baseline-${src}-${ts}.json"
   jq -n --argjson i "$inst" --argjson t "$tags" --argjson pg "$pg" --arg src "$src" --arg env "$DR_ENV" \

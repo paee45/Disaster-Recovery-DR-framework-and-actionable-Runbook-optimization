@@ -73,6 +73,8 @@ Mock limitations (documented, not hidden): moto keeps the replica link after pro
 ### Running on macOS
 - **The DR scripts themselves** (real AWS from a Mac) work with the Homebrew tools: `brew install bash coreutils jq libpq awscli kubectl helm`.
   `dr-lib.sh` puts GNU coreutils/libpq on `PATH` automatically and stops with a clear error if bash < 4 or GNU `date` is missing.
+  The DB connections use TLS `verify-full`, so download the RDS CA bundle once:
+  `mkdir -p ~/.postgresql && curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o ~/.postgresql/global-bundle.pem`.
 - **The local test bed (`up.sh`)** needs a Linux Docker host: it runs k3s with `--network host`, talks to container IPs
   (172.30.0.x) from the host and adds iptables rules — none of that exists on the Mac side of Docker Desktop.
   Run it inside a Linux VM on the Mac (same scripts, no changes), e.g.:
