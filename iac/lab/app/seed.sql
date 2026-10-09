@@ -4,6 +4,8 @@ SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') AS need_ro
 CREATE ROLE app_user LOGIN;
 \endif
 ALTER ROLE app_user PASSWORD :'pw';
+-- Postgres 16+: the creating role gets ADMIN only; OWNER app_user needs SET (re-running is harmless).
+GRANT app_user TO CURRENT_USER WITH INHERIT TRUE, SET TRUE;
 SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'app') AS need_db \gset
 \if :need_db
 CREATE DATABASE app OWNER app_user;

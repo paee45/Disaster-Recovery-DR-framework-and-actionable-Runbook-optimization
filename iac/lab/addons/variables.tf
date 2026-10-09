@@ -20,9 +20,9 @@ variable "state_bucket" {
   type        = string
 }
 variable "reloader_chart_version" {
-  description = "Pin the Stakater Reloader chart (empty = latest; pin it once tested)."
+  description = "Stakater Reloader chart version (empty = latest). 2.2.18 was deployed and tested in the lab."
   type        = string
-  default     = ""
+  default     = "2.2.18"
 }
 variable "identity_env" {
   description = "The ONE env this shared cluster identifies as (kube-system/dr-cluster-identity). Other envs on it use REQUIRE_CLUSTER_IDENTITY=false."
