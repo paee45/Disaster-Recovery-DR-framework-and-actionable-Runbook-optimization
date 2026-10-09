@@ -4,6 +4,7 @@ locals {
 }
 
 resource "local_file" "env" {
+  count           = var.write_env_file ? 1 : 0
   filename        = abspath(local.env_file)
   file_permission = "0600"
   content = templatefile("${path.module}/env.tftpl", {
@@ -26,6 +27,6 @@ resource "local_file" "env" {
   })
 }
 
-output "env_file" { value = local_file.env.filename }
+output "env_file" { value = one(local_file.env[*].filename) }
 output "snapshot_id" { value = aws_db_snapshot.seed.db_snapshot_identifier }
-output "next" { value = "source ${local_file.env.filename} && tests/aws/sandbox-test.sh readonly" }
+output "next" { value = "source ${local.env_file} && tests/aws/sandbox-test.sh readonly   (env file: written by iac/tf.sh on the Mac; elsewhere run automation/scripts/dr-env-discover.sh ${var.env})" }

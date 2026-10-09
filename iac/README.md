@@ -103,7 +103,7 @@ Always **plan to a file, read it, then apply that file**.
 | 3 | `./tf.sh lab/eks …` | ~15 min. EKS control plane costs ~0.10 USD/h. |
 | 4 | `./tf.sh lab/addons …` | Reloader + cluster identity. |
 | 5 | `./tf.sh lab/db uat …` | RDS, from the UAT fixture. |
-| 6 | `./tf.sh lab/app uat …` | Secret, seed, sample apps, snapshot, **writes `env/uat.env`**. |
+| 6 | `./tf.sh lab/app uat …` | Secret, seed, sample apps, snapshot, **writes `env/uat.env`** (only when applied from the Mac with `tf.sh`; a Terrakube run skips it, so afterwards run `./tf.sh lab/app uat apply` once on the Mac for the file). |
 | 7 | `source env/uat.env && tests/aws/sandbox-test.sh readonly` | Then `full`. See [tests/README.md](../tests/README.md). |
 
 ## Saving money

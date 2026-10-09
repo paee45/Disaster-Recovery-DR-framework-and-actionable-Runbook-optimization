@@ -42,6 +42,11 @@ variable "cluster_identity_env" {
   type        = string
   default     = "uat"
 }
+variable "write_env_file" {
+  description = "Write the DR env profile to the repo. iac/tf.sh sets it on the Mac; false in Terrakube, where the file would land in a throw-away executor folder."
+  type        = bool
+  default     = false
+}
 variable "env_file" {
   description = "Where to write the DR env profile (git-ignored). Empty = env/<env>.env in the repo."
   type        = string

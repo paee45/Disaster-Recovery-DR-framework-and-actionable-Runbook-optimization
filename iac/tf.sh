@@ -227,6 +227,8 @@ EOF
 fi
 
 # ── Inputs computed per run ───────────────────────────────────────────────────────────────────────────
+# lab/app writes env/<env>.env into this repo (only meaningful on the Mac, never inside Terrakube).
+if [[ "$stack" == lab/app ]]; then export TF_VAR_write_env_file="${TF_VAR_write_env_file:-true}"; fi
 # Postgres is reachable from outside the VPC only from this /32: use your current public IP unless set.
 if [[ "$stack" =~ ^(lab/db|platform/terrakube-config)$ && -z "${TF_VAR_operator_cidr:-}" ]]; then
   ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')" || die "cannot detect your public IP"
