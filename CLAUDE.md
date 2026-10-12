@@ -80,6 +80,13 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - **Gotchas:** operator IP changes -> re-apply `lab/db <env>` and `terrakube-config` (`operator_cidr`). The EKS creator is the
   only admin, so a cluster built from the UI needs the SSO access entry (in `eks.tf`). kubeconfig files are written where
   the apply runs: after a UI apply of `lab-eks`, run `tf.sh lab/eks plan/apply` on the Mac for the 3 local files.
-- **Next:** `lab/addons` (UI or Mac), `lab/app uat`, then fill the empty `env/uat.env` keys with `dr-env-discover.sh uat --cluster
-  dr-lab-eks`, `tests/aws/sandbox-test.sh readonly`, `dr-run.sh S3 --dry-run`, then `--to P2-S05`. Destroy/pause after the session.
+- **Local migration (2026-10-12):** Terraform stages in `iac/local/{platform,mock,addons,workloads}` and `iac/local.sh` replace
+  ad-hoc setup for the new isolated runner. Dedicated Colima profile `dr-framework`; old default profile stopped, data
+  preserved. Platform state is per Docker context; no host AWS/kube credentials or real env files mounted. Migration is
+  in progress: schema validation passed, live setup/regression/DR/failback verification is still pending. Do not run the
+  legacy `tests/local/up.sh` or `down.sh` against Terraform-owned containers.
+- **Local walkthrough:** no ESO by default (`enable_eso=false`, `direct_only=true`): plain `app-db-direct`, app-d/app-e,
+  Reloader, and endpoint ledger. The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
+- **Next:** finish local staged plans/applies and readiness, rerun regression tests, then a clean interactive DR and
+  endpoint failback drill. Keep real-AWS operations paused; local work does not stop any existing AWS billing.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

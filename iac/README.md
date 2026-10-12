@@ -144,3 +144,66 @@ organization, templates and workspaces **as code** (deploy = plan, approve, appl
 apply). Not proven yet: Terrakube's docs do not say whether a run keeps the `backend "s3"` of the code. Test with
 `lab-network` first (state object appears at `lab/shared/network/terraform.tfstate` and `tf.sh lab/network plan` says
 "No changes"). If it does not, point Terrakube's own storage at S3 instead and let Terrakube be the only runner of the lab.
+
+## Isolated Local Lab
+The local Terraform stages live in `iac/local/{platform,mock,addons,workloads}`. Use `bash iac/local.sh`, not `tf.sh`:
+this path never sources `sandbox.env` or uses the real S3 state bucket. The old `tests/local/up.sh` and `down.sh`
+must not manage Terraform-owned resources. Keep the old builder only for comparison until regression testing passes.
+
+On this Mac, the dedicated engine is started with `colima start --profile dr-framework --cpu 4 --memory 8 --disk 30`.
+The wrapper defaults to `colima-dr-framework`; an explicit `DOCKER_CONTEXT` can select another Linux engine.
+The wrapper currently supports Unix sockets on macOS/Linux. Windows mounts and Docker Desktop networking are not yet
+runtime-validated, so Windows portability is a target, not a claim of support.
+
+The runner contains Terraform, AWS CLI, kubectl, Helm, psql, and the scripts. It has no host AWS credentials,
+personal kubeconfig, real env files, or Docker socket mounted by default. Kubernetes uses k3s, not actual EKS.
+LocalStack/moto simulate AWS APIs; the three independent Postgres databases are fixtures, not actual RDS replication.
+Terraform owns containers, volumes, mock resources, Helm releases, and fixture workloads. PostgreSQL initialization
+comes from the existing seed SQL. DR scripts deliberately mutate the fixture during drills; inspect drift afterwards,
+and do not reapply the desired-state stack during a drill because it can undo the cutover.
+
+Plan and review each stage before applying its saved plan:
+```bash
+bash iac/local.sh platform plan -out=platform.plan
+bash iac/local.sh platform apply platform.plan
+bash iac/local.sh prepare
+bash iac/local.sh mock plan -out=mock.plan
+bash iac/local.sh mock apply mock.plan
+bash iac/local.sh addons plan -out=addons.plan
+bash iac/local.sh addons apply addons.plan
+bash iac/local.sh workloads plan -out=workloads.plan
+bash iac/local.sh workloads apply workloads.plan
+bash iac/local.sh ready
+```
+Platform state is under `tests/local/.state/platform-<docker-context>.tfstate`; the other stages use their local
+Terraform state. These files, saved plans, and generated local credentials are git-ignored. Never use one engine's
+state to manage another engine. Destroy workloads, addons, mock, then platform, each with a saved `plan -destroy`.
+Named Postgres volumes retain changed data; restarting containers is not a clean reseed. Destroying the platform
+volumes erases local fixture data, not saved evidence. Mock API state is not guaranteed to survive container recreation;
+reset all stages together when returning to a clean baseline.
+
+The default walkthrough is **no ESO**: add-ons use `enable_eso=false` and workloads use `direct_only=true`.
+This installs Reloader, the plain `app-db-direct` Secret, app-d/app-e, and the alert sink; no SecretStore or ExternalSecret
+is created. The DR script reads the restored endpoint, patches both host keys after approval, and verifies rollouts.
+
+The existing full regression suite (`bash iac/local.sh test`) requires the legacy ESO fixture. Only when explicitly
+testing that optional path, plan add-ons with `-var enable_eso=true` and workloads with `-var direct_only=false`, review,
+and apply each saved plan. The suite changes fixture data, so rebuild a clean fixture before a timed manual drill.
+```bash
+bash iac/local.sh dr S3 --list
+bash iac/local.sh dr S3 --dry-run
+bash iac/local.sh dr S3 --to P2-S05
+bash iac/local.sh dr S3 --resume <DR_ID>
+bash iac/local.sh unfence <DR_ID> app-pg-local
+bash iac/local.sh failback <recorded-change-id>
+```
+Approvals remain interactive. The local restored fixture intentionally has older data and an older password, so the
+password-repair path may require an explicit step. Endpoint failback refuses a read-only or unreachable old DB and
+requires a writable app_user transaction, reconciliation confirmation, and an approver. It does not copy new writes
+back. This is an endpoint failback test, not the full production post-restore replica/normalisation runbook.
+
+Inspect `tests/local/.state/test-report.md` and `.state/logs/` for regression results. Manual run evidence is bind-mounted
+at `tests/local/.state/evidence/<DR_ID>/`, including `run.log`, step logs, timeline, approvals, ledger, and verification.
+The official RTO includes operator waits; do not subtract waits to claim that the target passed. Connection checks alone
+do not prove a business transaction. Record an actual transaction before approving the service-restored gate. Historical
+evidence stays unchanged; explain known false alarms in a separate review rather than rewriting recorded events.

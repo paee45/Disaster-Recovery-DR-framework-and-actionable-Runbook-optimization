@@ -6,6 +6,9 @@
 # Run down.sh for a clean slate. Nothing outside tests/local/.state and the drtest-* containers is touched.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
+# shellcheck source=tests/local/docker-engine.sh
+source "$HERE/docker-engine.sh"
+dr_docker_engine
 LOCAL_API_RE='^https?://(\[?)(127\.[0-9.]+|localhost|::1|0\.0\.0\.0|kubernetes\.docker\.internal)(\]?)(:[0-9]+)?/?$'
 if [[ "${K3S_MODE:-docker}" == existing ]]; then   # refuse a non-local cluster BEFORE anything is created
   _srv="$(kubectl --kubeconfig "${EXISTING_KUBECONFIG:?set EXISTING_KUBECONFIG for K3S_MODE=existing}" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \

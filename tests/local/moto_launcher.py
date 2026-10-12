@@ -1,24 +1,118 @@
-"""Start moto server (RDS/EC2 mock) with one fix so it behaves like real RDS.
-
-Real RDS clears ReadReplicaSourceDBInstanceIdentifier after promote-read-replica; moto 5.x keeps it, which would make
-dr-verify.sh wait-promoted (correctly) wait forever. We patch the MOCK, never the scripts under test.
-"""
+"""Start the pinned Moto mock with RDS identity, field round-trip and promotion parity."""
 import sys
+import uuid
 
+import moto
 import moto.rds.models as rds_models
+from jinja2 import Template
+from moto.rds.responses import RDSResponse
 from moto.server import main
+
+if moto.__version__ != "5.0.28":
+    raise RuntimeError("RDS parity patches require Moto 5.0.28")
+
+_fields = {
+    "backup_target": ("BackupTarget", "region"),
+    "monitoring_role_arn": ("MonitoringRoleArn", None),
+    "monitoring_interval": ("MonitoringInterval", 0),
+    "performance_insights_enabled": ("EnablePerformanceInsights", False),
+    "performance_insights_kms_key_id": ("PerformanceInsightsKMSKeyId", None),
+    "performance_insights_retention_period": ("PerformanceInsightsRetentionPeriod", 7),
+    "database_insights_mode": ("DatabaseInsightsMode", "standard"),
+    "network_type": ("NetworkType", "IPV4"),
+    "engine_lifecycle_support": ("EngineLifecycleSupport", "open-source-rds-extended-support"),
+    "ca_certificate_identifier": ("CACertificateIdentifier", None),
+}
+_orig_db_kwargs = RDSResponse._get_db_kwargs
+
+
+def _get_db_kwargs(self):
+    kwargs = _orig_db_kwargs(self)
+    params = self._get_params()
+    if params.get("Action") in ("ModifyDBInstance", "CreateDBInstanceReadReplica"):
+        for attribute, parameter in (
+            ("preferred_backup_window", "PreferredBackupWindow"),
+            ("preferred_maintenance_window", "PreferredMaintenanceWindow"),
+            ("security_groups", "DBSecurityGroups"),
+            ("vpc_security_group_ids", "VpcSecurityGroupIds"),
+        ):
+            if parameter not in params:
+                kwargs[attribute] = None
+                if attribute.startswith("preferred_") and params["Action"] == "ModifyDBInstance":
+                    database = self.backend.find_db_from_id(params["DBInstanceIdentifier"])
+                    kwargs[attribute] = getattr(database, attribute)
+    for attribute, (parameter, default) in _fields.items():
+        getter = self._get_param
+        if isinstance(default, bool):
+            getter = self._get_bool_param
+        elif isinstance(default, int):
+            getter = self._get_int_param
+        kwargs[attribute] = getter(parameter)
+    return kwargs
+
+
+RDSResponse._get_db_kwargs = _get_db_kwargs
+_orig_instance_init = rds_models.DBInstance.__init__
+
+
+def _instance_init(self, *args, **kwargs):
+    _orig_instance_init(self, *args, **kwargs)
+    self.dbi_resource_id = f"db-{uuid.uuid4().hex[:26].upper()}"
+    for attribute, (_, default) in _fields.items():
+        value = kwargs.get(attribute)
+        setattr(self, attribute, default if value is None else value)
+
+
+rds_models.DBInstance.__init__ = _instance_init
+_orig_update = rds_models.DBInstance.update
+
+
+def _update(self, db_kwargs):
+    self.enabled_cloudwatch_logs_exports = list(self.enabled_cloudwatch_logs_exports)
+    _orig_update(self, db_kwargs)
+
+
+rds_models.DBInstance.update = _update
+_orig_to_xml = rds_models.DBInstance.to_xml
+_extra_template = Template(
+    """{% for attribute, field in fields.items() %}
+    {% set value = database|attr(attribute) %}
+    {% set tag = 'PerformanceInsightsEnabled' if attribute == 'performance_insights_enabled' else field[0] %}
+    {% if value is not none %}<{{ tag }}>{{ ('true' if value else 'false') if value is boolean else value }}</{{ tag }}>{% endif %}
+    {% endfor %}""",
+    autoescape=True,
+)
+
+
+def _to_xml(self):
+    extra = _extra_template.render(database=self, fields=_fields)
+    return _orig_to_xml(self).replace("</DBInstance>", extra + "</DBInstance>")
+
+
+rds_models.DBInstance.to_xml = _to_xml
+
+_orig_create_replica = rds_models.RDSBackend.create_db_instance_read_replica
+
+
+def _create_replica(self, db_kwargs):
+    replica = _orig_create_replica(self, db_kwargs)
+    replica.dbi_resource_id = f"db-{uuid.uuid4().hex[:26].upper()}"
+    return replica
+
+
+rds_models.RDSBackend.create_db_instance_read_replica = _create_replica
 
 _orig_promote = rds_models.RDSBackend.promote_read_replica
 
 
 def _promote(self, db_kwargs):
     db = _orig_promote(self, db_kwargs)
-    source_id = db.source_db_instance_identifier
-    db.source_db_instance_identifier = None
+    source_id = db.source_db_identifier
+    db.source_db_identifier = None
     try:
         primary = self.find_db_from_id(source_id) if source_id else None
-        if primary is not None and db.db_instance_identifier in getattr(primary, "read_replica_db_instance_identifiers", []):
-            primary.read_replica_db_instance_identifiers.remove(db.db_instance_identifier)
+        if primary is not None and db.db_instance_identifier in primary.replicas:
+            primary.replicas.remove(db.db_instance_identifier)
     except Exception:  # best effort; the source may be gone
         pass
     return db

@@ -35,6 +35,12 @@ same request builder the DR scripts use. Use another instance's shape: `RDS_FIXT
 
 Requirements: Docker, `kubectl`, `helm`, `aws` CLI, `psql`, `jq`, Python 3 with `moto[server]` (`pip install "moto[server]"`).
 
+Check the Docker engine first: `bash tests/local/docker-engine.sh`. It uses the active Linux engine or a reachable local
+context, whether Docker Desktop, OrbStack, Colima, Rancher Desktop (dockerd), or native Docker. Explicit `DOCKER_HOST`
+and `DOCKER_CONTEXT` settings are respected, and no global context is changed. It never starts a VM automatically.
+For an explicitly selected engine: `DOCKER_CONTEXT=<name> tests/local/up.sh`. A remote engine must also have access to
+the repository path. This check does not remove the Linux networking requirements described under "Running on macOS".
+
 ```bash
 tests/local/up.sh                 # k3s in Docker (default). Or bring your own cluster:
 K3S_MODE=existing EXISTING_KUBECONFIG=~/.kube/k3d-dr.yaml tests/local/up.sh

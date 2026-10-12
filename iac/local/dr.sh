@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set +x
+inputs=(FENCE SNAPSHOT_ID T0_AT OLD_DB RESTORED_DB BAD_TS RESTORE_TS RESTORE_MODE E2E_REF DR_ID DR_SELECTOR)
+saved_names=() saved_values=()
+for name in "${inputs[@]}"; do
+  if [[ -v "$name" ]]; then
+    saved_names+=("$name"); saved_values+=("${!name}")
+  fi
+done
+demo_selector="${DR_SELECTOR:-app in (app-d,app-e)}"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ENDPOINT_URL
+unset SECRET_MODE
+# shellcheck source=/dev/null
+source /workspace/tests/local/.state/local.env
+for index in "${!saved_names[@]}"; do
+  export "${saved_names[$index]}=${saved_values[$index]}"
+done
+[[ "$DR_ENV" == local && "$AWS_PROFILE" == dr-local && "$ACCOUNT_ID" == 000000000000 && "$EKS_CONTEXT" == dr-local ]] \
+  || { echo 'REFUSED: this demo requires the generated local fixture profile.' >&2; exit 2; }
+[[ "${DR_ENDPOINT_MAP:-}" == /workspace/tests/local/.state/endpoint-map ]] \
+  || { echo 'REFUSED: the local fixture endpoint map is required.' >&2; exit 2; }
+unset DR_ASSUME_YES DR_RUN_AUTO_NO CUTOVER_SECRET K8S_SECRET_RO CUTOVER_ID DR_GUARD_OK
+[[ "${DR_RUN_GATES:-}" != auto ]] || { echo 'REFUSED: demo approvals must be entered by a person.' >&2; exit 2; }
+for argument in "$@"; do
+  [[ "$argument" != --auto-gates ]] || { echo 'REFUSED: demo approvals must be entered by a person.' >&2; exit 2; }
+done
+export SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2
+export K8S_PORT_KEY=POSTGRES_DB_PORT K8S_USER_KEY=POSTGRES_DB_USER K8S_PASSWORD_KEY=POSTGRES_DB_PASSWORD
+export DR_SELECTOR="$demo_selector"
+cd /workspace
+if [[ "${1:-}" == failback ]]; then
+  [[ $# == 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$ ]] \
+    || { echo 'Usage: dr.sh failback <recorded-change-id>' >&2; exit 2; }
+  [[ -t 0 && -t 1 ]] || { echo 'REFUSED: failback needs an interactive terminal.' >&2; exit 2; }
+  unset DR_ID DR_EVIDENCE_DIR DR_TIMELINE DR_AUDIT_LOG DR_ACTOR TARGET_DSN OLD_DSN
+  source automation/scripts/dr-lib.sh
+  dr_guard || exit 2
+  endpoint=(automation/scripts/k8s-secret-endpoint.sh --context "$EKS_CONTEXT" -n "$K8S_NS" \
+    -s "$K8S_SECRET" -k "$K8S_HOST_KEY" --port-key "$K8S_PORT_KEY")
+  "${endpoint[@]}" history
+  ledger="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" \
+    get configmap "dr-endpoint-ledger-$K8S_SECRET" -o json)"
+  record="$(jq -ce --arg ref "$2" '
+    [.data[] | fromjson | select(.id == $ref)] |
+    if length == 1 then .[0] else error("change ID missing or duplicated in ledger") end
+  ' <<<"$ledger")" || exit 2
+  jq -e --arg keys "$K8S_HOST_KEY" --arg secret "$K8S_NS/$K8S_SECRET" '
+    .secret == $secret and (.keys | keys | sort) == ($keys | split(",") | sort) and
+    ([.keys[].from] | unique | length) == 1 and
+    all(.keys[].from; type == "string" and length > 0) and
+    (.fromDb | type == "string" and length > 0 and . != "unknown")
+  ' <<<"$record" >/dev/null || { echo 'REFUSED: ledger target is unknown, mixed, or uses different host keys.' >&2; exit 2; }
+  TARGET_DB="$(jq -r .fromDb <<<"$record")"
+  export TARGET_DB
+  [[ "$TARGET_DB" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { echo 'REFUSED: invalid recorded database ID.' >&2; exit 2; }
+  target_host="$(jq -r '.keys | to_entries[0].value.from' <<<"$record")"
+  read -r mapped_host mapped_port <<<"$(dr_endpoint "$TARGET_DB")"
+  [[ "$target_host" == "$mapped_host" && -n "$mapped_port" ]] \
+    || { echo 'REFUSED: recorded endpoint does not match the local target database.' >&2; exit 2; }
+  secret="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" get secret "$K8S_SECRET" -o json)"
+  target_port="$(jq -r '.port.from // empty' <<<"$record")"
+  if [[ -z "$target_port" ]]; then
+    target_port="$(jq -r --arg key "$K8S_PORT_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+  fi
+  [[ "$target_port" == "$mapped_port" ]] || { echo 'REFUSED: effective failback port does not match the local target.' >&2; exit 2; }
+  app_user="$(jq -r --arg key "$K8S_USER_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+  app_password="$(jq -r --arg key "$K8S_PASSWORD_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+  unset secret
+  [[ "$app_user" == app_user && -n "$app_password" && "$DB_NAME" == app ]] \
+    || { echo 'REFUSED: expected local app_user credentials and app database.' >&2; exit 2; }
+  fence_help() {
+    local state evidence_dir found=0
+    for state in /workspace/evidence/*/db/"fence-$TARGET_DB".readonly /workspace/evidence/*/db/"fence-$TARGET_DB".sgs.json; do
+      [[ -f "$state" ]] || continue
+      evidence_dir="${state%/db/*}"; found=1
+      printf 'Fence state: %s\n' "$state" >&2
+      printf 'After reviewing reconciliation and approving removal, restore using the ORIGINAL evidence directory:\n' >&2
+      printf 'DR_EVIDENCE_DIR=%q DR_TIMELINE=%q automation/scripts/dr-fence-instance.sh restore %q\n' \
+        "$evidence_dir" "$evidence_dir/timeline.jsonl" "$TARGET_DB" >&2
+    done
+    if [[ "$found" == 0 ]]; then
+      echo 'No saved local fence state found. Locate the original fencing evidence before any manual restore; do not use a new failback directory.' >&2
+    fi
+    echo 'Fence files may remain after restore. No fence removal or data reconciliation was performed.' >&2
+  }
+  verify_target() {
+    local settings probe
+    if ! settings="$(PGPASSWORD="$app_password" PGSSLMODE="${DR_PGSSLMODE:-disable}" PGCONNECT_TIMEOUT=5 \
+      PGAPPNAME=dr-failback-check psql -h "$target_host" -p "$target_port" -U "$app_user" -d "$DB_NAME" -XAtq -v ON_ERROR_STOP=1 \
+      -c "SELECT pg_is_in_recovery(), current_setting('default_transaction_read_only'), current_setting('transaction_read_only'),
+        COALESCE((SELECT split_part(setting, '=', 2) FROM pg_db_role_setting settings,
+          unnest(settings.setconfig) setting WHERE settings.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND settings.setrole = 0 AND setting LIKE 'default_transaction_read_only=%'), 'off');" 2>/dev/null)"; then
+      echo 'REFUSED: cannot verify app_user access to the recorded target (login, reachability, or quarantine fence).' >&2
+      fence_help; return 1
+    fi
+    if [[ "$settings" != 'f|off|off|off' ]]; then
+      printf 'REFUSED: target recovery/default/session/database read-only settings: %s\n' "$settings" >&2
+      fence_help; return 1
+    fi
+    if ! probe="$(PGPASSWORD="$app_password" PGSSLMODE="${DR_PGSSLMODE:-disable}" PGCONNECT_TIMEOUT=5 \
+      PGAPPNAME=dr-failback-check psql -h "$target_host" -p "$target_port" -U "$app_user" -d "$DB_NAME" -XAtq -v ON_ERROR_STOP=1 \
+      -c "SET statement_timeout = '5s'; SET lock_timeout = '3s'; BEGIN;
+        WITH written AS (UPDATE public.orders SET id = id
+          WHERE id = (SELECT id FROM public.orders ORDER BY id LIMIT 1) RETURNING id)
+        SELECT CASE WHEN count(*) = 1 THEN 'WRITE_OK' ELSE 'WRITE_EMPTY' END FROM written; ROLLBACK;" 2>/dev/null)" \
+      || [[ "$probe" != WRITE_OK ]]; then
+      echo 'REFUSED: app_user transaction WRITE probe failed; target is not proven writable.' >&2
+      fence_help; return 1
+    fi
+  }
+  verify_target || exit 2
+  echo "Endpoint failback only: $K8S_NS/$K8S_SECRET -> $TARGET_DB (before change $2)."
+  echo 'Writes made on the restored database are NOT copied back. Reconcile them manually before continuing.'
+  read -r -p 'Type RECONCILED after completing and verifying data reconciliation: ' reconciliation
+  [[ "$reconciliation" == RECONCILED ]] || exit 2
+  read -r -p 'Type GO to approve this endpoint failback: ' answer
+  [[ "$answer" == GO ]] || exit 2
+  read -r -p 'Approver name(s): ' approver
+  [[ "$approver" =~ [^[:space:]] ]] || exit 2
+  verify_target || exit 2
+  unset app_password
+  current_record="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" \
+    get configmap "dr-endpoint-ledger-$K8S_SECRET" -o json | jq -ce --arg ref "$2" \
+      '[.data[] | fromjson | select(.id == $ref)] | if length == 1 then .[0] else error("ledger changed") end')"
+  [[ "$(jq -cS . <<<"$record")" == "$(jq -cS . <<<"$current_record")" ]] \
+    || { echo 'REFUSED: ledger record changed during verification.' >&2; exit 2; }
+  DR_ID="DR-local-failback-$(date -u +%Y%m%d%H%M%S)-$$"
+  export DR_ID
+  export DR_EVIDENCE_DIR="/workspace/evidence/$DR_ID"
+  dr_init FB-S3S4
+  printf '%s\n' "$record" > "$DR_EVIDENCE_DIR/k8s/failback-reference.json"
+  printf 'reference: %s\ntarget: %s\nreconciliation: %s\nanswer: %s\napprovers: %s\nat: %s\n' \
+    "$2" "$TARGET_DB" "$reconciliation" "$answer" "$approver" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/endpoint-failback.txt"
+  dr_mark DECISION "endpoint failback GO by $approver; reconciliation confirmed; ref=$2 target=$TARGET_DB"
+  automation/scripts/dr-secret-cutover.sh failback "$2"
+  if ! automation/scripts/dr-eks-rollout.sh check; then
+    automation/scripts/dr-eks-rollout.sh restart-stale
+    automation/scripts/dr-eks-rollout.sh check
+  fi
+else
+  if [[ "${1:-}" == S3 ]]; then
+    export SNAPSHOT_ID="${SNAPSHOT_ID:-app-pg-local-fixture}"
+    echo "Local walkthrough snapshot: $SNAPSHOT_ID (manual mock fixture; no real RDS backup schedule)."
+  fi
+  exec automation/scripts/dr-run.sh "$@"
+fi
