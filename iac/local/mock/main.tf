@@ -128,12 +128,20 @@ resource "aws_db_instance" "primary" {
 }
 
 resource "aws_db_instance" "replica" {
-  identifier             = "app-pg-local-replica"
-  replicate_source_db    = aws_db_instance.primary.identifier
-  instance_class         = local.fx.DBInstanceClass
-  publicly_accessible    = local.fx.PubliclyAccessible
-  vpc_security_group_ids = aws_security_group.db[*].id
-  skip_final_snapshot    = true
+  identifier                            = "app-pg-local-replica"
+  replicate_source_db                   = aws_db_instance.primary.identifier
+  instance_class                        = local.fx.DBInstanceClass
+  publicly_accessible                   = local.fx.PubliclyAccessible
+  vpc_security_group_ids                = aws_security_group.db[*].id
+  skip_final_snapshot                   = true
+  deletion_protection                   = local.fx.DeletionProtection
+  enabled_cloudwatch_logs_exports       = local.fx.EnabledCloudwatchLogsExports
+  monitoring_interval                   = local.fx.MonitoringInterval
+  monitoring_role_arn                   = local.fx.MonitoringInterval > 0 ? aws_iam_role.rds_monitoring[0].arn : null
+  performance_insights_enabled          = local.fx.PerformanceInsightsEnabled
+  performance_insights_kms_key_id       = local.fx.PerformanceInsightsEnabled ? aws_kms_key.db[0].arn : null
+  performance_insights_retention_period = local.fx.PerformanceInsightsEnabled ? local.fx.PerformanceInsightsRetentionPeriod : null
+  tags                                  = local.tags
 
 }
 

@@ -1,6 +1,8 @@
 """Start the pinned Moto mock with RDS identity, field round-trip and promotion parity."""
 import sys
 import uuid
+from copy import deepcopy
+from types import GeneratorType
 
 import moto
 import moto.rds.models as rds_models
@@ -57,6 +59,8 @@ _orig_instance_init = rds_models.DBInstance.__init__
 
 def _instance_init(self, *args, **kwargs):
     _orig_instance_init(self, *args, **kwargs)
+    if not self.option_group_supplied and self.engine == "postgres":
+        self.option_group_name = f"default:postgres-{self.engine_version.split('.')[0]}"
     self.dbi_resource_id = f"db-{uuid.uuid4().hex[:26].upper()}"
     for attribute, (_, default) in _fields.items():
         value = kwargs.get(attribute)
@@ -101,6 +105,37 @@ def _create_replica(self, db_kwargs):
 
 
 rds_models.RDSBackend.create_db_instance_read_replica = _create_replica
+
+def _materialize(value):
+    if isinstance(value, (GeneratorType, list)):
+        return [_materialize(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_materialize(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _materialize(item) for key, item in value.items()}
+    return value
+
+
+def _restore_snapshot(self, snapshot_id, overrides):
+    name = self.extract_snapshot_name_from_arn(snapshot_id) if snapshot_id.startswith("arn:aws:rds:") else snapshot_id
+    snapshot = self.describe_db_snapshots(db_instance_identifier=None, db_snapshot_identifier=name)[0]
+    if overrides["db_instance_identifier"] in self.databases:
+        raise rds_models.DBInstanceAlreadyExists()
+    properties = {
+        attribute: deepcopy(_materialize(value))
+        for attribute, value in vars(snapshot.database).items()
+        if attribute not in ("backend", "db_subnet_group")
+    }
+    properties["enable_cloudwatch_logs_exports"] = properties.pop("enabled_cloudwatch_logs_exports")
+    if not snapshot.database.option_group_supplied:
+        properties["option_group_name"] = None
+    for attribute, value in overrides.items():
+        if value:
+            properties[attribute] = value
+    return self.create_db_instance(properties)
+
+
+rds_models.RDSBackend.restore_db_instance_from_db_snapshot = _restore_snapshot
 
 _orig_promote = rds_models.RDSBackend.promote_read_replica
 
