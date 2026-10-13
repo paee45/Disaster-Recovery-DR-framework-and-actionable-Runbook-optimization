@@ -119,7 +119,7 @@ resource "aws_db_instance" "primary" {
   performance_insights_retention_period = local.fx.PerformanceInsightsEnabled ? local.fx.PerformanceInsightsRetentionPeriod : null
   database_insights_mode                = try(local.fx.DatabaseInsightsMode, null)
 
-  deletion_protection = local.fx.DeletionProtection
+  deletion_protection = false
   skip_final_snapshot = true
   apply_immediately   = true
   tags                = local.tags
@@ -134,7 +134,7 @@ resource "aws_db_instance" "replica" {
   publicly_accessible                   = local.fx.PubliclyAccessible
   vpc_security_group_ids                = aws_security_group.db[*].id
   skip_final_snapshot                   = true
-  deletion_protection                   = local.fx.DeletionProtection
+  deletion_protection                   = false
   enabled_cloudwatch_logs_exports       = local.fx.EnabledCloudwatchLogsExports
   monitoring_interval                   = local.fx.MonitoringInterval
   monitoring_role_arn                   = local.fx.MonitoringInterval > 0 ? aws_iam_role.rds_monitoring[0].arn : null
@@ -179,5 +179,6 @@ resource "aws_secretsmanager_secret_version" "master" {
 }
 
 resource "aws_s3_bucket" "evidence" {
-  bucket = "org-dr-evidence-000000000000"
+  bucket        = "org-dr-evidence-000000000000"
+  force_destroy = true
 }

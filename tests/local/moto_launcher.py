@@ -137,6 +137,20 @@ def _restore_snapshot(self, snapshot_id, overrides):
 
 rds_models.RDSBackend.restore_db_instance_from_db_snapshot = _restore_snapshot
 
+_orig_restore_pitr = rds_models.RDSBackend.restore_db_instance_to_point_in_time
+
+
+def _restore_pitr(self, source_db_identifier, target_db_identifier, overrides):
+    source = self.find_db_from_id(source_db_identifier)
+    restored = _orig_restore_pitr(self, source_db_identifier, target_db_identifier, overrides)
+    if source is not None and not source.option_group_supplied:
+        restored.option_group_supplied = False
+        restored.option_group_name = f"default:postgres-{restored.engine_version.split('.')[0]}"
+    return restored
+
+
+rds_models.RDSBackend.restore_db_instance_to_point_in_time = _restore_pitr
+
 _orig_promote = rds_models.RDSBackend.promote_read_replica
 
 

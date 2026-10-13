@@ -59,9 +59,9 @@ tf A14 "a [default] AWS profile makes the guard fail"   "\[default\] AWS profile
 a15() { command kubectl config use-context decoy >/dev/null; DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard"; local rc=$?
         command kubectl config unset current-context >/dev/null; return $rc; }
 tf A15 "a kube current-context makes the guard fail"     "current-context" a15
-a16() { local kc="$STATE/kubeconfig.foreign"; cp "$KUBECONFIG" "$kc"
+a16() { local tmp kc rc; tmp="$(mktemp -d)"; kc="$tmp/kubeconfig"; cp "$KUBECONFIG" "$kc"
         KUBECONFIG="$kc" command kubectl config set-context dr-prod --cluster=decoy --user=dr-local >/dev/null
-        KUBECONFIG="$kc" DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard"; local rc=$?; rm -f "$kc"; return $rc; }
+        KUBECONFIG="$kc" DR_GUARD_OK='' bash -c "source '$S/dr-lib.sh' && dr_guard"; rc=$?; rm -rf "$tmp"; return $rc; }
 tf A16 "kubeconfig holding another env's context (dr-prod) makes the guard fail" "other environments" a16
 tf A17 "exported static AWS keys are refused (strict)"   "REFUSED: AWS_ACCESS_KEY_ID" env AWS_ACCESS_KEY_ID=AKIAEXAMPLE AWS_SECRET_ACCESS_KEY=x bash -c "source '$S/dr-lib.sh'"
 t  A18 "pinning lint: every aws/kubectl call in the scripts is pinned" "$ROOT/tests/lint/pinning-lint.sh"
@@ -90,10 +90,10 @@ SNAP="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snap
 export WAIT_POLL_S=3 HARDEN_SETTLE_S=2
 FX="$HERE/fixtures/rds-primary-uat-like.json"; JQL="$(cat "$S/rds-requests.jq")"
 c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e --slurpfile fx "$FX" '([.tags[] | select(.Key | startswith("aws:") | not)] | length) == 4
-          and ([.tags[] | select(.Key | startswith("aws:"))] | length) == 3 and (.pgSettings | length) > 100
+          and ([.tags[] | select(.Key | startswith("aws:"))] | length) == 0 and (.pgSettings | length) > 100
           and (.instance.VpcSecurityGroups | length) == ($fx[0].VpcSecurityGroups | length)
           and (.instance.DBSubnetGroup.Subnets | length) == ($fx[0].DBSubnetGroup.Subnets | length)' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
-t  C00 "capture baseline of the UAT-shaped source (3 SGs, 3 subnets, 4 user + 3 aws:* tags, pg_settings)" c00
+t  C00 "capture baseline: UAT-shaped source, 3 SGs/subnets, 4 user tags, pg_settings (moto omits aws:* tags)" c00
 t  C01 "list-snapshots"                                              "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB"
 REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
 c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)
@@ -103,7 +103,7 @@ c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slur
            and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)
            and ([.Tags[].Key | select(startswith("aws:"))] | length) == 0' "$REQ" \
          && ! command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" >/dev/null 2>&1; }
-t  C01b "plan: request from baseline (3 SGs, subnet group, PG, retention 7, window, logs, CA, user tags, NO aws:* tags) — no change" c01b
+t  C01b "plan: restore request from baseline (3 SGs, subnet group, PG, logs, CA, user tags; retention/window hardened afterward)" c01b
 c02() { "$S/dr-restore.sh" snapshot "$SNAP" "$RESTORED_DB" && has "sgs=\[sg-[0-9a-f]+ sg-[0-9a-f]+ sg-[0-9a-f]+\]" "$LOGS/C02.log"; }
 t  C02 "restore snapshot with the baseline request (--cli-input-json)"  c02
 t  C03 "wait until available (progress + T5)"                          "$S/dr-restore.sh" wait "$RESTORED_DB"
@@ -176,7 +176,10 @@ echo "=== F. S2 promotion, S4 PITR"
 f01() { dr_set_target "$REPLICA_DB" && aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds promote-read-replica --db-instance-identifier "$REPLICA_DB" --backup-retention-period 7 >/dev/null \
         && TIMEOUT_SECONDS=120 "$S/dr-verify.sh" wait-promoted; }
 t  F01 "S2 promote replica + wait-promoted (standalone + writable)"     f01
-t  F02 "S4 PITR latest → restore request from baseline with 3 SGs"      bash -c "'$S/dr-restore.sh' pitr '$PRIMARY_DB' '$PITR_DB' latest && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and (has("BackupRetentionPeriod") | not)' '$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json'"
+f02() { "$S/dr-restore.sh" pitr "$PRIMARY_DB" "$PITR_DB" latest \
+                                && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)' \
+                                        "$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json"; }
+t  F02 "S4 PITR latest → restore request has 3 SGs and omits post-restore settings" f02
 t  F03 "S4 PITR: wait + harden → VALIDATED against the baseline"        bash -c "'$S/dr-restore.sh' wait '$PITR_DB' && '$S/dr-restore.sh' harden '$PITR_DB' | grep -q '→ VALIDATED\$'"
 
 echo "=== G. Evidence, KPIs, SSM documents, tracker"
@@ -189,7 +192,7 @@ g00() { printf 'aws --profile dr-local --region eu-west-1 sts get-caller-identit
 t  G00 "recorded session: transcript + history, password redacted, REFUSED shown, synced to S3" g00
 g00b() { lib 'aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager create-secret --name local/dr-test/redact-$RANDOM --secret-string "{\"password\":\"pw-must-not-appear\"}" >/dev/null' \
          && ! grep -q 'pw-must-not-appear' "$DR_EVIDENCE_DIR/commands.jsonl" && grep -q '"--secret-string","\*\*\*"' "$DR_EVIDENCE_DIR/commands.jsonl" \
-         && jq -e 'select(.status=="REFUSED" and .rc==97)' "$DR_EVIDENCE_DIR/commands.jsonl" >/dev/null; }
+         && jq -e -s 'any(.[]; .status=="REFUSED" and .rc==97)' "$DR_EVIDENCE_DIR/commands.jsonl" >/dev/null; }
 t  G00b "audit log commands.jsonl: every call, secret-string redacted, refusals recorded" g00b
 t  G01 "phase timer + summary"                                          bash -c "source '$S/dr-lib.sh'; dr_phase start demo 1; dr_phase end demo 1; dr_summary | grep -q 'since T0'"
 t  G01b "dr_phase end syncs the evidence folder to S3 (timeline already off the machine)" bash -c "command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/timeline.jsonl'"
@@ -205,7 +208,7 @@ ireq() { jq -S --argjson ov '{}' "$JQL"' (.TagList | userTags) as $t | expected(
 i01() { ireq 'restore_req({DBInstanceIdentifier:"x", DBSnapshotIdentifier:"s"}; $t)' | tee /dev/stderr | jq -e '
           (.VpcSecurityGroupIds | length) == 3 and .DBSubnetGroupName == "app-uat-rdssubnetgroup-example" and .DBParameterGroupName == "app-postgres-17"
           and (has("OptionGroupName") | not) and (has("Iops") | not) and (has("StorageThroughput") | not) and .Port == 5432
-          and .BackupRetentionPeriod == 7 and .PreferredBackupWindow == "17:58-18:28" and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
+          and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not) and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
           and .EnableCloudwatchLogsExports == ["postgresql"] and .DeletionProtection and (.CopyTagsToSnapshot == false)
           and .EngineLifecycleSupport == "open-source-rds-extended-support" and .BackupTarget == "region" and .LicenseModel == "postgresql-license"
           and .NetworkType == "IPV4" and ((.Tags // []) | length) == 0'; }

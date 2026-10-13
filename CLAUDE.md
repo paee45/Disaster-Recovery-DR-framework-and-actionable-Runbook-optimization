@@ -80,16 +80,19 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - **Gotchas:** operator IP changes -> re-apply `lab/db <env>` and `terrakube-config` (`operator_cidr`). The EKS creator is the
   only admin, so a cluster built from the UI needs the SSO access entry (in `eks.tf`). kubeconfig files are written where
   the apply runs: after a UI apply of `lab-eks`, run `tf.sh lab/eks plan/apply` on the Mac for the 3 local files.
-- **Local migration (2026-10-12):** Terraform stages in `iac/local/{platform,mock,addons,workloads}` and `iac/local.sh` replace
-  ad-hoc setup for the new isolated runner. Dedicated Colima profile `dr-framework`; old default profile stopped, data
-  preserved. Platform state is per Docker context; no host AWS/kube credentials or real env files mounted. Migration is
-  in progress: platform, mock, add-ons and direct workloads are applied; readiness and P0-S01/P0-S02 passed. The mock
-  plan has no drift. Full regression and interactive restore/cutover/failback remain pending. Do not run the
-  legacy `tests/local/up.sh` or `down.sh` against Terraform-owned containers.
+- **Local migration (2026-10-13):** Terraform stages in `iac/local/{platform,mock,addons,workloads}` and `iac/local.sh`
+  replace ad-hoc setup for the isolated runner. Dedicated Colima profile `dr-framework`; old default profile stopped,
+  data preserved. Platform state is per Docker context; no host AWS/kube credentials or real env files mounted. The
+  no-ESO direct-secret S3 walkthrough passed through P2-S05, cutover, E2E reference, evidence collection, and endpoint
+  failback; both app sessions returned to `app-pg-local`. RTO/RPO are local-mock measurements, not AWS performance.
+  The legacy full regression suite and S4 remain pending. Do not run `tests/local/up.sh` or `down.sh` against Terraform-owned
+  containers.
 - **Local walkthrough:** no ESO by default (`enable_eso=false`, `direct_only=true`): plain `app-db-direct`, app-d/app-e,
   Reloader, and endpoint ledger. The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
 - **Mock fidelity:** Moto 5.0.28 is patched for unique DB resource IDs, replica isolation, and RDS field round-trips.
   `app-pg-local-fixture` is a Terraform-owned manual mock snapshot; it is not a scheduled backup or a real data clone.
-- **Next:** finish local staged plans/applies and readiness, rerun regression tests, then a clean interactive DR and
-  endpoint failback drill. Keep real-AWS operations paused; local work does not stop any existing AWS billing.
+- **Gotcha:** stopping the Colima VM clears moto/LocalStack in-memory state while preserving Postgres and k3s volumes.
+  Reapply the mock Terraform stage before resuming a DR run; this creates the mock snapshot and Secrets Manager records.
+- **Next:** run the legacy regression suite with ESO explicitly enabled on a clean fixture; then review/fix findings.
+  Keep real-AWS operations paused; local work does not stop any existing AWS billing.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

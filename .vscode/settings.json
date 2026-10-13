@@ -2,6 +2,19 @@
     "chat.tools.terminal.autoApprove": {
         "terraform": true,
         "command": true,
-        "printf": true
+        "printf": true,
+        "docker --context colima-dr-framework": true,
+        "/^bash iac/local\\.sh prepare && bash iac/local\\.sh ready$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^bash iac/local\\.sh mock plan -input=false -out=mock-after-restart\\.plan -no-color$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^bash iac/local\\.sh mock apply -input=false mock-after-restart\\.plan && bash iac/local\\.sh mock plan -input=false -out=mock-post-recovery-check\\.plan -no-color$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
