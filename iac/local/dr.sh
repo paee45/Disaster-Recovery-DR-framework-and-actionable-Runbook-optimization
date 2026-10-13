@@ -13,6 +13,9 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ENDPOINT_URL
 unset SECRET_MODE
 # shellcheck source=/dev/null
 source /workspace/tests/local/.state/local.env
+if [[ -f /workspace/tests/local/.state/normalization.env ]]; then
+  source /workspace/tests/local/.state/normalization.env
+fi
 for index in "${!saved_names[@]}"; do
   export "${saved_names[$index]}=${saved_values[$index]}"
 done

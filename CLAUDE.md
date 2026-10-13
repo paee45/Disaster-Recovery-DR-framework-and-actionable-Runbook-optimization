@@ -87,9 +87,16 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   failback; both app sessions returned to `app-pg-local`. RTO/RPO are local-mock measurements, not AWS performance.
   The legacy full regression suite (ESO opt-in) passed 109/109 on 2026-10-13. Local direct-secret S4 `DR-20261013-1437-local-S4`
   completed after reconciling the restored DB password from the local Kubernetes Secret; the app now targets the restored DB
-  and the old DB is fenced read-only. Reported RTO was 44.66 min (target 30) and RPO 2,640.5 s (target 24 h). The RTO
-  includes about 30.7 min spent diagnosing/fixing the local password mismatch after the initial P2-S03 failure; it is not an
-  intrinsic recovery-time estimate. Moto had no automated-backup PITR window, so the local restore timestamp was simulated.
+  and the old DB is fenced read-only. At initial run close, RTO was 44.66 min (target 30) and RPO 2,640.5 s (target 24 h).
+  The refreshed post-reconciliation report says RPO 3,260.7 s because the KPI calculator uses the latest `FENCE` marker,
+  including the post-run synthetic re-fence; use 2,640.5 s for the original S4 run measurement. The RTO
+  includes about 30.7 min between the initial P2-S03 failure and resuming the run, largely while the operator was away from
+  the Mac; the local password mismatch was fixed on resumption. This elapsed pause was counted as app recovery, not intrinsic
+  restore time. Moto had no automated-backup PITR window, so the local restore timestamp was simulated.
+  Initial read-only hints found no `created_at` rows after the cutoff. A separate synthetic local P3A-S06 exercise inserted
+  `public.orders` id 101 after the cutoff on the old DB, detected it, copied it transactionally to the restored DB, and
+  verified the matching row; the old DB was re-fenced read-only. This is a test only, not business-data reconciliation or
+  sign-off. Actual production P3A-S06 remains pending; keep the old DB fenced and do not fail back until owner review.
   Do not treat these values as AWS performance or change production targets from them. Evidence:
   `tests/local/.state/evidence/DR-20261013-1437-local-S4/`. Do not run `tests/local/up.sh` or `down.sh` against Terraform-owned
   containers.
@@ -99,6 +106,7 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   `app-pg-local-fixture` is a Terraform-owned manual mock snapshot; it is not a scheduled backup or a real data clone.
 - **Gotcha:** stopping the Colima VM clears moto/LocalStack in-memory state while preserving Postgres and k3s volumes.
   Reapply the mock Terraform stage before resuming a DR run; this creates the mock snapshot and Secrets Manager records.
-- **Next:** review the local S4 RTO breakdown and identify a repeatable operator path before comparing it with the 30-minute target.
-  Keep real-AWS operations paused; local work does not stop any existing AWS billing.
+- **Next:** production P3A-S06 reconciliation/sign-off remains pending, then P3A-S07. Local DEV P1-S03 adoption is complete
+  through `iac/local/normalization`; DEV has no replica. Keep real-AWS operations paused; local work does not stop any
+  existing AWS billing.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).

@@ -6,7 +6,7 @@ usage() {
   printf '%s\n' \
     'Usage: bash iac/local.sh doctor|prepare|ready|shell|test|dr [S3|S4]|failback <change-id>' \
     '       bash iac/local.sh unfence <DR_ID> <local-db-id>' \
-    '       bash iac/local.sh <platform|mock|addons|workloads> <terraform arguments...>' \
+    '       bash iac/local.sh <platform|mock|addons|workloads|normalization> <terraform arguments...>' \
     'Build order: platform plan/apply, prepare, mock plan/apply, addons plan/apply, workloads plan/apply.' \
     'Always plan -out=NAME.plan, review, then apply NAME.plan. State is local, not real S3.' \
     'Default Docker context: colima-dr-framework (colima start --profile dr-framework).' \
@@ -88,7 +88,7 @@ done
 kubectl --context dr-local --request-timeout=10s -n reloader rollout status deployment/reloader-alert-sink --timeout=180s
 READY
     ;;
-  mock|addons|workloads)
+  mock|addons|workloads|normalization)
     runner terraform -chdir="/workspace/iac/local/$stage" init -input=false
     runner terraform -chdir="/workspace/iac/local/$stage" "$@"
     ;;
