@@ -49,7 +49,7 @@ Following the disruption on {{date}} (ref {{ref}}), reconciliation is complete: 
 
 ### AWS Support case (copy-paste)
 ```
-Severity: {{Production system down | Business-critical system down}} · Service: RDS (PostgreSQL) · Region: {{eu-west-1}}
+Severity: {{Production system down | Business-critical system down}} · Service: RDS (PostgreSQL) · Region: {{ap-southeast-1}}
 Account: {{id}} · Resource: arn:aws:rds:{{region}}:{{acct}}:db:{{PRIMARY_DB}}
 Issue: Primary instance unreachable since {{T0}} UTC; Multi-AZ failover {{not triggered / stuck / n/a}}. Planning
 {{replica promotion of <replica> | PITR to <ts> | snapshot restore}}. Ask: (1) ETA for instance recovery, (2) any risk to the

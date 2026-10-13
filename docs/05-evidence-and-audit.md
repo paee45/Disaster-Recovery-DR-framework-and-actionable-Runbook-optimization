@@ -53,8 +53,8 @@ Collector: [`automation/scripts/dr-collect-evidence.sh`](../automation/scripts/d
 ## 3. Bucket configuration (essentials)
 
 ```bash
-aws s3api create-bucket --bucket org-dr-evidence-111122223333 --region eu-west-1 \
-  --create-bucket-configuration LocationConstraint=eu-west-1 --object-lock-enabled-for-bucket
+aws s3api create-bucket --bucket org-dr-evidence-111122223333 --region ap-southeast-1 \
+  --create-bucket-configuration LocationConstraint=ap-southeast-1 --object-lock-enabled-for-bucket
 
 aws s3api put-object-lock-configuration --bucket org-dr-evidence-111122223333 \
   --object-lock-configuration '{"ObjectLockEnabled":"Enabled",

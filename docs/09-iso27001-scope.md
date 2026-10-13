@@ -16,7 +16,7 @@
 > The ISMS scope for database disaster recovery covers the **processes, documented procedures, people and technology**
 > used to detect, decide on, recover from and learn from the loss or corruption of the **`{{SERVICE}}` Amazon RDS for
 > PostgreSQL databases** and to reconnect their **Amazon EKS-hosted consumers**, in AWS account(s) `{{ACCOUNT_IDS}}`,
-> region **eu-west-1**, for the **DEV, UAT and PROD** environments. It is operated by the SRE team under the authority of the CTO.
+> region **ap-southeast-1 (Singapore)**, for the **DEV, UAT and PROD** environments. It is operated by the SRE team under the authority of the CTO.
 
 ### In scope
 
@@ -103,7 +103,7 @@ Likelihood (L) / impact (I): 1 = low … 5 = high. `TODO`: align with the ISMS r
 
 | ID | Risk | L | I | Treatment | Decision | Review date |
 |---|---|---|---|---|---|---|
-| **R1** | **Regional AWS outage**: primary, replica and backups are all in eu-west-1 → no recovery within RPO/RTO until the region returns | 1 | 5 | Option: cross-region automated-backup replication (low cost) or a cross-region replica | **Accept for now** | `{{date + 12 m}}` |
+| **R1** | **Regional AWS outage**: primary, replica and backups are all in ap-southeast-1 → no recovery within RPO/RTO until the region returns | 1 | 5 | Option: cross-region automated-backup replication (low cost) or a cross-region replica | **Accept for now** | `{{date + 12 m}}` |
 | **R2** | **No regular DR testing** (one UAT S3 exercise on 2026-08-04, none scheduled) → other scenarios and PROD unproven; A.5.30/A.8.13 expect testing | 3 | 4 | Desk review, CI checks, read-only pre-flight, DRY_RUN, learning from events ([07](07-testing-and-drill-program.md)) | **Accept** (with the mitigations listed) | `{{date + 6 m}}` |
 | **R3** | **RTO 30 min not met for S3** — measured 39:55 in UAT (0.6 GB) due to manual steps/scripts/runbook clarity; PROD (larger) likely longer | 4 | 3 | Corrective actions TICKET-101…108 ([10](10-corrective-action-plan-2026-08-04.md)); effectiveness review | **Treat** (CAPA) | `{{date + 6 m}}` |
 | **R4** | **7-day retention**: corruption discovered after 7 days is unrecoverable (no older snapshots) | 2 | 4 | Option: monthly manual snapshot or AWS Backup monthly plan | **Accept for now** | `{{date + 12 m}}` |

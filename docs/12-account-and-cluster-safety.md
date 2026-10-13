@@ -16,7 +16,7 @@ update against the wrong environment is a **second incident**. Defence in depth:
 |---|---|
 | **One named AWS profile per env, no `[default]`** | `~/.aws/config`: `[profile dr-dev]`, `[profile dr-uat]`, `[profile dr-prod]` via IAM Identity Center (SSO) or `role_arn` + `mfa_serial`. Delete or empty `[default]` so a forgotten `--profile` fails instead of hitting some account |
 | **No long-lived keys in the environment** | Never export `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in shell profiles. `dr-lib.sh` unsets them and warns |
-| **One kubeconfig file per env, no current-context** | `aws --profile dr-uat --region eu-west-1 eks update-kubeconfig --name eks-uat --alias dr-uat --kubeconfig ~/.kube/dr-uat.config`, then `kubectl config unset current-context`. The env profile sets `KUBECONFIG=~/.kube/dr-uat.config`, so the PROD cluster is not even in the file while working on UAT |
+| **One kubeconfig file per env, no current-context** | `aws --profile dr-uat --region ap-southeast-1 eks update-kubeconfig --name eks-uat --alias dr-uat --kubeconfig ~/.kube/dr-uat.config`, then `kubectl config unset current-context`. The env profile sets `KUBECONFIG=~/.kube/dr-uat.config`, so the PROD cluster is not even in the file while working on UAT |
 | **Context names = env names** | Alias contexts `dr-dev`, `dr-uat`, `dr-prod` (not the default ARN), so a mistake is readable |
 | **PROD access is separate and short-lived** | PROD role through SSO with a short session and MFA; ideally a separate `DRExecutorRole` assumed only for DR (alerting on assume) |
 | **Shell prompt shows env + context** | e.g. starship/kube-ps1 with `AWS_PROFILE` + `kubectl` context; red for prod |
@@ -111,9 +111,9 @@ brew install bash coreutils jq libpq awscli kubectl helm            # dr-lib.sh 
 sso_session = corp
 sso_account_id = 111122223333
 sso_role_name = lab_admin                                          # set AWS_ROLE_PATTERN='assumed-role/AWSReservedSSO_lab_admin_'
-region = eu-west-1
+region = ap-southeast-1
 aws sso login --profile dr-uat
-aws --profile dr-uat --region eu-west-1 eks update-kubeconfig --name eks-uat --alias dr-uat --kubeconfig ~/.kube/dr-uat.config
+aws --profile dr-uat --region ap-southeast-1 eks update-kubeconfig --name eks-uat --alias dr-uat --kubeconfig ~/.kube/dr-uat.config
 KUBECONFIG=~/.kube/dr-uat.config kubectl config unset current-context
 ```
 - Do **not** export `AWS_PROFILE`, `KUBECONFIG` or keys in `~/.zshrc`; the env file sets them for the DR shell only.

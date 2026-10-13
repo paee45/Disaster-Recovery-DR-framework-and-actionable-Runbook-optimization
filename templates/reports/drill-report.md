@@ -8,7 +8,7 @@
 | Runbook / automation | RB-{{ENV}}-{{scenario}} v{{x}} (+ FB runbook) · SSM v{{y}} · git {{sha}} |
 | Date / window | {{date}} {{hh:mm}}–{{hh:mm}} UTC · Change {{CHG}} |
 | Roles | IC {{}} · Exec {{}} · DBA {{}} · Comms {{}} · Scribe {{}} · Observers {{GRC/auditor}} |
-| Scenario | {{e.g. FIS network disruption of DB subnets in eu-west-1, executors not briefed}} |
+| Scenario | {{e.g. FIS network disruption of DB subnets in ap-southeast-1, executors not briefed}} |
 | Outage simulation method | {{e.g. quarantine SG on primary (dr-fence-instance.sh quarantine) — note: an instance with a read replica cannot be stopped}} |
 | Prepared / reviewed / approved | {{Lead SRE}} / SRE lead / CTO |
 | Time zone | **All times UTC** |
