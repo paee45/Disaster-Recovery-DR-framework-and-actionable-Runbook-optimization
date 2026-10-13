@@ -67,7 +67,7 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
-- Latest suite: v0.6 = **109/109** (clean rebuild, 2026-10-04; report `tests/local/last-run-report.md`). Group J = dr-run.sh.
+- Latest suite: v0.6 = **109/109** (clean Terraform-managed fixture, 2026-10-13; report `tests/local/.state/test-report.md`). Group J = dr-run.sh.
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
   zsh: paste blocks without inline `#` comments (or `setopt interactivecomments`).
@@ -85,7 +85,13 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   data preserved. Platform state is per Docker context; no host AWS/kube credentials or real env files mounted. The
   no-ESO direct-secret S3 walkthrough passed through P2-S05, cutover, E2E reference, evidence collection, and endpoint
   failback; both app sessions returned to `app-pg-local`. RTO/RPO are local-mock measurements, not AWS performance.
-  The legacy full regression suite and S4 remain pending. Do not run `tests/local/up.sh` or `down.sh` against Terraform-owned
+  The legacy full regression suite (ESO opt-in) passed 109/109 on 2026-10-13. Local direct-secret S4 `DR-20261013-1437-local-S4`
+  completed after reconciling the restored DB password from the local Kubernetes Secret; the app now targets the restored DB
+  and the old DB is fenced read-only. Reported RTO was 44.66 min (target 30) and RPO 2,640.5 s (target 24 h). The RTO
+  includes about 30.7 min spent diagnosing/fixing the local password mismatch after the initial P2-S03 failure; it is not an
+  intrinsic recovery-time estimate. Moto had no automated-backup PITR window, so the local restore timestamp was simulated.
+  Do not treat these values as AWS performance or change production targets from them. Evidence:
+  `tests/local/.state/evidence/DR-20261013-1437-local-S4/`. Do not run `tests/local/up.sh` or `down.sh` against Terraform-owned
   containers.
 - **Local walkthrough:** no ESO by default (`enable_eso=false`, `direct_only=true`): plain `app-db-direct`, app-d/app-e,
   Reloader, and endpoint ledger. The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
@@ -93,6 +99,6 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   `app-pg-local-fixture` is a Terraform-owned manual mock snapshot; it is not a scheduled backup or a real data clone.
 - **Gotcha:** stopping the Colima VM clears moto/LocalStack in-memory state while preserving Postgres and k3s volumes.
   Reapply the mock Terraform stage before resuming a DR run; this creates the mock snapshot and Secrets Manager records.
-- **Next:** run the legacy regression suite with ESO explicitly enabled on a clean fixture; then review/fix findings.
+- **Next:** review the local S4 RTO breakdown and identify a repeatable operator path before comparing it with the 30-minute target.
   Keep real-AWS operations paused; local work does not stop any existing AWS billing.
 - Open to-dos: see README "To-do / improvements" (ESO adoption, …).
