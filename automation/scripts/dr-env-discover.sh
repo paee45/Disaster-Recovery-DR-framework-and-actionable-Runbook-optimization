@@ -39,6 +39,27 @@ awsq() { aws --profile "$P" --region "$R" "$@"; }
 declare -A V=()          # variable → discovered value
 FOUND=(); MISSING=(); INFO=()
 found() { V["$1"]="$2"; FOUND+=("$1"); }
+choose_primary_candidate() {
+  local index choice number count=${#cand[@]}
+  if [[ -t 0 && -r /dev/tty && -w /dev/tty ]] && { : </dev/tty; } 2>/dev/null; then
+    say "RDS primary candidates for '$ENVN':"
+    for index in "${!cand[@]}"; do say "  $((index + 1)). ${cand[$index]}"; done
+    while :; do
+      printf 'Select a primary by number (1-%s): ' "$count" >/dev/tty
+      if ! IFS= read -r choice </dev/tty; then break; fi
+      if [[ "$choice" =~ ^[0-9]+$ ]]; then
+        number=$((10#$choice))
+        if (( number >= 1 && number <= count )); then
+          DB="${cand[$((number - 1))]}"
+          say "selected PRIMARY_DB=$DB"
+          return 0
+        fi
+      fi
+      say "invalid selection; enter a number from 1 to $count"
+    done
+  fi
+  return 1
+}
 
 # ───────────────────────────── account ─────────────────────────────
 if ! ident="$(awsq sts get-caller-identity --output json 2>&1)"; then
@@ -59,15 +80,28 @@ say "account $(jq -r .Account <<<"$ident") as $(jq -r .Arn <<<"$ident")"
 
 # ───────────────────────────── RDS primary, replica, tags ─────────────────────────────
 if [[ -z "$DB" ]]; then
-  # primaries only (no read replicas) whose name contains the env
-  mapfile -t cand < <(awsq rds describe-db-instances --output json \
-    | jq -r --arg e "$ENVN" '.DBInstances[] | select((.ReadReplicaSourceDBInstanceIdentifier // "") == "")
-        | select(.DBInstanceIdentifier | ascii_downcase | contains($e)) | .DBInstanceIdentifier')
-  case "${#cand[@]}" in
-    1) DB="${cand[0]}" ;;
-    0) INFO+=("no RDS primary with '$ENVN' in its name in $R — pass --db <instance-id>") ;;
-    *) INFO+=("several RDS primaries match '$ENVN': ${cand[*]} — pass --db <instance-id>") ;;
-  esac
+  rds_json="$(awsq rds describe-db-instances --output json 2>/dev/null || true)"
+  if [[ -z "$rds_json" ]]; then
+    INFO+=("could not list RDS instances in $R; pass --db <instance-id> after verifying the target")
+  else
+    mapfile -t primaries < <(jq -r '[.DBInstances[]? | select((.ReadReplicaSourceDBInstanceIdentifier // "") == "")
+        | .DBInstanceIdentifier] | sort | .[]' <<<"$rds_json")
+    mapfile -t tagged < <(jq -r --arg e "$ENVN" '[.DBInstances[]? | select((.ReadReplicaSourceDBInstanceIdentifier // "") == "")
+        | select([.TagList[]? | select((.Key | ascii_downcase) == "environment" or (.Key | ascii_downcase) == "env")
+            | (.Value | ascii_downcase)] | index($e) != null) | .DBInstanceIdentifier] | sort | .[]' <<<"$rds_json")
+    if (( ${#primaries[@]} == 0 )); then
+      INFO+=("no RDS primary instances found in $R")
+    elif (( ${#tagged[@]} == 1 )); then
+      DB="${tagged[0]}"
+    elif (( ${#tagged[@]} > 1 )); then
+      cand=("${tagged[@]}")
+      if ! choose_primary_candidate; then INFO+=("several RDS primaries have an environment/env tag matching '$ENVN': ${cand[*]} — pass --db <instance-id>"); fi
+    else
+      cand=("${primaries[@]}")
+      INFO+=("no environment/env tag matches '$ENVN'; instance names are not used to infer environment")
+      if ! choose_primary_candidate; then INFO+=("select the RDS primary for '$ENVN' explicitly with --db <instance-id>; candidates: ${cand[*]}"); fi
+    fi
+  fi
 fi
 if [[ -n "$DB" ]]; then
   dbj="$(awsq rds describe-db-instances --db-instance-identifier "$DB" --query 'DBInstances[0]' --output json 2>/dev/null || true)"

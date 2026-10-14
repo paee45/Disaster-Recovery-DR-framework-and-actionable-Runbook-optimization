@@ -176,6 +176,20 @@ LocalStack/moto simulate AWS APIs; the three independent Postgres databases are 
 The mock stage provides two synthetic automated snapshots dated one and two days before setup plus one manual walkthrough
 snapshot. These timestamps support selection and runbook rehearsal only; the mock does not retain historical database state,
 so restoring the synthetic daily snapshots does not reproduce data from those dates.
+The mock stage also owns discovery-only RDS primaries: `local-dev-db`, `orders-primary-01`, `local-uat-db`, and
+`local-prod-db`. The DEV candidates are associated through their `environment=dev` tags, not their names. They have no
+matching Postgres application endpoints and are not DR targets. To inspect discovery safely,
+open the runner. With a terminal attached, the DEV command displays numbered choices; the selected profile is written only
+to ignored `.state`:
+```bash
+bash iac/local.sh shell
+source /workspace/tests/local/.state/local.env
+bash /workspace/automation/scripts/dr-env-discover.sh dev --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --out /workspace/tests/local/.state/dev-discovery.env
+```
+Discovery uses an `Environment` or `env` tag to match the requested environment; it never infers the environment from the
+identifier. Without a matching tag, it offers all primaries in the interactive menu; noninteractive runs leave `PRIMARY_DB`
+unresolved and require `--db <instance-id>`. Use `--print` to inspect the generated profile without writing any file.
 Terraform owns containers, volumes, mock resources, Helm releases, and fixture workloads. PostgreSQL initialization
 comes from the existing seed SQL. DR scripts deliberately mutate the fixture during drills; inspect drift afterwards,
 and do not reapply the desired-state stack during a drill because it can undo the cutover.

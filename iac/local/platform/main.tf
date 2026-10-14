@@ -7,6 +7,7 @@ locals {
   }
   runner_mounts = {
     automation                    = { target = "/workspace/automation", read_only = true }
+    env                           = { target = "/workspace/env", read_only = true }
     "tests/local"                 = { target = "/workspace/tests/local", read_only = false }
     "tests/lint"                  = { target = "/workspace/tests/lint", read_only = true }
     "tests/local/.state/evidence" = { target = "/workspace/evidence", read_only = false }

@@ -72,6 +72,13 @@ tf A21 "DR_AUTH_ALLOWED=sso,role refuses a static-key profile"           "uses '
 tf A22 "expired SSO (no tty): tells you the exact login command"         "aws sso login --profile dr-sso-expired" env AWS_PROFILE=dr-sso-expired DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard </dev/null"
 tf A23 "unknown profile name is refused (no silent fallback)"            "not found" env AWS_PROFILE=no-such-profile DR_GUARD_OK= bash -c "source '$S/dr-lib.sh' && dr_guard"
 tf A24 "static key rejected → not an SSO profile, says what to check"    "not an SSO profile" env DR_GUARD_OK= bash -c "source '$S/dr-lib.sh'; AWS_PROFILE=dr-decoy; ACCOUNT_ID=000000000000; dr_reauth </dev/null"
+a25() { local out; out="$("$S/dr-env-discover.sh" dev --profile "$AWS_PROFILE" --region "$AWS_REGION" --print </dev/null 2>&1)"; echo "$out"
+        grep -q 'several RDS primaries have an environment/env tag matching' <<<"$out" \
+        && grep -q 'orders-primary-01' <<<"$out" && grep -q 'export PRIMARY_DB=""' <<<"$out"; }
+t  A25 "discovery uses environment tags, not DEV name matching; ambiguity stays unresolved" a25
+a26() { local out; out="$("$S/dr-env-discover.sh" dev --profile "$AWS_PROFILE" --region "$AWS_REGION" --db orders-primary-01 --print </dev/null 2>&1)"; echo "$out"
+        grep -q '^export PRIMARY_DB=orders-primary-01$' <<<"$out"; }
+t  A26 "discovery --db selects a DEV-tagged primary whose name has no DEV" a26
 
 echo "=== B. Environment check, inventory, pre-flight"
 t  B01 "dr-env-check.sh S3 → PASS"                                   "$S/dr-env-check.sh" S3
@@ -94,7 +101,16 @@ c00() { "$S/dr-restore.sh" capture "$PRIMARY_DB" && jq -e --slurpfile fx "$FX" '
           and (.instance.VpcSecurityGroups | length) == ($fx[0].VpcSecurityGroups | length)
           and (.instance.DBSubnetGroup.Subnets | length) == ($fx[0].DBSubnetGroup.Subnets | length)' "$BASELINE_DIR/baseline-$PRIMARY_DB.json"; }
 t  C00 "capture baseline: UAT-shaped source, 3 SGs/subnets, 4 user tags, pg_settings (moto omits aws:* tags)" c00
-t  C01 "list-snapshots"                                              "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB"
+c01() {
+  "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB" || return 1
+  command aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots \
+    --db-instance-identifier "$PRIMARY_DB" --output json \
+    | jq -e '([.DBSnapshots[] | select(.SnapshotType == "automated") | .DBSnapshotIdentifier] | sort)
+        == ["app-pg-local-daily-1d", "app-pg-local-daily-2d"]
+      and ([.DBSnapshots[] | select(.SnapshotType == "manual") | .DBSnapshotIdentifier])
+        == ["app-pg-local-fixture"]' >/dev/null
+}
+t  C01 "list-snapshots: two synthetic automated + one manual fixture" c01
 REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
 c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)
            and .DBSubnetGroupName == $f.DBSubnetGroup.DBSubnetGroupName and .DBParameterGroupName == $f.DBParameterGroups[0].DBParameterGroupName

@@ -12,6 +12,12 @@ locals {
     { for tag in local.fx.TagList : tag.Key => tag.Value if !startswith(tag.Key, "aws:") },
     { app = "orders", owner = "sre-team", cost-center = "CC 1234 / retail", backup-plan = "local-daily" }
   )
+  discovery_candidates = {
+    "local-dev-db"      = "dev"
+    "orders-primary-01" = "dev"
+    "local-uat-db"      = "uat"
+    "local-prod-db"     = "prod"
+  }
 }
 
 resource "aws_vpc" "this" {
@@ -143,6 +149,34 @@ resource "aws_db_instance" "replica" {
   performance_insights_retention_period = local.fx.PerformanceInsightsEnabled ? local.fx.PerformanceInsightsRetentionPeriod : null
   tags                                  = local.tags
 
+}
+
+resource "aws_db_instance" "discovery" {
+  for_each = local.discovery_candidates
+
+  identifier              = each.key
+  engine                  = local.fx.Engine
+  engine_version          = local.fx.EngineVersion
+  instance_class          = local.fx.DBInstanceClass
+  username                = local.fx.MasterUsername
+  password                = "masterpw"
+  db_name                 = try(local.fx.DBName, null)
+  port                    = local.db_port == 0 ? 5432 : local.db_port
+  allocated_storage       = local.fx.AllocatedStorage
+  db_subnet_group_name    = aws_db_subnet_group.this.name
+  vpc_security_group_ids  = aws_security_group.db[*].id
+  parameter_group_name    = aws_db_parameter_group.this.name
+  availability_zone       = "eu-west-1a"
+  publicly_accessible     = false
+  multi_az                = false
+  backup_retention_period = local.fx.BackupRetentionPeriod
+  deletion_protection     = false
+  skip_final_snapshot     = true
+
+  tags = merge(local.tags, {
+    environment  = each.value
+    "dr-fixture" = "discovery-only"
+  })
 }
 
 resource "aws_db_snapshot" "walkthrough" {

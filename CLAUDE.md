@@ -104,6 +104,10 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   Reloader, and endpoint ledger. The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
 - **Mock fidelity:** Moto 5.0.28 is patched for unique DB resource IDs, replica isolation, and RDS field round-trips.
   `app-pg-local-fixture` is a Terraform-owned manual mock snapshot; it is not a scheduled backup or a real data clone.
+  The mock also has synthetic automated snapshot metadata (`app-pg-local-daily-1d`, `app-pg-local-daily-2d`) and
+  discovery-only RDS primaries (`local-dev-db`, `orders-primary-01`, `local-uat-db`, `local-prod-db`). These have no
+  corresponding app databases and are never DR targets. Discovery matches `Environment`/`env` tags, not identifier names;
+  DEV intentionally exercises ambiguous tagged discovery (`--db` is required without a TTY).
 - **Gotcha:** stopping the Colima VM clears moto/LocalStack in-memory state while preserving Postgres and k3s volumes.
   Reapply the mock Terraform stage before resuming a DR run; this creates the mock snapshot and Secrets Manager records.
 - **Next:** production P3A-S06 reconciliation/sign-off remains pending, then P3A-S07. Local DEV P1-S03 adoption is complete
