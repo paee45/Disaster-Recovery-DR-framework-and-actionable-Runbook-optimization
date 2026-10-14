@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: IC + SRE lead (CTO if data loss is material) |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · Gate approvers: IC + SRE (CTO if data loss is material) |
 | Topology before → after | `app-pg-prod` (Multi-AZ, **lost**) + `app-pg-prod-replica` (same region) → **`app-pg-prod-replica` = standalone primary** (single-AZ until CP03-S03). Not a regional-outage solution (risk R1) |
 | Endpoint | **Changes** → endpoint update ([CP-01](../common/CP-01-secret-endpoint-cutover.md): K8s Secret patched directly in `SECRET_MODE=k8s`, or Secrets Manager + ESO in `eso` mode) → **Reloader** |
 | Targets | RPO target 24 h (expected = replica lag, usually seconds) · RTO target **30 min** (`T9 − T0`) — achievable only with a fast G1 (≤ 10 min) |
@@ -28,7 +28,7 @@ dr_set_target "$REPLICA_DB"           # exports TARGET_DB/TARGET_DSN (replica en
 | P1-S03 | Set **T0** from the first failing synthetic / 5xx: `dr_mark T0 --at <ts> source=<monitor>` | App owner | 2 | Recorded |
 | P1-S04 | Confirm the scenario: RDS events + status of `$PRIMARY_DB`; no Multi-AZ failover in progress or it failed; **data is correct** (not a corruption incident) | DBA | 3 | `DECISION: scenario S2` |
 | P1-S05 | Pre-flight: `dr_run preflight ./automation/scripts/dr-preflight.sh replica` (replica `available` + `replicating`/`error`, `ReplicaLag` vs RPO, LSN/heartbeat SQL, creds work on the replica, EKS + Reloader healthy (+ ESO in `eso` mode), host keys present in the K8s Secret, consumer inventory) | Executor | 3 | `PRE-FLIGHT: PASS`, or a waiver per FAIL |
-| P1-G1 ⛳ | **Declare DR (IC + SRE lead; CTO if the estimated loss is material)**. GO if the primary is not recoverable within (RTO − measured promote+cutover time) | IC | 5 | `DECISION: G1 GO est_loss=<s>` · `dr_mark T2` |
+| P1-G1 ⛳ | **Declare DR (IC + SRE; CTO if the estimated loss is material)**. GO if the primary is not recoverable within (RTO − measured promote+cutover time) | IC | 5 | `DECISION: G1 GO est_loss=<s>` · `dr_mark T2` |
 
 ## Phase 2 — Promotion (budget 15 min)
 

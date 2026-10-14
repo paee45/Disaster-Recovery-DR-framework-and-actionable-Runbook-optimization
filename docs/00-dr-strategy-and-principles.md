@@ -66,7 +66,7 @@
 |---|---|---|---|
 | DEV | Engineer | Team lead | Team lead |
 | UAT | SRE on-call | SRE on-call + QA lead | QA lead / project lead |
-| PROD | Incident Commander | IC + SRE lead (2 approvals in SSM) | **CTO** |
+| PROD | Incident Commander | IC + SRE (2 approvals in SSM) | **CTO** |
 
 **Pre-authorise** the PROD decision: if the approver cannot be reached within 15 min, the IC may proceed. Record this in the DR policy.
 

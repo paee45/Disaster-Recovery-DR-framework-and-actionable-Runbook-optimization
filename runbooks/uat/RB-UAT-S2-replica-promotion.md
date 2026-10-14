@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Before → after | `app-pg-uat` (single-AZ, lost) + `app-pg-uat-replica` → **`app-pg-uat-replica` = standalone primary** (single-AZ, as UAT standard) |
 | Endpoint | **Changes** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): K8s Secret patched directly (`SECRET_MODE=k8s`; Secrets Manager + ESO in `eso` mode) → **Reloader** |
 | Targets | RPO target 24 h (expected = replica lag) · RTO target 30 min |

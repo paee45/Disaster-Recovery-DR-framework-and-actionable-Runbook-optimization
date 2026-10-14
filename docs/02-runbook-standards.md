@@ -10,7 +10,7 @@ Repeated procedures (secret cutover, verification, parity, fencing, evidence, PI
 
 | # | Section | Purpose |
 |---|---|---|
-| 0 | **Header / metadata** | ID, version, owner, reviewer (SRE lead), approver (CTO), targets, test status, environment, linked automation version |
+| 0 | **Header / metadata** | ID, version, owner, reviewer (SRE), approver (CTO), targets, test status, environment, linked automation version |
 | 1 | **When to use / when NOT to use** | Trigger criteria, and the failure classes this runbook does *not* cover (link to the PITR or ransomware runbooks) |
 | 2 | **Roles (RACI)** | IC, Executor (Ops lead), Scribe, Comms lead, DBA, App owner, Approver |
 | 3 | **Prerequisites** | Access (break-glass role), tools, links, pre-checks, comms channel |
@@ -79,7 +79,7 @@ Each role needs at least 2 people who have read the runbooks (no single point of
 ## 5. Lifecycle and governance
 
 - **One runbook per environment × scenario** (DEV/UAT/PROD × S1–S4 + FB). Env differences (approvers, Multi-AZ steps, comms, targets) are explicit, not "if PROD then…" prose.
-- **Source of truth:** Markdown in Git; every PR is **reviewed by the SRE lead and approved by the CTO** (ISMS approval record). Version bump with each merged change (`vMAJOR.MINOR`).
+- **Source of truth:** Markdown in Git; every PR is **reviewed by the SRE and approved by the CTO** (ISMS approval record). Version bump with each merged change (`vMAJOR.MINOR`).
 - **Linked automation:** the runbook header pins the SSM document version and script git SHA. CI checks that they match.
 - **Freshness:** a runbook not reviewed for > 12 months, or not updated after a DR event/architecture change, is out of date (ISMS document control, [09](09-iso27001-scope.md)).
 - **Automated linting in CI:** every step has an ID, expected result and verify; no TODOs in released versions; links resolve; commands pass `shellcheck` and `cfn-lint`/`yamllint`.

@@ -74,7 +74,7 @@
 
 | | DEV | UAT | PROD |
 |---|---|---|---|
-| Declares / approves | Team lead | SRE on-call + QA lead | IC + SRE lead; **CTO** accepts data loss |
+| Declares / approves | Team lead | SRE on-call + QA lead | IC + SRE; **CTO** accepts data loss |
 | Gate approvals in SSM (`MinRequiredApprovals`) | 1 | 1 | 2 (four-eyes) |
 | Change type | None | Standard | Pre-approved emergency change |
 | Comms | Team chat | Chat + UAT users/projects email | Full matrix ([docs/06](../docs/06-communications.md)) |
@@ -88,7 +88,7 @@
 | Item | Rule |
 |---|---|
 | Owner | SRE (`{{SRE_OWNER}}`) |
-| Review / approval | Every change by Git pull request: **reviewed by the SRE lead, approved by the CTO**. The merged PR is the approval record |
+| Review / approval | Every change by Git pull request: **reviewed by the SRE, approved by the CTO**. The merged PR is the approval record |
 | Classification | Internal |
 | Review cycle | At least every 12 months, and after every DR event, significant architecture change or ISMS audit finding |
 | Versioning | `vMAJOR.MINOR` in each runbook header, plus a change-log row that references the PR/PIR |

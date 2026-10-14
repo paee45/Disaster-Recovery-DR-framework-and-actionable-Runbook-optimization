@@ -2,6 +2,7 @@
 import sys
 import uuid
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import GeneratorType
 
 import moto
@@ -168,6 +169,24 @@ def _promote(self, db_kwargs):
 
 
 rds_models.RDSBackend.promote_read_replica = _promote
+
+_orig_create_snapshot = rds_models.RDSBackend.create_db_snapshot
+_synthetic_backup_age_days = {
+    "app-pg-local-daily-1d": 1,
+    "app-pg-local-daily-2d": 2,
+}
+
+
+def _create_snapshot(self, db_instance, db_snapshot_identifier, snapshot_type="manual", tags=None):
+    snapshot = _orig_create_snapshot(self, db_instance, db_snapshot_identifier, snapshot_type, tags)
+    age_days = _synthetic_backup_age_days.get(db_snapshot_identifier)
+    if age_days is not None:
+        snapshot.snapshot_type = "automated"
+        snapshot.created_at = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat(timespec="milliseconds")
+    return snapshot
+
+
+rds_models.RDSBackend.create_db_snapshot = _create_snapshot
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

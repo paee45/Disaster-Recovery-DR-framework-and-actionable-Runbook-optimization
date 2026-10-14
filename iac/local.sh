@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$ROOT/tests/local/.state"
 usage() {
   printf '%s\n' \
-    'Usage: bash iac/local.sh doctor|prepare|ready|shell|test|dr [S3|S4]|failback <change-id>' \
+    'Usage: bash iac/local.sh create|doctor|prepare|ready|shell|test|dr [S3|S4]|failback <change-id>' \
     '       bash iac/local.sh unfence <DR_ID> <local-db-id>' \
     '       bash iac/local.sh <platform|mock|addons|workloads|normalization> <terraform arguments...>' \
     'Build order: platform plan/apply, prepare, mock plan/apply, addons plan/apply, workloads plan/apply.' \
@@ -30,7 +30,44 @@ dr_runner() {
   done
   "${command[@]}" drtest-tools bash /workspace/iac/local/dr.sh "$@"
 }
+create_local_lab() {
+  local stage stamp host_plan plan_file plan_json answer
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  for stage in platform mock addons workloads; do
+    host_plan="$STATE/create-${stage}-${stamp}.plan"
+    if [[ "$stage" == platform ]]; then
+      plan_file="$host_plan"
+    else
+      plan_file="/workspace/tests/local/.state/$(basename "$host_plan")"
+    fi
+    bash "$ROOT/iac/local.sh" "$stage" plan "-out=$plan_file"
+    if [[ "$stage" == platform ]]; then
+      plan_json="$(terraform -chdir="$ROOT/iac/local/platform" show -json "$plan_file")"
+    else
+      plan_json="$(runner terraform -chdir="/workspace/iac/local/$stage" show -json "$plan_file")"
+    fi
+    jq -r '
+      .resource_changes // [] |
+      if length == 0 then "No resource changes."
+      else
+        group_by(.change.actions | join(","))[] |
+        "\(.[0].change.actions | join(",")): \(length)\n" + (map(.address) | join("\n"))
+      end
+    ' <<<"$plan_json"
+    read -r -p "Type APPLY to apply the reviewed $stage plan (anything else stops): " answer
+    [[ "$answer" == APPLY ]] || { printf 'Stopped; saved plan: %s\n' "$plan_file"; return 2; }
+    bash "$ROOT/iac/local.sh" "$stage" apply "$plan_file"
+    if [[ "$stage" == platform ]]; then
+      bash "$ROOT/iac/local.sh" prepare
+    fi
+  done
+  bash "$ROOT/iac/local.sh" ready
+}
 case "$stage" in
+  create)
+    [[ $# == 0 ]] || { usage; exit 2; }
+    create_local_lab
+    ;;
   doctor)
     docker ps --filter name=drtest --format '{{.Names}} {{.Status}}'
     ;;

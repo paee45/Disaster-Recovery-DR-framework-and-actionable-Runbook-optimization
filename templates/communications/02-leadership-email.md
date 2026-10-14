@@ -1,6 +1,6 @@
 # Internal leadership — Email (+ exec chat cross-post)
 
-**To:** `dr-leadership-{{env}}@` (CTO, SRE lead, Head of Support, Security lead; DPO only if the CTO decides personal data is affected)
+**To:** `dr-leadership-{{env}}@` (CTO, SRE, Head of Support, Security lead; DPO only if the CTO decides personal data is affected)
 **From:** Comms lead on behalf of the IC · **Cadence:** PROD SEV1 every 30 min; UAT only if UAT is blocked > 4 h · **DEV: not sent**
 **Style:** business impact first, decisions needed, no jargon. Each email is ≤ 12 lines in the main body.
 

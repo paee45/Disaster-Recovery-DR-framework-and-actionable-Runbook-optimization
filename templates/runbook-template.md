@@ -4,7 +4,7 @@
 |---|---|
 | Runbook ID / version | |
 | Service / tier | |
-| Owner · Reviewed by (SRE lead) · Approved by (CTO) | |
+| Owner · Reviewed by (SRE) · Approved by (CTO) | |
 | Environments | |
 | Linked automation (doc + version, git SHA) | |
 | Test status / measured RTO / RPO (from real events) | |

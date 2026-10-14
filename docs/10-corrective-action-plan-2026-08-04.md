@@ -4,7 +4,7 @@
 |---|---|
 | Source | ISMS DR Exercise Report v1.0, exercise date 2026-08-04 (UAT, scenario S3: snapshot restore) |
 | ISO/IEC 27001:2022 | Clause **10.2** nonconformity & corrective action · A.5.27 learning from incidents · A.5.30 ICT readiness |
-| Owner | SRE lead · Approved by: CTO |
+| Owner | SRE · Approved by: CTO |
 | Status | v0.1-draft. Owners, due dates and ticket links are `{{…}}` |
 
 ## 1. Result recap
@@ -48,7 +48,7 @@ DB size was 590 MB, so the restore itself was not the problem. **The overrun cam
 
 ## 3. Corrective actions (ready to paste into the tickets)
 
-Status legend: **Delivered** = implemented in this repository, pending SRE lead review / CTO approval · **Open** = needs work outside the repo.
+Status legend: **Delivered** = implemented in this repository, pending SRE review / CTO approval · **Open** = needs work outside the repo.
 
 ### TICKET-101 — Runbook: promotion / Multi-AZ procedures + troubleshooting
 | | |
@@ -56,7 +56,7 @@ Status legend: **Delivered** = implemented in this repository, pending SRE lead 
 | Findings | F5, F15 (+ the scope request in the report) |
 | Corrective action | Separate runbooks per env × scenario: S1 Multi-AZ post-event, S2 replica promotion, S3 snapshot, S4 PITR, plus failback runbooks; strict step format; troubleshooting guide; documented outage-simulation method |
 | Delivered | [`runbooks/README.md`](../runbooks/README.md) (catalogue + decision tree), `runbooks/prod/RB-PROD-S1…`, `RB-PROD-S2…`, `RB-UAT-S2…`, [CP-07 troubleshooting](../runbooks/common/CP-07-troubleshooting.md) |
-| Definition of done | Runbooks merged after review by the SRE lead and approval by the CTO; every step has an owner, a time budget, a command and an expected result; no undefined variables (`dr-env-check.sh` passes) |
+| Definition of done | Runbooks merged after review by the SRE and approval by the CTO; every step has an owner, a time budget, a command and an expected result; no undefined variables (`dr-env-check.sh` passes) |
 | Owner / due | `{{}}` / `{{}}` |
 
 ### TICKET-102 — Automation of manual steps + Kubernetes restart on secret change
@@ -150,7 +150,7 @@ ISO 27001 requires reviewing whether corrective actions were effective. Choose o
 |---|---|---|
 | **A (recommended)**: one verification exercise in UAT after TICKET-102/103/107 are done (a one-off, not a schedule) | Re-run [RB-UAT-S3 v1.1](../runbooks/uat/RB-UAT-S3-snapshot-restore.md) + exercise failback | RTO ≤ 30 min; 0 manual pod restarts; 0 manual SG/retention fixes; 0 runbook clarification questions; 100 % notices sent; evidence bundle auto-generated |
 | B: review at the next real event | Use the KPI report of the next S2/S3/S4 event (any env) | Same criteria |
-| C: desk verification only | SRE lead verifies the deliverables + `DRY_RUN` in UAT | Deliverables exist and run; **RTO not proven** (risk R3 stays open) |
+| C: desk verification only | SRE verifies the deliverables + `DRY_RUN` in UAT | Deliverables exist and run; **RTO not proven** (risk R3 stays open) |
 
 ## 5b. Verification of the delivered scripts (before any re-exercise)
 

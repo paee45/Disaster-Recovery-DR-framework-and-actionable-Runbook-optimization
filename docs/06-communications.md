@@ -1,6 +1,6 @@
 # 06 — Communication Matrix & Rules
 
-**Template approval:** all templates are ISMS documents, reviewed by the SRE lead and approved by the CTO (no separate Legal/Customer Success sign-off for now).
+**Template approval:** all templates are ISMS documents, reviewed by the SRE and approved by the CTO (no separate Legal/Customer Success sign-off for now).
 
 Templates live in [`templates/communications/`](../templates/communications/):
 
@@ -29,7 +29,7 @@ Each template covers the four lifecycle phases: **[Investigating] → [Failover 
 1. **One voice per audience.** Only the Comms lead posts externally. Engineers do not answer customers directly in tickets during the incident; they link to the status page.
 2. **Commit to the next update time, and keep it.** Every message ends with "Next update by HH:MM UTC" (plus a local time zone for regional customers). Send an update even if there is no news.
 3. **Say what is known, not why it might have happened.** External messages do not speculate about root cause or blame AWS or suppliers by name, unless the IC/Legal approve.
-4. **Data-loss wording uses the pre-approved templates** (reviewed by the SRE lead, approved by the CTO). Any deviation needs CTO approval. Never write "no data was lost" until reconciliation is complete.
+4. **Data-loss wording uses the pre-approved templates** (reviewed by the SRE, approved by the CTO). Any deviation needs CTO approval. Never write "no data was lost" until reconciliation is complete.
 5. **Use environment tags in every subject/first line:** `[PROD]`, `[UAT]`, `[DEV]`, and `[DRILL]` for exercises. **Every drill message starts and ends with `[DRILL] — THIS IS AN EXERCISE`** so a drill is never mistaken for a real incident.
 6. **Use time zones correctly.** Write UTC first, then local (e.g. `14:05 UTC / 16:05 CEST`).
 7. **Log every message** to `comms/sent-messages.md` in the evidence bundle (the incident platform can do this automatically).
@@ -55,7 +55,7 @@ Each template covers the four lifecycle phases: **[Investigating] → [Failover 
 ### 5.1 Ownership
 | Role | Owns | Backup |
 |---|---|---|
-| Incident Commander | The decision to communicate; incident channel; leadership updates | SRE lead |
+| Incident Commander | The decision to communicate; incident channel; leadership updates | SRE |
 | Comms lead | All sending (internal broadcast, customers, partners), the comms log, the distribution lists | IC (if no comms lead is available, the IC sends) |
 | Integration owner | Partner/supplier technical instructions (pause, resend) | Backend lead |
 | CTO | Approves the templates; approves any deviation or data-loss wording; decides on DPO/regulator notification | Engineering Director |

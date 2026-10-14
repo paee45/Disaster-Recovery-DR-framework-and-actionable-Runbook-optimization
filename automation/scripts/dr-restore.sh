@@ -306,8 +306,12 @@ case "${1:-}" in
       --query 'reverse(sort_by(DBSnapshots,&SnapshotCreateTime))[].[DBSnapshotIdentifier,SnapshotType,SnapshotCreateTime,Status,Encrypted,AllocatedStorage]' \
       --output table
     echo "PITR window:"
-    aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups --db-instance-identifier "$db" \
-      --query 'DBInstanceAutomatedBackups[].{status:Status,window:RestoreWindow,resourceId:DbiResourceId}' --output table || true
+    if [[ "${DR_ENV:-}" == local ]]; then
+      echo "Local Moto does not model automated-backup/PITR metadata; use the available snapshot list for S3."
+    elif ! aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups --db-instance-identifier "$db" \
+      --query 'DBInstanceAutomatedBackups[].{status:Status,window:RestoreWindow,resourceId:DbiResourceId}' --output table 2>/dev/null; then
+      echo "WARNING: automated-backup/PITR metadata is unavailable; snapshot restore can still proceed."
+    fi
     echo "stored baselines:"
     # shellcheck disable=SC2012
     ls -1t "$BASELINE_DIR"/baseline-"$db"-*.json 2>/dev/null | head -3 || echo "  none — run: $0 capture $db"

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{TEAM}}` · Reviewed: SRE lead · Approved: CTO · Gate approver: Team lead |
+| Version / owner | v1.0-draft / `{{TEAM}}` · Reviewed: SRE · Approved: CTO · Gate approver: Team lead |
 | Topology | **Single primary only** (no Multi-AZ, no replica). Snapshot/PITR restore is the **only** recovery path in DEV |
 | Before → after | `app-pg-dev` → **`app-pg-dev-r<YYYYMMDDHHMM>`** becomes primary |
 | Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): endpoint written into the K8s Secret (`SECRET_MODE=k8s`; or via Secrets Manager + ESO in `eso` mode) → **Reloader** restarts the pods |

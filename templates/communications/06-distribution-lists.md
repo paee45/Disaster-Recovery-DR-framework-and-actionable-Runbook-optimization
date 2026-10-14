@@ -1,6 +1,6 @@
 # DR Distribution Lists & Contacts (maintained register)
 
-Owner: Comms lead (`{{name}}`) · Reviewed: SRE lead · Approved: CTO · **Review: every quarter and after every DR event/exercise.**
+Owner: Comms lead (`{{name}}`) · Reviewed: SRE · Approved: CTO · **Review: every quarter and after every DR event/exercise.**
 Classification: Internal (contains contact data; keep personal phone numbers in the on-call tool, not here).
 
 ## 1. Channels
@@ -18,7 +18,7 @@ Classification: Internal (contains contact data; keep personal phone numbers in 
 
 | List | Members (roles) | Used for | Address / channel |
 |---|---|---|---|
-| DR-CORE | SRE on-call, SRE lead, DBA, Backend lead | Every event/exercise, start → end | `{{}}` |
+| DR-CORE | SRE on-call, SRE, DBA, Backend lead | Every event/exercise, start → end | `{{}}` |
 | DR-LEADERSHIP | CTO, Engineering Director, Head of Product, Head of Support | SEV1/SEV2 PROD; exercise start/end | `{{}}` |
 | DR-ORG-BROADCAST | Engineering, Product, Support, Customer-facing teams | Exercise start/end; PROD SEV1 summaries | `{{}}` |
 | DR-SUPPORT | Support team leads | Customer-facing impact (to answer tickets with the status page link) | `{{}}` |

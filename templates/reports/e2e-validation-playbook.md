@@ -2,7 +2,7 @@
 
 Purpose: the **minimum** checks that prove the service works on the recovered database (CP02 / runbook Phase 4).
 Only checks that validate recovery are listed here. Extra checks (e.g. a separate user-login test) are added only if they prove something this list does not.
-Owner: Backend lead · Reviewed: SRE lead · Approved: CTO · Keep this page up to date: it is part of the runbook.
+Owner: Backend lead · Reviewed: SRE · Approved: CTO · Keep this page up to date: it is part of the runbook.
 
 ## 1. Prerequisites (prepare before any exercise/event)
 

@@ -5,7 +5,7 @@
 | Document | ISMS — Database Disaster Recovery (RDS PostgreSQL + EKS) |
 | Version | v0.1-draft |
 | Owner | SRE (`{{SRE_OWNER}}`) |
-| Reviewed by | SRE lead (`{{name}}`) |
+| Reviewed by | SRE (`{{name}}`) |
 | Approved by | CTO (`{{name}}`) |
 | Classification | Internal |
 | Review cycle | At least every 12 months; also after a DR event, a significant architecture change or an audit finding |
@@ -28,7 +28,7 @@
 | Compute consumers | EKS workloads that consume the DB secrets (Deployments, StatefulSets, CronJobs, Jobs) |
 | Procedures | `runbooks/` (15 runbooks + CP-01…CP-06), `docs/`, comms templates, evidence process |
 | Automation | `automation/` scripts and SSM Automation documents |
-| People / roles | IC, Executor, DBA, Scribe, Comms lead, SRE lead (reviewer), CTO (approver, risk owner) |
+| People / roles | IC, Executor, DBA, Scribe, Comms lead, SRE (reviewer), CTO (approver, risk owner) |
 | Records | Timeline, evidence bundles, PIRs, approvals (PRs, SSM `aws:approve`) |
 
 ### Out of scope (with justification)
@@ -55,7 +55,7 @@ AWS (RDS, Secrets Manager, EKS, CloudTrail, CloudWatch, SSM, S3), the incident t
 | 6.1.2 / 6.1.3 Risk assessment & treatment | DR risk register (§5) → feeds the ISMS risk register and the Statement of Applicability |
 | 6.2 Objectives | **RPO 24 h, RTO 30 min** (all envs); measured per event (`dr-rto-rpo-calc.py`) |
 | 7.2 / 7.3 Competence & awareness | Two people per role; yearly read-through + DEV dry-run practice (TICKET-108); attendance recorded |
-| 7.5 Documented information | Git-based document control: version, PR review (SRE lead), approval (CTO), change log |
+| 7.5 Documented information | Git-based document control: version, PR review (SRE), approval (CTO), change log |
 | 8.1 Operational planning & control | Env × scenario runbooks, gates, change types (emergency/standard) |
 | 9.1 Monitoring & measurement | KPIs per event: business RTO, RPO, decision time, cutover time, deviations |
 | 9.2 Internal audit | Evidence bundles (manifest + SHA-256) can be sampled by internal audit |

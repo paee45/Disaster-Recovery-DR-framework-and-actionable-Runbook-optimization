@@ -10,7 +10,7 @@
 | Roles | IC {{}} · Exec {{}} · DBA {{}} · Comms {{}} · Scribe {{}} · Observers {{GRC/auditor}} |
 | Scenario | {{e.g. FIS network disruption of DB subnets in ap-southeast-1, executors not briefed}} |
 | Outage simulation method | {{e.g. quarantine SG on primary (dr-fence-instance.sh quarantine) — note: an instance with a read replica cannot be stopped}} |
-| Prepared / reviewed / approved | {{Lead SRE}} / SRE lead / CTO |
+| Prepared / reviewed / approved | {{Lead SRE}} / SRE / CTO |
 | Time zone | **All times UTC** |
 | **Result** | **{{PASS / PASS with findings / FAIL}}** |
 
@@ -55,5 +55,5 @@
 -
 
 ## 6. Sign-off
-Service Owner {{}} · SRE lead {{}} · GRC {{}} · Date {{}}
+Service Owner {{}} · SRE {{}} · GRC {{}} · Date {{}}
 Evidence: s3://{{bucket}}/{{prefix}} · manifest sha256 {{hash}}

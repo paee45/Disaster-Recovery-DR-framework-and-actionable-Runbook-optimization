@@ -150,6 +150,16 @@ resource "aws_db_snapshot" "walkthrough" {
   db_snapshot_identifier = "app-pg-local-fixture"
 }
 
+resource "aws_db_snapshot" "daily_1d" {
+  db_instance_identifier = aws_db_instance.primary.identifier
+  db_snapshot_identifier = "app-pg-local-daily-1d"
+}
+
+resource "aws_db_snapshot" "daily_2d" {
+  db_instance_identifier = aws_db_instance.primary.identifier
+  db_snapshot_identifier = "app-pg-local-daily-2d"
+}
+
 resource "aws_secretsmanager_secret" "app" {
   name                    = "local/app/db"
   recovery_window_in_days = 0

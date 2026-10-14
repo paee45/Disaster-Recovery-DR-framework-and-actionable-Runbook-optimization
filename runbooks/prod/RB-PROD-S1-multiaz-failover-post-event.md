@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO (ISMS document control, [docs/09](../../docs/09-iso27001-scope.md)) |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO (ISMS document control, [docs/09](../../docs/09-iso27001-scope.md)) |
 | Topology | `app-pg-prod` Multi-AZ (primary + synchronous standby) + read replica `app-pg-prod-replica` |
 | What AWS does | Detects the primary failure → promotes the standby → **flips the same endpoint DNS** to the new host (typically 60–120 s) → builds a new standby in the background |
 | Secret change | **None.** The endpoint is unchanged, so Reloader is **not** triggered |

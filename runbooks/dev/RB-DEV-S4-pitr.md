@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{TEAM}}` · Reviewed: SRE lead · Approved: CTO · Gate approver: Team lead |
+| Version / owner | v1.0-draft / `{{TEAM}}` · Reviewed: SRE · Approved: CTO · Gate approver: Team lead |
 | Before → after | `app-pg-dev` → **`app-pg-dev-p<YYYYMMDDHHMM>`** becomes primary (or a side instance for copying data back) |
 | Endpoint | Full cutover: **new** → [CP-01](../common/CP-01-secret-endpoint-cutover.md). Side instance: unchanged |
 | RPO / RTO targets | 24 h (expected: minutes; 7-day restore window) / 30 min (aim) |

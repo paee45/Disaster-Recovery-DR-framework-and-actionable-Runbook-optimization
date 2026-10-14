@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · G1 data-loss acceptance: **CTO** |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · G1 data-loss acceptance: **CTO** |
 | Before → after | **Mode A (full cutover):** new instance **`app-pg-prod-p<YYYYMMDDHHMM>`** (Multi-AZ) becomes primary. **Mode B (surgical repair):** a side instance is used only to copy data back; `app-pg-prod` stays primary |
 | Endpoint | Mode A: **new** → [CP-01](../common/CP-01-secret-endpoint-cutover.md). Mode B: unchanged |
 | RPO | Mode A: incident detection − chosen `restore-time` (writes after the restore time are lost unless reconciled). Mode B: ≈ 0 for unaffected data |
@@ -33,8 +33,8 @@ export RESTORED_DB="${PRIMARY_DB}-p$(date -u +%Y%m%d%H%M)"
 | P1-S04 | Restore window: `aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` and `LatestRestorableTime` | DBA | 1 | `BAD_TS` inside the window |
 | P1-S05 | **Choose the mode** (IC + DBA + App owner): **B surgical** if the damage is limited to known tables/rows and the rest of the DB must keep its newer writes; **A full** if the damage is wide/unknown or the instance is lost | IC | 5 | `DECISION: mode=A\|B` |
 | P1-S06 | **Restore time** = `BAD_TS − 1 s` (for a lost instance: `--use-latest-restorable-time`). Estimate data loss (mode A) = writes between `RESTORE_TS` and `DAMAGE_STOPPED` | DBA | 2 | `RESTORE_TS` |
-| P1-G1 ⛳ | **Approve** mode + `RESTORE_TS` + data-loss window (IC + SRE lead; **CTO** accepts the data loss) · `dr_mark T2` | IC | 5 | Recorded |
-| P1-S07 ‖ | [Investigating] / [Failover Initiated] comms (**data-restore variant**, wording reviewed by SRE lead / approved by CTO) | Comms | 10 | Logged |
+| P1-G1 ⛳ | **Approve** mode + `RESTORE_TS` + data-loss window (IC + SRE; **CTO** accepts the data loss) · `dr_mark T2` | IC | 5 | Recorded |
+| P1-S07 ‖ | [Investigating] / [Failover Initiated] comms (**data-restore variant**, wording reviewed by SRE / approved by CTO) | Comms | 10 | Logged |
 
 ## Phase 2 — PITR restore (both modes)
 

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | **v1.1** / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
+| Version / owner | **v1.1** / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Before → after | `app-pg-uat` (+ replica) → **`app-pg-uat-r<YYYYMMDDHHMM>`** (single-AZ) becomes primary |
 | Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md): `SECRET_MODE=k8s` patches **every host key** of the K8s Secret directly (no ESO) and records the change under the DR id → **Reloader** restarts every pod using the Secret |
 | Targets | RPO 24 h (daily automated snapshot, 7-day retention) · **RTO 30 min** |

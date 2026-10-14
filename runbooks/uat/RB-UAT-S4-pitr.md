@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · Gate approvers: SRE on-call + QA lead |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · Gate approvers: SRE on-call + QA lead |
 | Modes | **A — full cutover** to `app-pg-uat-p<YYYYMMDDHHMM>` (single-AZ) · **B — surgical repair** (side instance, copy rows back, no cutover) |
 | Endpoint | A: **new** → [CP-01](../common/CP-01-secret-endpoint-cutover.md). B: unchanged |
 | RPO / RTO targets | 24 h (expected: minutes; 7-day restore window) / 30 min (at risk for mode A, R3) |

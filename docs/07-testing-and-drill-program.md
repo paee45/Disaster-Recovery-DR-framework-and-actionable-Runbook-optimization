@@ -17,7 +17,7 @@
 
 | Check | What it proves | When |
 |---|---|---|
-| **Desk review** (PR: SRE lead reviews, CTO approves) | Steps are complete, correct and match the current architecture | Every change; at least every 12 months |
+| **Desk review** (PR: SRE reviews, CTO approves) | Steps are complete, correct and match the current architecture | Every change; at least every 12 months |
 | **Walk-through / read-through** by on-call engineers (no execution) | People know the runbooks exist and understand the roles (A.6.3 awareness) | Yearly and for new on-call members (recommended) |
 | CI: `shellcheck`, YAML/JSON lint, `runbook-to-tracker.py` on every runbook | Scripts and step tables are well-formed | Every PR |
 | **Read-only pre-flight** against the real env (`dr-preflight.sh replica\|restore`) | Access, replica health, PITR window, snapshots, ESO/Reloader, consumer inventory | After each runbook change (no impact on the environment) |

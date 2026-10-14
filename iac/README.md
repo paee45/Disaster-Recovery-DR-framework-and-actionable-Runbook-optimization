@@ -150,6 +150,21 @@ The local Terraform stages live in `iac/local/{platform,mock,addons,workloads}`.
 this path never sources `sandbox.env` or uses the real S3 state bucket. The old `tests/local/up.sh` and `down.sh`
 must not manage Terraform-owned resources. Keep the old builder only for comparison until regression testing passes.
 
+Create or reconcile the persistent local lab with one command:
+```bash
+bash iac/local.sh create
+```
+The command plans and displays each stage, requires `APPLY` before applying that exact saved plan, prepares the local
+kubeconfig after the platform stage, then checks workload readiness. It is safe to rerun to reconcile a partial setup;
+it does not destroy resources or reset data. Keep the lab running between scenario rehearsals. Use an explicit, reviewed
+destroy plan only when a fresh baseline is needed; preserve `tests/local/.state/evidence/` and its evidence-bucket archive.
+
+The local topology provides the primary, replica, snapshot/PITR mock APIs, restore target, k3s and app consumers needed to
+exercise local S2/S3/S4 behavior. The local regression suite covers S2 promotion; the interactive step runner covers S3/S4.
+S1 is PROD-only and depends on AWS-managed Multi-AZ failover. Local testing can rehearse its decision and unchanged-endpoint
+verification, but cannot reproduce or validate AWS's automatic failover, standby rebuild, RPO, or timing. Use the sandbox
+for AWS control-plane behavior when ready; no local scenario changes `DR_ENV=local` to UAT or PROD.
+
 On this Mac, the dedicated engine is started with `colima start --profile dr-framework --cpu 4 --memory 8 --disk 30`.
 The wrapper defaults to `colima-dr-framework`; an explicit `DOCKER_CONTEXT` can select another Linux engine.
 The wrapper currently supports Unix sockets on macOS/Linux. Windows mounts and Docker Desktop networking are not yet
@@ -158,6 +173,9 @@ runtime-validated, so Windows portability is a target, not a claim of support.
 The runner contains Terraform, AWS CLI, kubectl, Helm, psql, and the scripts. It has no host AWS credentials,
 personal kubeconfig, real env files, or Docker socket mounted by default. Kubernetes uses k3s, not actual EKS.
 LocalStack/moto simulate AWS APIs; the three independent Postgres databases are fixtures, not actual RDS replication.
+The mock stage provides two synthetic automated snapshots dated one and two days before setup plus one manual walkthrough
+snapshot. These timestamps support selection and runbook rehearsal only; the mock does not retain historical database state,
+so restoring the synthetic daily snapshots does not reproduce data from those dates.
 Terraform owns containers, volumes, mock resources, Helm releases, and fixture workloads. PostgreSQL initialization
 comes from the existing seed SQL. DR scripts deliberately mutate the fixture during drills; inspect drift afterwards,
 and do not reapply the desired-state stack during a drill because it can undo the cutover.

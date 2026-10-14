@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE lead · Approved: CTO · G1 data-loss acceptance: **CTO** (data loss is certain) |
+| Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · G1 data-loss acceptance: **CTO** (data loss is certain) |
 | Before → after | `app-pg-prod` (+ replica) → new instance **`app-pg-prod-r<YYYYMMDDHHMM>`** (Multi-AZ) becomes primary |
 | Endpoint | **New** → [CP-01](../common/CP-01-secret-endpoint-cutover.md) endpoint cutover (K8s Secret patched directly in `SECRET_MODE=k8s`; Secrets Manager + ESO in `eso` mode) → **Reloader** |
 | RPO | Target **24 h** = incident time − `SnapshotCreateTime` of the daily automated snapshot (kept **7 days**) |
@@ -31,11 +31,11 @@ export RESTORED_DB="${PRIMARY_DB}-r$(date -u +%Y%m%d%H%M)"
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P1-S01 | Declare SEV1, roles, channel. `dr_mark T1`; `dr_mark T0 --at <impact start>` | IC | 3 | Open |
-| P1-S02 ‖ | [Investigating] comms. Prepare the **data-restore variant** of the customer template (wording reviewed by SRE lead, approved by CTO) | Comms | 10 | Draft approved |
+| P1-S02 ‖ | [Investigating] comms. Prepare the **data-restore variant** of the customer template (wording reviewed by SRE, approved by CTO) | Comms | 10 | Draft approved |
 | P1-S03 | **Confirm PITR is not possible / not better**: `aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-db-instance-automated-backups --db-instance-identifier $PRIMARY_DB --query 'DBInstanceAutomatedBackups[0].RestoreWindow'` | DBA | 2 | Reason recorded |
 | P1-S04 | **List candidate snapshots** (automated daily `rds:…` within 7 days, plus any manual ones): `./automation/scripts/dr-restore.sh list-snapshots $PRIMARY_DB` | DBA | 3 | Table: id, type, create time, encrypted/KMS |
 | P1-S05 | **Pick the snapshot**: the latest one *before* the incident (for a data/security incident: before the first bad change/IOC). Note `SnapshotCreateTime` → est. data loss | DBA + App owner | 5 | `SNAPSHOT_ID` + data-loss window |
-| P1-G1 ⛳ | **Declare restore + accept data loss** (IC + SRE lead; **CTO** accepts the data loss): `DECISION: G1 GO snapshot=<id> loss_window=<from>-<to>` · `dr_mark T2` | IC | 5 | Recorded |
+| P1-G1 ⛳ | **Declare restore + accept data loss** (IC + SRE; **CTO** accepts the data loss): `DECISION: G1 GO snapshot=<id> loss_window=<from>-<to>` · `dr_mark T2` | IC | 5 | Recorded |
 
 ## Phase 2 — Restore (budget = size-dependent)
 

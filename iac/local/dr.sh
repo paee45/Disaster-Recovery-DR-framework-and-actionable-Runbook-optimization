@@ -144,8 +144,7 @@ if [[ "${1:-}" == failback ]]; then
   fi
 else
   if [[ "${1:-}" == S3 ]]; then
-    export SNAPSHOT_ID="${SNAPSHOT_ID:-app-pg-local-fixture}"
-    echo "Local walkthrough snapshot: $SNAPSHOT_ID (manual mock fixture; no real RDS backup schedule)."
+    echo "Local walkthrough snapshots are simulated fixtures; automated entries are not real RDS backups."
   fi
   exec automation/scripts/dr-run.sh "$@"
 fi

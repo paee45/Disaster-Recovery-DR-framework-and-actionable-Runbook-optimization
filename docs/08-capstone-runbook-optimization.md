@@ -6,7 +6,7 @@
  Baseline              Assess                  Redesign                 Approve                Institutionalise
  ────────              ──────                  ────────                 ────────               ────────────────
  Review current   ─►   Scorecard (§2) per ─►   Env × scenario      ─►   Desk review +     ─►   CI lint, ISMS document
- runbook in UAT        env × scenario +        runbooks + CP-01..06     SRE lead/CTO PR    control, yearly review,
+ runbook in UAT        env × scenario +        runbooks + CP-01..06     SRE/CTO PR    control, yearly review,
  (S2/S3/S4) and DEV    RTO breakdown           + automation             approval            risk register
  (S3/S4), measure      (decision / DB /        (backlog §3)
  T0..T10               cutover / validation)
@@ -69,7 +69,7 @@ Total /36: < 10 L1 · 10–19 L2 · 20–27 L3 · 28–33 L4 · 34+ L5 (see [07 
 - [ ] 15 env/scenario runbooks customised (`env/*.env`, identifiers, approvers, targets)
 - [ ] Reloader annotations + inventory = 0 unannotated consumers in UAT and PROD
 - [ ] SSM documents deployed; executor IAM + K8s RBAC in place
-- [ ] All runbooks + comms templates reviewed by the SRE lead and approved by the CTO (PR record)
+- [ ] All runbooks + comms templates reviewed by the SRE and approved by the CTO (PR record)
 - [ ] Evidence bucket created; collector validated read-only
 - [ ] ISO 27001 scope, control mapping and risk register ([09](09-iso27001-scope.md)) with CTO risk acceptance
 - [ ] Residual risks R1–R8 accepted (or treated) by the CTO, with a review date

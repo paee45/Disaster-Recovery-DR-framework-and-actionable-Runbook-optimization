@@ -253,10 +253,26 @@ s_P1-S01() {
 # S3
 s_S3_P1-S02() {
   x "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB" || return 1
-  local newest; newest="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" \
-    --snapshot-type automated --query 'reverse(sort_by(DBSnapshots,&SnapshotCreateTime))[0].DBSnapshotIdentifier' --output text 2>/dev/null)"
-  [[ "$newest" == None ]] && newest=""
-  ask SNAPSHOT_ID "snapshot to restore" "$newest" || return 1
+  local snapshots count default_snapshot index
+  snapshots="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-instance-identifier "$PRIMARY_DB" --include-shared \
+    --query 'reverse(sort_by(DBSnapshots[?Status==`available`],&SnapshotCreateTime))[].[DBSnapshotIdentifier,SnapshotType,SnapshotCreateTime,Status]' --output json)" || return 1
+  count="$(jq 'length' <<<"$snapshots")"
+  (( count > 0 )) || { echo "No available snapshots found for $PRIMARY_DB"; return 1; }
+  default_snapshot="$(jq -r '[.[] | select(.[1] == "automated")][0][0] // .[0][0] // empty' <<<"$snapshots")"
+  if [[ -z "${SNAPSHOT_ID:-}" ]]; then
+    echo "Available snapshots for $PRIMARY_DB (newest first):"
+    jq -r 'to_entries[] | "  \(.key + 1). \(.value[0]) | \(.value[1]) | \(.value[2]) | \(.value[3])"' <<<"$snapshots"
+    ask SNAPSHOT_ID "snapshot number or identifier" "$default_snapshot" || return 1
+  fi
+  if [[ "$SNAPSHOT_ID" =~ ^[1-9][0-9]*$ ]]; then
+    index="$SNAPSHOT_ID"
+    SNAPSHOT_ID="$(jq -r --argjson index "$index" '.[$index - 1][0] // empty' <<<"$snapshots")"
+    [[ -n "$SNAPSHOT_ID" ]] || { echo "Snapshot choice $index is out of range"; unset SNAPSHOT_ID; save_vars; return 1; }
+    export SNAPSHOT_ID
+    save_vars
+  fi
+  jq -e --arg id "$SNAPSHOT_ID" 'any(.[]; .[0] == $id)' <<<"$snapshots" >/dev/null \
+    || { echo "Snapshot $SNAPSHOT_ID is not in the available snapshot list"; unset SNAPSHOT_ID; save_vars; return 1; }
   local t; t="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots --db-snapshot-identifier "$SNAPSHOT_ID" \
     --query 'DBSnapshots[0].[SnapshotCreateTime,Status]' --output text 2>/dev/null)" || { echo "snapshot $SNAPSHOT_ID not found"; unset SNAPSHOT_ID; save_vars; return 1; }
   echo "SNAPSHOT_ID=$SNAPSHOT_ID  created/status: $t  (= the RPO reference)"

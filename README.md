@@ -13,7 +13,7 @@ Secrets Manager + External Secrets Operator is the planned mode, `SECRET_MODE=es
 > `SECRET_MODE=k8s` (plain Secret, every host key, change IDs + failback by ID), SSO or key login with browser wait.
 > Targets: **RPO 24 h** (RDS daily backup, 7-day retention), **RTO 30 min** (aim). No DR drills are scheduled.
 > Test infrastructure (sandbox AWS account) is Terraform with state in S3: see [iac/README.md](iac/README.md).
-> Runbooks are ISMS documents (ISO/IEC 27001:2022), reviewed by the SRE lead and approved by the CTO. Fill in the placeholders (`{{…}}`, `TODO`) and `env/<env>.env`.
+> Runbooks are ISMS documents (ISO/IEC 27001:2022), reviewed by the SRE and approved by the CTO. Fill in the placeholders (`{{…}}`, `TODO`) and `env/<env>.env`.
 
 ## Topology in scope
 
@@ -52,7 +52,7 @@ Start at the **[runbook catalogue and decision tree](runbooks/README.md)**.
 7. **Decide with humans, execute with code.** Gates are SSM `aws:approve` steps (PROD four-eyes).
 8. **Every step writes a timestamp, and evidence is a by-product.** RTO/RPO are computed from `timeline.jsonl`.
 9. **The incident ends when the DR posture is back** (Multi-AZ + replica), not when the app is up.
-10. **Runbooks are controlled ISMS documents.** Reviewed by the SRE lead, approved by the CTO, re-reviewed yearly and after every event; every deviation becomes a ticket.
+10. **Runbooks are controlled ISMS documents.** Reviewed by the SRE, approved by the CTO, re-reviewed yearly and after every event; every deviation becomes a ticket.
 
 ## Quick start
 ```bash
