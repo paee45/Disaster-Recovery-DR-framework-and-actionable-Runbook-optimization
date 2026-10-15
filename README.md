@@ -5,7 +5,7 @@ recovery = a new/promoted DB endpoint written into the **app's secret** (today a
 Secrets Manager + External Secrets Operator is the planned mode, `SECRET_MODE=eso`), with pods restarted automatically by
 **Stakater Reloader** (no DNS change).
 
-> Status: **v0.5**. Includes the corrective action plan for the 2026-08-04 UAT exercise (RTO 39:55 vs 30 min) → [docs/10](docs/10-corrective-action-plan-2026-08-04.md).
+> Status: **v0.6**. Includes the corrective action plan for the 2026-08-04 UAT exercise (RTO 39:55 vs 30 min) → [docs/10](docs/10-corrective-action-plan-2026-08-04.md).
 > v0.5: baseline-driven restore (`capture` → `plan` → restore → `harden` → `validate`/`validate-pg`), standalone stale-pod tool
 > `k8s-secret-consumers.sh`, **strict pinning** (no default profile/context; unpinned calls refused), recorded DR shell
 > `dr-session.sh` + `commands.jsonl` audit + continuous evidence sync to S3, pinning lint in CI. See [docs/12](docs/12-account-and-cluster-safety.md).
