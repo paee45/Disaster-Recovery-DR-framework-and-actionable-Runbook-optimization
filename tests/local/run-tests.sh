@@ -140,6 +140,16 @@ c05() { local j; j="$(command aws --profile dr-local rds describe-db-instances -
 t  C05 "restored instance: 3 SGs, retention 7, deletion protection, all source tags" c05
 dr_set_target "$RESTORED_DB" > "$LOGS/C06.log" 2>&1
 tf C06 "password trap: precheck FAILS (restored DB has the old password)" "LOGIN FAILED" "$S/dr-secret-cutover.sh" precheck
+c06a() { local secret_host primary_host mismatch_db out rc=0
+                                 secret_host="$(k get secret app-db-direct -o json | jq -r '.data.POSTGRES_DB_HOST1 // "" | @base64d')"
+                                 primary_host="$(dr_endpoint "$PRIMARY_DB")"; primary_host="${primary_host%% *}"
+                                 if [[ "$secret_host" == "$primary_host" ]]; then mismatch_db="${REPLICA_DB:-$RESTORED_DB}"; else mismatch_db="$PRIMARY_DB"; fi
+                                 out="$(env SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2 \
+                                         K8S_USER_KEY=POSTGRES_DB_USER K8S_PASSWORD_KEY=POSTGRES_DB_PASSWORD OLD_DB="$mismatch_db" \
+                                         "$S/dr-secret-cutover.sh" fix-password 2>&1)" || rc=$?
+                                 echo "$out"
+                                 (( rc != 0 )) && grep -q 'REFUSED: secret host(s) do not match original DB' <<<"$out"; }
+t  C06a "fix-password refuses when the app Secret does not point to OLD_DB" c06a
 t  C07 "fix-password → precheck OK"                                    "$S/dr-secret-cutover.sh" fix-password
 t  C07b "validate-pg: pg_settings restored == source"                    "$S/dr-restore.sh" validate-pg
 mpsql() { PGPASSWORD=masterpw psql "host=$1 dbname=app user=postgres sslmode=disable" -XAtqc "$2"; }
@@ -210,10 +220,48 @@ g00b() { lib 'aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager
          && ! grep -q 'pw-must-not-appear' "$DR_EVIDENCE_DIR/commands.jsonl" && grep -q '"--secret-string","\*\*\*"' "$DR_EVIDENCE_DIR/commands.jsonl" \
          && jq -e -s 'any(.[]; .status=="REFUSED" and .rc==97)' "$DR_EVIDENCE_DIR/commands.jsonl" >/dev/null; }
 t  G00b "audit log commands.jsonl: every call, secret-string redacted, refusals recorded" g00b
-t  G01 "phase timer + summary"                                          bash -c "source '$S/dr-lib.sh'; dr_phase start demo 1; dr_phase end demo 1; dr_summary | grep -q 'since T0'"
+g01() { local timeline summary phase_output
+                                timeline="$(mktemp)"
+                                printf '%s\n' \
+                                        '{"ts":"2026-10-16T00:00:00Z","marker":"T0","note":"start"}' \
+                                        '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"restored"}' \
+                                        '{"ts":"2026-10-16T00:00:30Z","marker":"HUMAN_WAIT","note":"step=before secs=60"}' \
+                                        '{"ts":"2026-10-16T00:02:30Z","marker":"HUMAN_WAIT","note":"step=after secs=60"}' \
+                                        '{"ts":"2026-10-16T00:02:00Z","marker":"PHASE_END:demo","note":"elapsed_s=195"}' > "$timeline"
+                                phase_output="$(dr_phase start demo 1; dr_phase end demo 1)"
+                                summary="$(DR_TIMELINE="$timeline" dr_summary)"
+                                rm -f "$timeline"
+                                printf '%s\n' "$phase_output" "$summary"
+                                grep -q 'wall-clock (includes prompts/gates)' <<<"$phase_output" \
+                                        && grep -q 'Phase durations (wall-clock; include prompts and gates):' <<<"$summary" \
+                                        && grep -q '^demo: 3 min 15 s$' <<<"$summary" \
+                                        && grep -q '^Operator wait within business RTO (T0-T9): 1 min 0 s (included in RTO and phase times)$' <<<"$summary" \
+                                        && grep -q '^Business RTO (T0-T9): 2 min 0 s (RTO target: 30 min)$' <<<"$summary"; }
+t  G01 "phase summary states wall-clock includes waits; RTO wait is clipped to T0-T9" g01
 t  G01b "dr_phase end syncs the evidence folder to S3 (timeline already off the machine)" bash -c "command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/timeline.jsonl'"
 t  G02 "collect evidence → manifest uploaded to the evidence bucket"    bash -c "'$S/dr-collect-evidence.sh' && command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/manifest.json'"
 t  G03 "KPI report: RPO from snapshot time, RTO ~20 min"                bash -c "grep -q 'restore point' '$DR_EVIDENCE_DIR/rto-rpo-report.md' && grep -Eq 'Business RTO \(T9-T0\) \| 2[01]' '$DR_EVIDENCE_DIR/rto-rpo-report.md'"
+g03b() { local work timeline
+                                 work="$(mktemp -d)"; timeline="$work/timeline.jsonl"
+                                 printf '%s\n' \
+                                         '{"ts":"2026-10-16T00:00:00Z","marker":"T0","note":"start","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-14T23:07:34.900Z","marker":"RPO_SNAPSHOT","note":"value=2026-10-14T23:07:34.900Z","dr_id":"TEST","scenario":"S3"}' > "$timeline"
+                                 python3 "$S/dr-rto-rpo-calc.py" "$timeline" --rpo-target-s 86400 --out "$work" >/dev/null || { rm -rf "$work"; return 1; }
+                                 jq -e '.rpo_actual_s == 89545.1 and .rpo_met == false' "$work/rto-rpo-report.json" >/dev/null || { rm -rf "$work"; return 1; }
+                                 grep -q '| RPO actual (restore point) | 1 d 52 min 25.1 s | 1 d | False |' "$work/rto-rpo-report.md"
+                                 local rc=$?; rm -rf "$work"; return "$rc"; }
+t  G03b "RPO report displays seconds as days/hours/minutes without changing numeric KPI" g03b
+g03a() { local work timeline
+                                 work="$(mktemp -d)"; timeline="$work/timeline.jsonl"
+                                 printf '%s\n' \
+                                         '{"ts":"2026-10-16T00:00:00Z","marker":"T0","note":"start","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"restored","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-16T00:00:30Z","marker":"HUMAN_WAIT","note":"step=before secs=60","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-16T00:02:30Z","marker":"HUMAN_WAIT","note":"step=after secs=60","dr_id":"TEST","scenario":"S3"}' > "$timeline"
+                                 python3 "$S/dr-rto-rpo-calc.py" "$timeline" --out "$work" >/dev/null || { rm -rf "$work"; return 1; }
+                                 jq -e '.business_rto_min == 2 and .operator_wait_min == 1' "$work/rto-rpo-report.json" >/dev/null
+                                 local rc=$?; rm -rf "$work"; return "$rc"; }
+t  G03a "operator wait KPI clips waits crossing T0/T9 to the RTO interval" g03a
 g04() { for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFromSnapshot DR-RdsRestoreToPointInTime; do
           aws --profile "$AWS_PROFILE" --region "$AWS_REGION" ssm create-document --name "$d-$RANDOM" --document-type Automation --document-format YAML --content "file://$ROOT/automation/ssm/$d.yaml" --query DocumentDescription.Status --output text || return 1; done; }
 t  G04 "SSM Automation documents accepted (create-document)"            g04
@@ -321,7 +369,37 @@ j01() { "$RUN" S3 --list | tee /dev/stderr | grep -c '^P[0-9]' | grep -qx 20 && 
 t  J01 "--list: S3 = 20 steps, S4 = 22 steps (IDs as in the runbooks), no AWS access needed" j01
 j02() { local d; d="$(jdir DR-localtest-dry-$JTS)"; DR_ID="DR-localtest-dry-$JTS" "$RUN" S3 --dry-run | tee /dev/stderr | grep 'dr-restore.sh snapshot' >/dev/null && [[ ! -e "$d" ]]; }   # no grep -q: SIGPIPE + pipefail
 t  J02 "--dry-run prints every step + command and creates nothing (no evidence folder)" j02
+tf J02a "S3 rejects a target name outside the local endpoint map" "INVALID local RESTORED_DB" \
+        "${JENV[@]}" DR_ID="DR-localtest-target-unmapped-$JTS" RESTORED_DB=restore-test01 "$RUN" S3 --only P0-S03
+t  J02b "S3 accepts a new target name routed by the local endpoint map" \
+        "${JENV[@]}" DR_ID="DR-localtest-target-mapped-$JTS" RESTORED_DB="app-pg-local-r$JTS" "$RUN" S3 --only P0-S03
 tf J03 "DR_RUN_GATES=auto is refused outside the local test bed" "only for the local test bed" env DR_ENV=uat DR_RUN_GATES=auto "$RUN" S3
+j03a() { local bad restore id="DR-localtest-pitr-valid-$JTS" dir
+                                 bad="$(date -u -d '1 hour ago' +%FT%TZ)"; restore="$(date -u -d "$bad - 1 hour" +%FT%T.%NZ)"; dir="$(jdir "$id")"
+                                 "${JENV[@]}" DR_ID="$id" BAD_TS="$bad" RESTORE_TS="$restore" "$RUN" S4 --only P1-S03 \
+                                         && [[ "$(jst "$id" P1-S03)" == PASS ]] && grep -q 'Local Moto PITR window (synthetic, test-only)' "$dir/steps/P1-S03.log" \
+                                         && jq -e --arg bad "$bad" --arg restore "$restore" 'any(.[]; .marker == "RESTORE_TS_CHOSEN" and .note == ("value=" + $restore + " bad_ts=" + $bad))' "$dir/timeline.jsonl" >/dev/null; }
+t  J03A "S4 selection records the explicit UTC restore point before BAD_TS inside the synthetic window" j03a
+tf J03B "S4 explicit RESTORE_TS still requires BAD_TS" "BAD_TS is required" \
+   env -u DR_EVIDENCE_DIR -u DR_TIMELINE SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2 \
+     K8S_PORT_KEY=POSTGRES_DB_PORT OLD_DB="$PRIMARY_DB" FENCE=skip DR_RUN_GATES= BAD_TS= \
+     DR_ID="DR-localtest-pitr-no-bad-$JTS" RESTORE_TS="$(date -u -d '1 hour ago' +%FT%TZ)" "$RUN" S4 --only P1-S03
+tf J03C "S4 rejects a timestamp without an explicit UTC designator" "BAD_TS .*explicit UTC designator" \
+   "${JENV[@]}" DR_ID="DR-localtest-pitr-no-zone-$JTS" BAD_TS="$(date -u +%FT%T)" RESTORE_TS="$(date -u -d '1 hour ago' +%FT%TZ)" "$RUN" S4 --only P1-S03
+tf J03D "S4 rejects RESTORE_TS at or after BAD_TS" "must be before BAD_TS" \
+        "${JENV[@]}" DR_ID="DR-localtest-pitr-after-bad-$JTS" BAD_TS="$(date -u -d '2 hours ago' +%FT%TZ)" RESTORE_TS="$(date -u -d '1 hour ago' +%FT%TZ)" "$RUN" S4 --only P1-S03
+j03e() { local id="DR-localtest-pitr-retry-$JTS" bad restore rc=0 dir; bad="$(date -u +%FT%TZ)"; restore="$(date -u -d 'now + 1 hour' +%FT%TZ)"; dir="$(jdir "$id")"
+                        "${JENV[@]}" DR_ID="$id" BAD_TS="$bad" RESTORE_TS="$restore" "$RUN" S4 --only P1-S03 || rc=$?
+                        (( rc != 0 )) && ! grep -q '^export RESTORE_TS=' "$dir/run-vars.env"; }
+t  J03E "S4 rejected restore point is cleared from saved inputs for retry" j03e
+tf J03F "S4 rejects restore points before the earliest window bound" "outside the PITR window" \
+        "${JENV[@]}" DR_ID="DR-localtest-pitr-too-early-$JTS" BAD_TS="$(date -u -d '8 days ago' +%FT%TZ)" RESTORE_TS="$(date -u -d '8 days ago - 1 hour' +%FT%TZ)" "$RUN" S4 --only P1-S03
+tf J03G "S4 rejects restore points after the latest window bound" "outside the PITR window" \
+        "${JENV[@]}" DR_ID="DR-localtest-pitr-too-late-$JTS" BAD_TS="$(date -u -d 'now + 2 hours' +%FT%TZ)" RESTORE_TS="$(date -u -d 'now + 1 hour' +%FT%TZ)" "$RUN" S4 --only P1-S03
+j03h() { local id="DR-localtest-pitr-fraction-$JTS" base bad restore dir; base="$(date -u -d '1 hour ago' +%FT%T)"; bad="${base}.500Z"; restore="${base}.250Z"; dir="$(jdir "$id")"
+                        "${JENV[@]}" DR_ID="$id" BAD_TS="$bad" RESTORE_TS="$restore" "$RUN" S4 --only P1-S03 \
+                          && [[ "$(jst "$id" P1-S03)" == PASS ]] && grep -q "value=$restore bad_ts=$bad" "$dir/timeline.jsonl"; }
+t  J03H "S4 compares fractional restore timestamps without truncating seconds" j03h
 k patch secret app-db-direct --type merge -p '{"stringData":{"POSTGRES_DB_HOST1":"'"$IP_OLD"'","POSTGRES_DB_HOST2":"'"$IP_OLD"'"}}' >/dev/null
 j04() { "${JENV[@]}" DR_ID="$JS3" RESTORED_DB="app-pg-local-r$JTS" "$RUN" S3; local rc=$? d; d="$(jdir "$JS3")"; echo "rc=$rc"
         (( rc == 0 )) && [[ "$(dhosts)" == "$IP_RESTORED,$IP_RESTORED" ]] \

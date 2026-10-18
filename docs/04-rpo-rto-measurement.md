@@ -72,6 +72,7 @@ lost **unless reconciled** (`30-reconciliation-hints.sql`). For data-corruption 
 
 `dr-rto-rpo-calc.py timeline.jsonl --rto-target-min $RTO_TARGET_MIN --rpo-target-s $RPO_TARGET_S` → `rto-rpo-report.json|md`.
 It picks the RPO method from the markers present and lists the missing markers (each one is a runbook-execution defect).
+The JSON report keeps RPO values in seconds; the Markdown report formats them as days, hours, minutes, and seconds for readability.
 
 ## 5. Evidence query set
 

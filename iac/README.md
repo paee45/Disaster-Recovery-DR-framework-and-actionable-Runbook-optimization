@@ -176,6 +176,9 @@ LocalStack/moto simulate AWS APIs; the three independent Postgres databases are 
 The mock stage provides two synthetic automated snapshots dated one and two days before setup plus one manual walkthrough
 snapshot. These timestamps support selection and runbook rehearsal only; the mock does not retain historical database state,
 so restoring the synthetic daily snapshots does not reproduce data from those dates.
+S4 PITR selection uses a synthetic seven-day window in the local runner to test UTC parsing and boundary checks only. Moto
+does not replay PostgreSQL history or prove that a restore point contains the expected historical data; use real RDS in an
+approved sandbox to validate PITR behavior.
 The mock stage also owns discovery-only RDS primaries: `local-dev-db`, `orders-primary-01`, `local-uat-db`, and
 `local-prod-db`. The DEV candidates are associated through their `environment=dev` tags, not their names. They have no
 matching Postgres application endpoints and are not DR targets. To inspect discovery safely,
@@ -227,8 +230,10 @@ bash iac/local.sh dr S3 --dry-run
 bash iac/local.sh dr S3 --to P2-S05
 bash iac/local.sh dr S3 --resume <DR_ID>
 bash iac/local.sh unfence <DR_ID> app-pg-local
+bash iac/local.sh failback                         # choose a recorded endpoint change interactively
 bash iac/local.sh failback <recorded-change-id>
 ```
+With no ID, the local failback command lists eligible ledger entries newest first. Choosing an entry still requires data reconciliation confirmation, GO, and approver name; failback changes the endpoint but does not copy data.
 Approvals remain interactive. The local restored fixture intentionally has older data and an older password, so the
 password-repair path may require an explicit step. Endpoint failback refuses a read-only or unreachable old DB and
 requires a writable app_user transaction, reconciliation confirmation, and an approver. It does not copy new writes

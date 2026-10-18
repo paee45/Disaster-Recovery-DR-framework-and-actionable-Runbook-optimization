@@ -33,18 +33,48 @@ export K8S_PORT_KEY=POSTGRES_DB_PORT K8S_USER_KEY=POSTGRES_DB_USER K8S_PASSWORD_
 export DR_SELECTOR="$demo_selector"
 cd /workspace
 if [[ "${1:-}" == failback ]]; then
-  [[ $# == 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$ ]] \
-    || { echo 'Usage: dr.sh failback <recorded-change-id>' >&2; exit 2; }
+  requested_ref="${2:-}"
+  [[ $# -le 2 && ( -z "$requested_ref" || "$requested_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$ ) ]] \
+    || { echo 'Usage: dr.sh failback [recorded-change-id]' >&2; exit 2; }
   [[ -t 0 && -t 1 ]] || { echo 'REFUSED: failback needs an interactive terminal.' >&2; exit 2; }
   unset DR_ID DR_EVIDENCE_DIR DR_TIMELINE DR_AUDIT_LOG DR_ACTOR TARGET_DSN OLD_DSN
   source automation/scripts/dr-lib.sh
   dr_guard || exit 2
   endpoint=(automation/scripts/k8s-secret-endpoint.sh --context "$EKS_CONTEXT" -n "$K8S_NS" \
     -s "$K8S_SECRET" -k "$K8S_HOST_KEY" --port-key "$K8S_PORT_KEY")
-  "${endpoint[@]}" history
   ledger="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" \
     get configmap "dr-endpoint-ledger-$K8S_SECRET" -o json)"
-  record="$(jq -ce --arg ref "$2" '
+
+  if [[ -z "$requested_ref" ]]; then
+    mapfile -t candidates < <(jq -r --arg secret "$K8S_NS/$K8S_SECRET" --arg keys "$K8S_HOST_KEY" '
+      [.data[]? | (try fromjson catch empty)
+       | select(.secret == $secret
+         and (.id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$"))
+         and (.keys | keys | sort) == ($keys | split(",") | sort)
+         and ([.keys[].from] | unique | length) == 1
+         and all(.keys[].from; type == "string" and length > 0)
+         and (.fromDb | type == "string" and length > 0 and . != "unknown"))]
+      | sort_by(.at // "") | reverse[]
+      | [.id, .at, .fromDb, .toDb, .keys["POSTGRES_DB_HOST1"].from] | @tsv
+    ' <<<"$ledger")
+    ((${#candidates[@]} > 0)) || { echo 'REFUSED: no eligible endpoint changes found in the ledger.' >&2; exit 2; }
+    echo 'Select the recorded endpoint change to fail back from:'
+    for index in "${!candidates[@]}"; do
+      IFS=$'\t' read -r candidate_id at from_db to_db old_host <<<"${candidates[$index]}"
+      printf '  %2d) %s | %s -> %s | host %s | %s\n' "$((index + 1))" "$candidate_id" "$from_db" "$to_db" "$old_host" "$at"
+    done
+    read -r -p 'Selection [1 = newest, q = cancel]: ' selection </dev/tty
+    [[ "$selection" != q && "$selection" != Q ]] || { echo 'Failback cancelled.'; exit 2; }
+    selection="${selection:-1}"
+    [[ "$selection" =~ ^[0-9]+$ ]] || { echo 'REFUSED: enter a listed number or q.' >&2; exit 2; }
+    (( selection >= 1 && selection <= ${#candidates[@]} )) || { echo 'REFUSED: selection is out of range.' >&2; exit 2; }
+    IFS=$'\t' read -r requested_ref at from_db to_db old_host <<<"${candidates[$((selection - 1))]}"
+    printf 'Selected %s: %s -> %s (prior host %s)\n' "$requested_ref" "$from_db" "$to_db" "$old_host"
+  else
+    "${endpoint[@]}" history
+  fi
+
+  record="$(jq -ce --arg ref "$requested_ref" '
     [.data[] | fromjson | select(.id == $ref)] |
     if length == 1 then .[0] else error("change ID missing or duplicated in ledger") end
   ' <<<"$ledger")" || exit 2
@@ -114,7 +144,7 @@ if [[ "${1:-}" == failback ]]; then
     fi
   }
   verify_target || exit 2
-  echo "Endpoint failback only: $K8S_NS/$K8S_SECRET -> $TARGET_DB (before change $2)."
+  echo "Endpoint failback only: $K8S_NS/$K8S_SECRET -> $TARGET_DB (before change $requested_ref)."
   echo 'Writes made on the restored database are NOT copied back. Reconcile them manually before continuing.'
   read -r -p 'Type RECONCILED after completing and verifying data reconciliation: ' reconciliation
   [[ "$reconciliation" == RECONCILED ]] || exit 2
@@ -125,7 +155,7 @@ if [[ "${1:-}" == failback ]]; then
   verify_target || exit 2
   unset app_password
   current_record="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" \
-    get configmap "dr-endpoint-ledger-$K8S_SECRET" -o json | jq -ce --arg ref "$2" \
+    get configmap "dr-endpoint-ledger-$K8S_SECRET" -o json | jq -ce --arg ref "$requested_ref" \
       '[.data[] | fromjson | select(.id == $ref)] | if length == 1 then .[0] else error("ledger changed") end')"
   [[ "$(jq -cS . <<<"$record")" == "$(jq -cS . <<<"$current_record")" ]] \
     || { echo 'REFUSED: ledger record changed during verification.' >&2; exit 2; }
@@ -135,9 +165,9 @@ if [[ "${1:-}" == failback ]]; then
   dr_init FB-S3S4
   printf '%s\n' "$record" > "$DR_EVIDENCE_DIR/k8s/failback-reference.json"
   printf 'reference: %s\ntarget: %s\nreconciliation: %s\nanswer: %s\napprovers: %s\nat: %s\n' \
-    "$2" "$TARGET_DB" "$reconciliation" "$answer" "$approver" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/endpoint-failback.txt"
-  dr_mark DECISION "endpoint failback GO by $approver; reconciliation confirmed; ref=$2 target=$TARGET_DB"
-  automation/scripts/dr-secret-cutover.sh failback "$2"
+    "$requested_ref" "$TARGET_DB" "$reconciliation" "$answer" "$approver" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/endpoint-failback.txt"
+  dr_mark DECISION "endpoint failback GO by $approver; reconciliation confirmed; ref=$requested_ref target=$TARGET_DB"
+  automation/scripts/dr-secret-cutover.sh failback "$requested_ref"
   if ! automation/scripts/dr-eks-rollout.sh check; then
     automation/scripts/dr-eks-rollout.sh restart-stale
     automation/scripts/dr-eks-rollout.sh check

@@ -7,7 +7,7 @@
 # SECRET_MODE=eso (default; to-do target for all envs): Secrets Manager put-secret-value → ESO force-sync → K8s Secret.
 #
 #   precheck          : app credentials (from the secret) work on TARGET_DB and it is writable
-#   fix-password      : reset the app role password on TARGET_DB to the secret value (restored DBs have old passwords)
+#   fix-password      : reset the app role password on TARGET_DB only if the secret still points to OLD_DB
 #   apply             : record previous endpoint → write TARGET_DB endpoint → wait for the Reloader rollouts
 #   rollback          : undo the latest change (k8s: ledger; eso: AWSCURRENT back to the saved version) → wait rollouts
 #   failback <id>     : (k8s) restore the endpoint that was in place BEFORE change <id> (see `history`) → wait rollouts
@@ -36,7 +36,6 @@ SAFE_ID="${SECRET_ID:-k8s}"; SAFE_ID="${SAFE_ID//\//_}"
 STATE="${DR_EVIDENCE_DIR}/aws/secret-${SAFE_ID}"
 K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
 
-IFS=',' read -ra HOST_KEYS <<<"${K8S_HOST_KEY:-DB_HOST}"
 EP=("$HERE/k8s-secret-endpoint.sh" --context "$EKS_CONTEXT" -n "$K8S_NS" -s "$K8S_SECRET" -k "${K8S_HOST_KEY:-DB_HOST}" ${K8S_PORT_KEY:+--port-key "$K8S_PORT_KEY"})
 NEW_HOST=""; NEW_PORT=""
 if [[ "$CMD" =~ ^(precheck|fix-password|apply)$ ]]; then
@@ -45,7 +44,7 @@ if [[ "$CMD" =~ ^(precheck|fix-password|apply)$ ]]; then
   [[ -z "$NEW_HOST" || "$NEW_HOST" == "None" ]] && { echo "TARGET_DB $TARGET_DB has no endpoint (not available?)"; exit 1; }
 fi
 
-secret_json() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage "${1:-AWSCURRENT}" --query SecretString --output text; }
+secret_json() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage AWSCURRENT --query SecretString --output text; }
 current_version() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" \
   --query 'VersionIdsToStages' --output json | jq -r 'to_entries[] | select(.value | index("AWSCURRENT")) | .key'; }
 
@@ -53,10 +52,32 @@ current_version() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsm
 app_creds() {
   if [[ "$SECRET_MODE" == k8s ]]; then
     $K get secret "$K8S_SECRET" -o json | jq -r --arg u "${K8S_USER_KEY:-POSTGRES_DB_USER}" --arg p "${K8S_PASSWORD_KEY:-POSTGRES_DB_PASSWORD}" \
-      --arg h "${HOST_KEYS[0]}" '[(.data[$u] // "" | @base64d), (.data[$p] // "" | @base64d), (.data[$h] // "" | @base64d)] | @tsv'
+      --arg keys "${K8S_HOST_KEY:-DB_HOST}" '
+        .data as $data | ($keys | split(",")) as $host_keys |
+        [($data[$u] // "" | @base64d), ($data[$p] // "" | @base64d),
+         ([$host_keys[] as $key | ($data[$key] // "" | @base64d)] | unique | join(","))] | @tsv'
   else
     secret_json | jq -r '[.username, .password, .host] | @tsv'
   fi
+}
+
+verify_secret_host_is_original() {
+  local secret_hosts="$1" source_db="${OLD_DB:-${PRIMARY_DB:-}}" endpoint original_host
+  [[ -n "$source_db" ]] || { echo "REFUSED: OLD_DB (original source) is required before changing the password" >&2; return 1; }
+  if ! endpoint="$(dr_endpoint "$source_db")"; then
+    echo "REFUSED: cannot resolve the original RDS endpoint for $source_db; password unchanged" >&2
+    return 1
+  fi
+  original_host="${endpoint%% *}"
+  if [[ -z "$original_host" || "$original_host" == None ]]; then
+    echo "REFUSED: original RDS endpoint for $source_db is unavailable; password unchanged" >&2
+    return 1
+  fi
+  if [[ "$secret_hosts" != "$original_host" ]]; then
+    echo "REFUSED: secret host(s) do not match original DB $source_db endpoint; password unchanged" >&2
+    return 1
+  fi
+  echo "Verified secret host(s) match original DB $source_db endpoint ($original_host)."
 }
 
 precheck() {
@@ -73,9 +94,11 @@ precheck() {
 }
 
 fix_password() {
+  local m user pw secret_hosts
+  IFS=$'\t' read -r user pw secret_hosts <<<"$(app_creds)"
+  verify_secret_host_is_original "$secret_hosts" || return 1
   : "${MASTER_SECRET_ID:?MASTER_SECRET_ID (master user secret) required}"
-  local m user pw
-  IFS=$'\t' read -r user pw _ <<<"$(app_creds)"; m="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
+  m="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$MASTER_SECRET_ID" --query SecretString --output text)"
   # psql variables keep the password out of argv/ps output. NOTE: with log_statement=ddl/all the statement can reach the
   # PostgreSQL log — rotate the secret after stabilisation (CP03-S05).
   PGPASSWORD="$(jq -r .password <<<"$m")" psql "host=$NEW_HOST port=$NEW_PORT dbname=${DB_NAME:-app} user=$(jq -r .username <<<"$m") sslmode=${DR_PGSSLMODE:-require}" \

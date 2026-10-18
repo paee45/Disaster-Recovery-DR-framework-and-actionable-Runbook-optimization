@@ -24,7 +24,7 @@
 #   -q             quiet: no live output on screen (still in the logs)
 # Gates (⛳) wait for a typed GO + approver name(s) and record DECISION in the timeline (approvals/<ID>.txt).
 # Inputs are asked once and saved for --resume (run-vars.env); set them in advance to skip the prompt:
-#   T0_AT (first error, UTC ISO; empty = now) · SNAPSHOT_ID (S3; default newest automated) · BAD_TS or RESTORE_TS (S4)
+#   T0_AT (first error, UTC ISO; empty = now) · SNAPSHOT_ID (S3; default newest automated) · BAD_TS [and optional RESTORE_TS] (S4)
 #   RESTORE_MODE A|B (S4) · RESTORED_DB · FENCE readonly|skip · E2E_REF (test transaction id)
 # PROD: every change step asks for the typed 'prod' confirmation first (dr_confirm).
 # Local test bed only: DR_RUN_GATES=auto answers gates/inputs automatically (refused in any other env);
@@ -53,10 +53,11 @@ done
 
 # ───────────────────── step catalogue: ID | kind | title | command (as written in the runbook) ─────────────────────
 # kind: check (read-only) · change (modifies AWS/K8s) · input (asks a value) · gate (GO/NO + names) · manual (people do it)
+RESTORE_SUFFIX=r; [[ "$SC" == S4 ]] && RESTORE_SUFFIX=p
 COMMON_PRE=(
   "P0-S01|check|environment check: variables, tools, identity guard|dr-env-check.sh $SC"
   "P0-S02|check|pre-flight: restore window, snapshots, Secret, Reloader|dr-preflight.sh restore"
-  "P0-S03|input|instance names: OLD_DB (replaced) and RESTORED_DB (new)|export OLD_DB=\$PRIMARY_DB RESTORED_DB=\$PRIMARY_DB-$([[ $SC == S4 ]] && echo p || echo r)<YYYYMMDDHHMM>"
+  "P0-S03|input|instance names: OLD_DB (replaced) and RESTORED_DB (new)|export OLD_DB=\$PRIMARY_DB RESTORED_DB=\$PRIMARY_DB-${RESTORE_SUFFIX}-<YYYYMMDD-HHMM>"
   "P1-S01|input|open the incident: T0 (first error) + T1 (now)|dr_mark T0 --at <ts>; dr_mark T1"
 )
 CUTOVER_STEPS=(
@@ -194,7 +195,12 @@ line
 ask() {
   local var="$1" q="$2" def="${3:-}" v
   if [[ -n "${!var:-}" ]]; then echo "$var=${!var}  (already set)"; return 0; fi
-  if has_tty; then tty_prompt "   │ ⌨️  $q${def:+ [$def]}: "; read -r v </dev/tty; v="${v:-$def}"; echo "$var=$v"
+  if has_tty; then
+      printf 'INPUT %s\n%s\n' "$var" "$q"
+    if [[ -n "$def" ]]; then
+        printf 'Suggested: %s\nPress Enter to accept, or type a complete value.\n' "$def"
+    fi
+    tty_prompt "   │ $var> "; read -r v </dev/tty; v="${v:-$def}"; echo "$var=$v"
   elif (( AUTO )) && [[ -n "$def" ]]; then v="$def"; echo "$var=$v  (auto)"
   else echo "$var is required: $q — set it in the environment (export $var=…) or run on a terminal"; return 1; fi
   [[ -n "$v" ]] || { echo "$var must not be empty"; return 1; }
@@ -205,9 +211,16 @@ gate() {
   local id="$1" q="$2" ans who
   if (( AUTO )); then ans=GO; who="auto (local test bed)"; [[ ",${DR_RUN_AUTO_NO:-}," == *",$id,"* ]] && ans=NO
   elif has_tty; then
-    tty_prompt "   │ ⛳ $q — type GO to continue or NO to stop: "; read -r ans </dev/tty
-    tty_prompt "   │ approver name(s): "; read -r who </dev/tty
-    echo "answer: $ans  approvers: $who"
+    printf 'APPROVAL GATE %s\n%s\n' "$id" "$q"
+    tty_prompt '   │ Decision [GO/NO]> '; read -r ans </dev/tty
+    ans="${ans^^}"
+    case "$ans" in
+      GO) tty_prompt '   │ Approver name(s)> '; read -r who </dev/tty
+          [[ "$who" =~ [^[:space:]] ]] || { echo 'Approver name is required for GO.'; return 1; } ;;
+      NO) who='not approved' ;;
+      *) echo 'Enter exactly GO or NO.'; return 1 ;;
+    esac
+    echo "Decision: $ans  approver(s): $who"
   else echo "gate $id needs a terminal (a person must type GO)"; return 1; fi
   ans="${ans^^}"
   printf 'gate: %s\nquestion: %s\nanswer: %s\napprovers: %s\nrecorded_by: %s\nat: %s\n' "$id" "$q" "$ans" "${who:-?}" \
@@ -218,9 +231,9 @@ gate() {
 # manual <id> <what> — a person does it; record who confirmed
 manual() {
   local id="$1" what="$2" who
-  echo "🙋 $what"
+  printf 'MANUAL STEP %s\n%s\n' "$id" "$what"
   if (( AUTO )); then who="auto (local test bed)"
-  elif has_tty; then tty_prompt "   │ done? type your name to confirm (empty = not done): "; read -r who </dev/tty; echo "confirmed by: ${who:-<nobody>}"
+  elif has_tty; then tty_prompt '   │ Your name (Enter leaves this incomplete)> '; read -r who </dev/tty; echo "Confirmed by: ${who:-<nobody>}"
   else echo "manual step $id needs a terminal"; return 1; fi
   [[ -n "$who" ]] || { echo "not confirmed"; return 1; }
   dr_mark "MANUAL:$id" "done, confirmed by $who: $what"
@@ -230,7 +243,8 @@ db_status() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-d
 mode_a() { [[ "${RESTORE_MODE:-A}" == A ]]; }
 mode_b() { [[ "${RESTORE_MODE:-A}" == B ]]; }
 target() { dr_set_target "$RESTORED_DB" >/dev/null; [[ -n "${TARGET_DSN:-}" ]] || { echo "TARGET_DSN for $RESTORED_DB not available (app secret / endpoint)"; return 1; }; }
-iso_ok() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T\ ][0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})?$ ]] && date -u -d "$1" +%s >/dev/null 2>&1; }
+iso_ok() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)$ ]] && date -u -d "$1" +%s >/dev/null 2>&1; }
+epoch_ns() { date -u -d "$1" +%s%N 2>/dev/null; }
 x() { echo "\$ $*"; "$@"; }   # show the exact command, then run it
 
 # ───────────────────── steps ─────────────────────
@@ -238,9 +252,33 @@ s_P0-S01() { x "$S/dr-env-check.sh" "$SC"; }
 s_P0-S02() { x "$S/dr-preflight.sh" restore; }
 s_P0-S03() {
   ask OLD_DB "instance being replaced" "$PRIMARY_DB" || return 1
-  ask RESTORED_DB "name of the new (restored) instance" "${PRIMARY_DB}-$([[ $SC == S4 ]] && echo p || echo r)$(date -u +%Y%m%d%H%M)" || return 1
-  [[ "$RESTORED_DB" != "$OLD_DB" ]] || { echo "RESTORED_DB must differ from OLD_DB"; return 1; }
-  echo "OLD_DB=$OLD_DB (status: $(db_status "$OLD_DB"))   RESTORED_DB=$RESTORED_DB (status: $(db_status "$RESTORED_DB"))"
+  local suffix target_status
+  suffix="$([[ $SC == S4 ]] && echo p || echo r)"
+  echo "SOURCE DB (OLD_DB): $OLD_DB — original database being replaced."
+  echo "TARGET DB (RESTORED_DB): a new instance; it will not overwrite the source."
+  local target_guidance="Complete RDS identifier (starts with a letter; letters, digits, hyphens; max 63 characters)"
+  [[ "$DR_ENV" != local ]] || target_guidance+="; local $SC targets must start ${PRIMARY_DB}-${suffix} for endpoint mapping"
+  ask RESTORED_DB "$target_guidance" \
+    "${PRIMARY_DB}-${suffix}-$(date -u +%Y%m%d-%H%M)" || return 1
+  if [[ ! "$RESTORED_DB" =~ ^[A-Za-z][A-Za-z0-9-]{0,62}$ || "$RESTORED_DB" == *--* || "$RESTORED_DB" == *- ]]; then
+    echo "INVALID RESTORED_DB: '$RESTORED_DB'. Use 1-63 letters, digits, or hyphens; start with a letter and avoid consecutive/trailing hyphens."
+    unset RESTORED_DB; save_vars; return 1
+  fi
+  if [[ "$RESTORED_DB" == "$OLD_DB" ]]; then
+    echo 'INVALID RESTORED_DB: it must be a new ID, different from OLD_DB.'
+    unset RESTORED_DB; save_vars; return 1
+  fi
+  if [[ "$DR_ENV" == local && "$RESTORED_DB" != "${PRIMARY_DB}-${suffix}"* ]]; then
+    echo "INVALID local RESTORED_DB: for $SC it must start with '${PRIMARY_DB}-${suffix}' so the local endpoint map can route it."
+    unset RESTORED_DB; save_vars; return 1
+  fi
+  target_status="$(db_status "$RESTORED_DB")"
+  if [[ "$target_status" != not-found ]]; then
+    echo "REFUSED RESTORED_DB '$RESTORED_DB': target already exists (status=$target_status). Choose a new ID."
+    unset RESTORED_DB; save_vars; return 1
+  fi
+  echo "SOURCE: $OLD_DB (status: $(db_status "$OLD_DB"))"
+  echo "TARGET: $RESTORED_DB (not found; available for restore)"
   dr_mark NAMES "old=$OLD_DB restored=$RESTORED_DB"
 }
 s_P1-S01() {
@@ -348,21 +386,59 @@ s_S3_P5-S01() { evidence; }
 s_S4_P1-S02() { manual P1-S02 "stop the damage: pause the job / migration / data loader (F1 on OLD_DB if the damage is ongoing)" && dr_mark DAMAGE_STOPPED; }
 s_S4_P1-S03() {
   x "$S/dr-restore.sh" list-snapshots "$PRIMARY_DB" || return 1
-  if [[ -z "${RESTORE_TS:-}" ]]; then
-    ask BAD_TS "BAD_TS: time of the bad change, UTC ISO-8601 (RESTORE_TS = BAD_TS − 1 s)" "$( (( AUTO )) && date -u +%FT%TZ)" || return 1
-    iso_ok "$BAD_TS" || { echo "BAD_TS '$BAD_TS' is not an ISO-8601 UTC time (e.g. 2026-10-04T09:15:00Z)"; unset BAD_TS; save_vars; return 1; }
-    RESTORE_TS="$(date -u -d "$BAD_TS - 1 second" +%FT%TZ)"; export RESTORE_TS; save_vars
+
+  local earliest="" latest="" window="" proposed bad_default=""
+  if [[ "${DR_ENV:-}" == local ]]; then
+    earliest="$(date -u -d '7 days ago' +%FT%TZ)"
+    latest="$(date -u -d 'now - 5 minutes' +%FT%TZ)"
+    echo "Local Moto PITR window (synthetic, test-only): earliest=$earliest latest=$latest (7-day window for local validation only)"
+  else
+    window="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instance-automated-backups \
+      --db-instance-identifier "$PRIMARY_DB" --query 'DBInstanceAutomatedBackups[0].RestoreWindow' --output json 2>/dev/null)" \
+      || { echo "cannot read the RDS PITR restore window for $PRIMARY_DB"; return 1; }
+    earliest="$(jq -r '.EarliestTime // empty' <<<"$window")"
+    latest="$(jq -r '.LatestTime // empty' <<<"$window")"
+    if [[ -z "$earliest" || "$earliest" == None || -z "$latest" || "$latest" == None ]]; then
+      echo "Refusing PITR selection: AWS did not return RestoreWindow.EarliestTime and LatestTime for $PRIMARY_DB" >&2
+      return 1
+    fi
+    echo "PITR window: earliest=$earliest latest=$latest"
   fi
-  iso_ok "$RESTORE_TS" || { echo "RESTORE_TS '$RESTORE_TS' is not an ISO-8601 UTC time (e.g. 2026-10-04T09:15:00Z)"; unset RESTORE_TS; save_vars; return 1; }
-  local latest; latest="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$PRIMARY_DB" \
-    --query 'DBInstances[0].LatestRestorableTime' --output text 2>/dev/null)"
-  if [[ -n "$latest" && "$latest" != None ]] && (( $(date -u -d "$RESTORE_TS" +%s) > $(date -u -d "$latest" +%s) )); then
-    echo "RESTORE_TS $RESTORE_TS is after LatestRestorableTime $latest — not restorable yet"; return 1; fi
-  echo "RESTORE_TS=$RESTORE_TS   (latest restorable: ${latest:-n/a})"
-  dr_mark RESTORE_TS_CHOSEN "value=$RESTORE_TS bad_ts=${BAD_TS:-n/a}"
+
+  if [[ -z "${BAD_TS:-}" ]]; then
+    if (( AUTO )); then bad_default="$(date -u -d "$latest - 5 seconds" +%FT%TZ)"; fi
+    ask BAD_TS "BAD_TS: time of the bad change, UTC ISO-8601 (RESTORE_TS must be earlier)" "$bad_default" || return 1
+  fi
+  iso_ok "$BAD_TS" || { echo "BAD_TS '$BAD_TS' is not an ISO-8601 UTC time with an explicit UTC designator (e.g. 2026-10-04T09:15:00Z)"; unset BAD_TS; save_vars; return 1; }
+
+  proposed="$(date -u -d "$BAD_TS - 1 second" +%FT%T.%NZ)"
+  if [[ -z "${RESTORE_TS:-}" ]]; then
+    ask RESTORE_TS "PITR restore point; Enter accepts BAD_TS - 1 second" "$proposed" || return 1
+  fi
+
+  iso_ok "$RESTORE_TS" || { echo "RESTORE_TS '$RESTORE_TS' is not an ISO-8601 UTC time with an explicit UTC designator (e.g. 2026-10-04T09:15:00Z)"; unset RESTORE_TS; save_vars; return 1; }
+
+  local restore_epoch earliest_epoch latest_epoch bad_epoch
+  restore_epoch="$(epoch_ns "$RESTORE_TS")" || { echo "cannot parse RESTORE_TS $RESTORE_TS"; unset RESTORE_TS; save_vars; return 1; }
+  earliest_epoch="$(epoch_ns "$earliest")" || { echo "cannot parse PITR earliest time $earliest"; return 1; }
+  latest_epoch="$(epoch_ns "$latest")" || { echo "cannot parse PITR latest time $latest"; return 1; }
+  bad_epoch="$(epoch_ns "$BAD_TS")" || { echo "cannot parse BAD_TS $BAD_TS"; unset BAD_TS RESTORE_TS; save_vars; return 1; }
+
+  if (( restore_epoch < earliest_epoch )) || (( restore_epoch > latest_epoch )); then
+    echo "RESTORE_TS $RESTORE_TS is outside the PITR window [$earliest, $latest] — choose a time inside the window" >&2
+    unset RESTORE_TS; save_vars; return 1
+  fi
+
+  if (( restore_epoch >= bad_epoch )); then
+    echo "RESTORE_TS $RESTORE_TS must be before BAD_TS $BAD_TS and inside the PITR window" >&2
+    unset RESTORE_TS; save_vars; return 1
+  fi
+
+  echo "RESTORE_TS=$RESTORE_TS   (window: ${earliest} → ${latest})"
+  dr_mark RESTORE_TS_CHOSEN "value=$RESTORE_TS bad_ts=$BAD_TS"
 }
 s_S4_P1-S04() {
-  ask RESTORE_MODE "mode: A = restored DB becomes primary · B = repair the data on the primary" A || return 1
+  ask RESTORE_MODE "Choose A: restored DB becomes primary, or B: repair data on the current primary" A || return 1
   RESTORE_MODE="${RESTORE_MODE^^}"; [[ "$RESTORE_MODE" =~ ^[AB]$ ]] || { echo "mode must be A or B"; unset RESTORE_MODE; save_vars; return 1; }
   save_vars; dr_mark DECISION "mode=$RESTORE_MODE"
 }
@@ -469,7 +545,11 @@ step() { # <id>
     case "$ON_FAIL" in
       continue) break ;;
       stop) record "$id" FAIL "$rc" "$el"; FAILN=$((FAILN+1)); STOPPED="$id"; return 1 ;;
-      ask) read -r -p "   [r]etry  [s]kip (counts as FAILED: dependent steps are blocked)  [a]bort ? " ans </dev/tty
+       ask) echo "STEP FAILED: $id — choose what to do."
+         echo "  r) Retry this step"
+         echo "  s) Mark failed and block dependent steps"
+         echo "  a) Abort this run"
+         tty_prompt 'Choice [r/s/a]> '; read -r ans </dev/tty
            case "$ans" in
              r|R) continue ;;
              a|A) record "$id" FAIL "$rc" "$el"; FAILN=$((FAILN+1)); STOPPED="$id"; return 1 ;;

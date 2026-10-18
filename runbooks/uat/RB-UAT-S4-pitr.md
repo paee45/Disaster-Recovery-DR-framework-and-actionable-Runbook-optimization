@@ -29,7 +29,7 @@ The table stays the manual procedure: use it when you run the commands yourself.
 |---|---|---|---|---|
 | P1-S01 | Open the incident (SEV3) + channel; `dr_mark T1`, `dr_mark T0 --at <first bad change>` | SRE on-call | 3 | Open |
 | P1-S02 | Stop the damage (pause the job/migration/test data loader; F1 on OLD_DB if the damage is ongoing). `dr_mark DAMAGE_STOPPED` | QA lead + SRE | 5 | Stopped |
-| P1-S03 | Find `BAD_TS` (migration logs, CloudWatch PostgreSQL logs, CloudTrail) and check the restore window (`describe-db-instance-automated-backups … RestoreWindow`) | DBA | 10 | `RESTORE_TS = BAD_TS − 1 s` |
+| P1-S03 | Find `BAD_TS` from migration/application evidence and inspect `RestoreWindow.EarliestTime`/`LatestTime`. Propose `RESTORE_TS=BAD_TS−1 s`; DBA may enter a different evidence-based time, but it must be inside the window and before `BAD_TS`. | DBA | 10 | Restore point and window confirmed |
 | P1-S04 | Choose the mode: **B** if the damage is limited to known tables and other teams' newer UAT data must survive; else **A** | DBA + QA lead | 5 | `DECISION: mode=…` |
 | P1-G1 ⛳ | GO (SRE on-call + QA lead) with `RESTORE_TS` and the loss window. `dr_mark T2`. Email the UAT users | SRE on-call | 5 | Recorded / sent |
 | P2-S01 | `dr_mark T4` · `./automation/scripts/dr-restore.sh pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"` | Executor | 2 | API 200 |

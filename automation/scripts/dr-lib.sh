@@ -322,7 +322,8 @@ dr_phase() {
     local start="${!var:-$(date +%s)}" el
     el=$(( $(date +%s) - start ))
     dr_mark "PHASE_END:${name}" "elapsed_s=${el}"
-    printf '⏱  phase %-28s %dm%02ds%s\n' "$name" $((el/60)) $((el%60)) "${budget:+ (budget ${budget}m)}"
+    printf '⏱  phase %-28s %dm%02ds wall-clock (includes prompts/gates)%s\n' \
+      "$name" $((el/60)) $((el%60)) "${budget:+ (budget ${budget}m)}"
     dr_sync_evidence
   fi
 }
@@ -354,8 +355,36 @@ dr_sync_evidence() {
 # dr_summary — per-phase durations + elapsed since T0 (for the channel and the report).
 dr_summary() {
   jq -rs '
+    def epoch($value):
+      ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $base
+      | (try ($value | capture("\\.(?<fraction>[0-9]+)Z$") | .fraction) catch "0") as $fraction
+      | $base + (("0." + $fraction) | tonumber);
+    def duration($total):
+      ($total / 3600 | floor) as $hours
+      | ($total % 3600 / 60 | floor) as $minutes
+      | ($total % 60) as $seconds
+      | if $hours > 0 then "\($hours) h \($minutes) min \($seconds) s"
+        elif $minutes > 0 then "\($minutes) min \($seconds) s"
+        else "\($seconds) s" end;
     (map(select(.marker=="T0"))[0].ts // .[0].ts) as $t0
-    | (map(select(.marker|startswith("PHASE_END:")))[] | "\(.marker|ltrimstr("PHASE_END:")): \(.note)"),
-      "since T0: \(((now - ($t0|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601))/60|floor)) min (target ${RTO_TARGET_MIN:-30})"
+    | epoch($t0) as $t0_epoch
+    | (map(select(.marker=="T9"))[0].ts // null) as $t9_ts
+    | (if $t9_ts == null then now else epoch($t9_ts) end) as $rto_end
+    | ([.[] | select(.marker=="HUMAN_WAIT") | . as $wait
+        | (try ($wait.note | capture("secs=(?<seconds>[0-9]+)")) catch {}) as $wait_note
+        | (($wait_note.seconds // "0") | tonumber) as $wait_seconds
+        | (([epoch($wait.ts), $rto_end] | min) - ([epoch($wait.ts) - $wait_seconds, $t0_epoch] | max)) as $overlap
+        | [$overlap, 0] | max
+      ] | add // 0 | round) as $operator_wait
+    | "Phase durations (wall-clock; include prompts and gates):",
+      (map(select(.marker|startswith("PHASE_END:")))[] | . as $phase
+       | (try ($phase.note | capture("^elapsed_s=(?<seconds>[0-9]+)$")) catch {}) as $parsed
+       | "\($phase.marker|ltrimstr("PHASE_END:")): \(if ($parsed | has("seconds")) then duration($parsed.seconds | tonumber) else $phase.note end)"),
+      (if $t9_ts == null
+       then "Operator wait since T0 (T9 not recorded): \(duration($operator_wait))"
+      else "Operator wait within business RTO (T0-T9): \(duration($operator_wait)) (included in RTO and phase times)" end),
+          (if $t9_ts == null
+      then "Elapsed so far since T0: \(duration((now - $t0_epoch)|round)) (RTO target: ${RTO_TARGET_MIN:-30} min)"
+      else "Business RTO (T0-T9): \(duration(($rto_end - $t0_epoch)|round)) (RTO target: ${RTO_TARGET_MIN:-30} min)" end)
   ' "$DR_TIMELINE" | sed "s/\${RTO_TARGET_MIN:-30}/${RTO_TARGET_MIN:-30}/"
 }

@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$ROOT/tests/local/.state"
 usage() {
   printf '%s\n' \
-    'Usage: bash iac/local.sh create|doctor|prepare|ready|shell|test|dr [S3|S4]|failback <change-id>' \
+    'Usage: bash iac/local.sh create|doctor|prepare|ready|shell|test|dr [S3|S4]|failback [<change-id>]' \
     '       bash iac/local.sh unfence <DR_ID> <local-db-id>' \
     '       bash iac/local.sh <platform|mock|addons|workloads|normalization> <terraform arguments...>' \
     'Build order: platform plan/apply, prepare, mock plan/apply, addons plan/apply, workloads plan/apply.' \
@@ -141,8 +141,8 @@ READY
     dr_runner "$scenario" "$@"
     ;;
   failback)
-    [[ $# == 1 ]] || { usage; exit 2; }
-    dr_runner failback "$1"
+    [[ $# -le 1 ]] || { usage; exit 2; }
+    dr_runner failback "$@"
     ;;
   unfence)
     [[ $# == 2 && "$1" =~ ^DR-[A-Za-z0-9][A-Za-z0-9._-]{0,100}$ \
