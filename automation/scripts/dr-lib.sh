@@ -270,6 +270,7 @@ dr_endpoint() {
 # (Exporting PGPASSWORD inside "$(dr_dsn …)" would be lost — command substitution runs in a subshell.)
 export PGPASSFILE="${PGPASSFILE:-${XDG_RUNTIME_DIR:-$HOME/.cache}/dr-runbook/pgpass}"
 _dr_pgpass_add() { # host port db user password
+  [[ "${DR_DB_ACCESS:-readonly}" != none ]] || { echo 'REFUSED: operator mode cannot create credential caches.' >&2; return 1; }
   local esc="${5//\\/\\\\}"; esc="${esc//:/\\:}"
   ( umask 077; mkdir -p "$(dirname "$PGPASSFILE")"; touch "$PGPASSFILE"
     grep -v "^$1:$2:$3:$4:" "$PGPASSFILE" > "$PGPASSFILE.tmp" || true
@@ -278,6 +279,7 @@ _dr_pgpass_add() { # host port db user password
 
 # dr_app_secret — app credentials as JSON {username,password}: Secrets Manager $SECRET_ID (eso) or K8s Secret (k8s)
 dr_app_secret() {
+  [[ "${DR_DB_ACCESS:-readonly}" != none ]] || { echo 'REFUSED: operator mode does not permit database credential access.' >&2; return 1; }
   if [[ "$SECRET_MODE" == k8s ]]; then
     kubectl --context "$EKS_CONTEXT" -n "$K8S_NS" get secret "$K8S_SECRET" -o json \
       | jq -c --arg u "${K8S_USER_KEY:-POSTGRES_DB_USER}" --arg p "${K8S_PASSWORD_KEY:-POSTGRES_DB_PASSWORD}" \

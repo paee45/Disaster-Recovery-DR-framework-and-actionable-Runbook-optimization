@@ -67,6 +67,53 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **Credential-free discovery (2026-10-19):** discovery no longer fetches Kubernetes Secret payloads or discovers
+  password values. Endpoint Secret namespace/name are explicit inputs; key names are reviewed configuration.
+  Env template validation refuses password/pgpass assignments but permits non-secret `*_KEY` and Secret-ID references.
+  SQL-free runner defaults to `DR_DB_ACCESS=none`: `SECRET_MODE=k8s`, endpoint-only Secret, no SQL or database
+  password fetch/cache/`fix-password`, and only `FENCE=stop` (confirmed before E2E/T9). API configuration/availability
+  and endpoint/consumer checks are not application connectivity or business proof. Record `DATA_OWNER` and
+  `DATA_ACCEPTANCE_REF` (S4 also `RESTORE_POINT_REF`); before T9 require `APP_OWNER`, `APP_DB_DESTINATION` matching
+  the restored DB (recorded automatically after explicit yes/no confirmation, not typed), `E2E_REF` proving connectivity
+  and a successful business transaction, and GO approver matching `APP_OWNER`. Failback uses the same yes/no destination
+  confirmation; blank/no answers cannot record T9.
+- **SQL-free local migration (2026-10-19): applied; recovery attestation/failback pending.** Approved saved Terraform
+  `direct_only` splits host/port `app-db-endpoint` from credential `app-db-direct`; app-d/app-e have endpoint Reloader
+  annotations. SA `dr-operator` gets/patches only the named endpoint Secret, with ledger and read-only inventory access;
+  no credential Secret reads, Secret listing, pod exec or workload mutation. After reviewed saved workloads plan approval
+  and apply, the privileged app/platform owner runs `iac/local/prepare-operator.sh` inside drtest-tools: writes
+  `tests/local/.state/operator-kubeconfig` with a requested four-hour token without printing it and runs negative auth
+  tests. Local `dr.sh` requires it in `none` mode. Host admin kubeconfig, provisioning/container control and host DB
+  lifecycle remain privileged and distinct; this is not a claim the host operator cannot use admin credentials.
+  New run `DR-20261018-1801-local-S3` passed restore/API validation, physical original stop, endpoint cutover to `.23`
+  through `app-db-endpoint`, Reloader and stale=0 checks using the restricted operator identity. Original is stopped;
+  restored runs. Data owner pa accepted the local restore using reference 12345; app-owner E2E/GO and failback remain
+  pending. The old approval prompt was interrupted for the yes/no UX change; resume the same run, not a new restore.
+  Elapsed since T0 already exceeds 30 minutes; synthetic daily-1d snapshot age exceeds 24 hours. Neither is AWS
+  performance. Endpoint failback does not reconcile writes. Keep real AWS paused and preserve
+  historical SQL evidence and local/mock RTO/RPO caveats; they do not prove SQL-free recovery.
+- **Read-only verification (2026-10-18 owner decision):** automated post-restore SQL, `dr-verify.sh db`, and local
+  failback checks must not create/insert/update probe or business rows. Recovery/read-only settings and SELECT checks
+  do not prove write commits; the owner performs the separate application business transaction before T9. Existing
+  historical probe rows/evidence remain untouched. Password repair and fencing remain separately authorized mutations.
+- **Async stop fencing (2026-10-18):** optional `FENCE=stop` requests stop before S3/S4 full cutover, confirms `stopped`
+  after rollout and before E2E/T9. Only standalone RDS PostgreSQL without replicas/cluster membership is accepted.
+  No master DB password needed for F3. Host `iac/local.sh db old stop|start|status` plans/reviews/applies lifecycle
+  updates to existing Terraform containers, preserves volumes, and persists desired running states in ignored `.state`.
+  Local F3 requires host stopped evidence plus an unreachable Postgres endpoint; Moto-only stop remains refused.
+  Docker provider 3.6.2 ignores updates to start/must_run for running containers; `terraform_data.postgres_lifecycle`
+  invokes the checked-in host Docker lifecycle script through reviewed Terraform applies, retaining container ID/volume.
+  Offline regression: `bash tests/local/test-stop-fencing.sh` (Bash 4+), 64 cases including local failback data policy. Local S3
+  `DR-20261018-1528-local-S3` passed 20/20 steps: physical original stop, cutover, both app sessions on restored,
+  3 committed app-d probe transactions plus app-e readback, and local evidence upload. Original remains physically stopped;
+  app points at `app-pg-local-r-20261018-152832`. RTO 30.91 min includes lifecycle debugging/pauses; RPO 88680.5 s is
+  synthetic snapshot metadata. Both targets missed; not AWS performance. No HTTP business workflow or real AWS stop test.
+  Subsequent local failback `DR-local-failback-20261018163434-4786` tested original restart, endpoint failback,
+  both app consumers on original, then physical restored stop, retaining IDs/volumes. Owner explicitly accepted local
+  test-data loss (no probe copying/reconciliation). The approval name accidentally received the policy token while the
+  terminal advanced; separate owner-confirmed `approvals/approver-correction.md` records pa without rewriting the log.
+  New failback data gate supports local-only `ACCEPT_LOCAL_DATA_LOSS`; decision tokens are refused as approver names.
+  Current original runs, restored is stopped; review `db restored start` before the next mapped restore drill.
 - Latest suite: v0.6 = **109/109** (clean Terraform-managed fixture, 2026-10-13; report `tests/local/.state/test-report.md`). Group J = dr-run.sh.
 - In tests never use `grep -q` after a pipe under `pipefail` (SIGPIPE → false failure); `env` options (`-u X`) go before assignments.
 - Owner's Mac is set up (repo at `~/dr-framework`, brew bash 5 / coreutils / libpq / awscli / kubectl); `claude` CLI not installed.
@@ -100,8 +147,9 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
   Do not treat these values as AWS performance or change production targets from them. Evidence:
   `tests/local/.state/evidence/DR-20261013-1437-local-S4/`. Do not run `tests/local/up.sh` or `down.sh` against Terraform-owned
   containers.
-- **Local walkthrough:** no ESO by default (`enable_eso=false`, `direct_only=true`): plain `app-db-direct`, app-d/app-e,
-  Reloader, and endpoint ledger. The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
+- **Historical local walkthrough:** no ESO (`enable_eso=false`, `direct_only=true`): mixed `app-db-direct`, app-d/app-e,
+  Reloader, and endpoint ledger. New unapplied `direct_only` code splits the endpoint Secret as noted above.
+  The legacy full regression suite needs an explicit ESO opt-in and a clean fixture.
 - **Mock fidelity:** Moto 5.0.28 is patched for unique DB resource IDs, replica isolation, and RDS field round-trips.
   `app-pg-local-fixture` is a Terraform-owned manual mock snapshot; it is not a scheduled backup or a real data clone.
   The mock also has synthetic automated snapshot metadata (`app-pg-local-daily-1d`, `app-pg-local-daily-2d`) and

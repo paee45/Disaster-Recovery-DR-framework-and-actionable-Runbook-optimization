@@ -221,6 +221,41 @@ The default walkthrough is **no ESO**: add-ons use `enable_eso=false` and worklo
 This installs Reloader, the plain `app-db-direct` Secret, app-d/app-e, and the alert sink; no SecretStore or ExternalSecret
 is created. The DR script reads the restored endpoint, patches both host keys after approval, and verifies rollouts.
 
+### Physical local stop fencing
+
+The existing platform PostgreSQL resources support `postgres_running` for `old`, `replica`, and `restored`.
+Their data volumes are retained when stopped. Docker provider 3.6.2 does not stop a running container when only
+`start`/`must_run` are updated. A `terraform_data.postgres_lifecycle` action therefore invokes the checked-in host
+lifecycle script against the existing container ID and verifies its state. Replacing that small action is expected;
+replacing the actual container or volume is not. Host-only lifecycle commands create a saved Terraform plan, refuse
+container replacements or unrelated changes, ask for `APPLY`, verify Docker state, and save local inspection evidence:
+
+```bash
+bash iac/local.sh db old status
+FENCE=stop bash iac/local.sh dr S3 --to P3-G0 --on-fail stop
+bash iac/local.sh db old stop
+bash iac/local.sh dr S3 --resume <DR_ID> --on-fail stop
+```
+
+Complete the restore validation and cutover approval before running `db old stop`. Resume the same DR ID, not a new
+restore. The runner accepts the local stop fence only with host inspection evidence and a `pg_isready` no-response
+result at the original fixture endpoint; it rechecks before E2E/T9. Moto metadata is not proof of shutdown and remains
+separate. This staged test proves physical isolation, not asynchronous AWS stop timing or production stop eligibility.
+
+`db old start` reverses the container lifecycle, not the endpoint or data changes. Starting needs owner approval and
+controlled reconciliation before endpoint failback. `db restored stop` is available only after successful failback and
+the retention decision. The wrapper saves desired running states under ignored `.state/postgres-running.tfvars.json`
+and reuses them in subsequent platform plans; do not bypass the wrapper during this workflow. No Docker socket is
+mounted into the tools container. All three PostgreSQL fixtures remain independent, not physically replicated RDS.
+
+For local endpoint failback, start the original with `db old start`, verify data handling, then run
+`bash iac/local.sh failback <recorded-change-id>`. The data gate accepts `RECONCILED`, or the explicitly local-test-only
+`ACCEPT_LOCAL_DATA_LOSS` for disposable restored-side writes. The latter is recorded as `local-test-data-loss-accepted`,
+never as reconciled. Login, recovery/read-only settings, read access, GO, and a person name remain required. These
+database checks do not perform writes; committed business-write verification belongs to separate application E2E. After verifying both app consumers
+on the original, stop the inactive target with `db restored stop`; its volume remains. Before another local restore
+exercise, review/start that restored fixture again with `db restored start` so its mapped PostgreSQL endpoint is available.
+
 The existing full regression suite (`bash iac/local.sh test`) requires the legacy ESO fixture. Only when explicitly
 testing that optional path, plan add-ons with `-var enable_eso=true` and workloads with `-var direct_only=false`, review,
 and apply each saved plan. The suite changes fixture data, so rebuild a clean fixture before a timed manual drill.
@@ -236,7 +271,7 @@ bash iac/local.sh failback <recorded-change-id>
 With no ID, the local failback command lists eligible ledger entries newest first. Choosing an entry still requires data reconciliation confirmation, GO, and approver name; failback changes the endpoint but does not copy data.
 Approvals remain interactive. The local restored fixture intentionally has older data and an older password, so the
 password-repair path may require an explicit step. Endpoint failback refuses a read-only or unreachable old DB and
-requires a writable app_user transaction, reconciliation confirmation, and an approver. It does not copy new writes
+requires app_user login/settings and a read-only query, explicit data-policy confirmation, and an approver. It does not copy new writes
 back. This is an endpoint failback test, not the full production post-restore replica/normalisation runbook.
 
 Inspect `tests/local/.state/test-report.md` and `.state/logs/` for regression results. Manual run evidence is bind-mounted

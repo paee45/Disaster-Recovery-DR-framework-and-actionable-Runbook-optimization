@@ -28,6 +28,20 @@ variable "tools_image" {
   description = "Tag for the tools image built by Terraform."
 }
 
+variable "postgres_running" {
+  type = map(bool)
+  default = {
+    old      = true
+    replica  = true
+    restored = true
+  }
+  description = "Desired lifecycle of existing local PostgreSQL fixtures; stopping preserves their data volumes."
+  validation {
+    condition     = toset(keys(var.postgres_running)) == toset(["old", "replica", "restored"])
+    error_message = "postgres_running must contain exactly old, replica, and restored."
+  }
+}
+
 variable "expose_docker_socket" {
   type        = bool
   default     = false

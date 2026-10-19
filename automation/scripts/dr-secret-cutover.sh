@@ -20,16 +20,23 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
-dr_guard || exit 1
-: "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${DR_EVIDENCE_DIR:?run dr_init first}"
+DR_DB_ACCESS="${DR_DB_ACCESS-readonly}"
+[[ "$DR_DB_ACCESS" =~ ^(readonly|none)$ ]] || { echo "DR_DB_ACCESS must be readonly or none" >&2; exit 2; }
 SECRET_MODE="${SECRET_MODE:-eso}"; [[ "$SECRET_MODE" =~ ^(k8s|eso)$ ]] || { echo "SECRET_MODE must be k8s or eso"; exit 2; }
 CMD="${1:-}"
+if [[ "$DR_DB_ACCESS" == none ]]; then
+  [[ "$SECRET_MODE" == k8s ]] || { echo "REFUSED: operator mode requires SECRET_MODE=k8s" >&2; exit 2; }
+  [[ "${CUTOVER_SECRET:-}" != ro ]] || { echo "REFUSED: operator mode requires an explicit endpoint-only K8S_SECRET" >&2; exit 2; }
+  [[ ! "$CMD" =~ ^(precheck|fix-password)$ ]] || { echo "REFUSED: operator mode does not permit SQL or password repair" >&2; exit 2; }
+fi
+dr_guard || exit 1
+: "${EKS_CONTEXT:?}" "${K8S_NS:?}" "${DR_EVIDENCE_DIR:?run dr_init first}"
 
 RO=0
 if [[ "$SECRET_MODE" == k8s && "${CUTOVER_SECRET:-}" == ro ]]; then   # k8s mode, read-only secret: its own K8s Secret + host keys
   K8S_SECRET="${K8S_SECRET_RO:?K8S_SECRET_RO is not set in env/<env>.env}"; K8S_HOST_KEY="${K8S_HOST_KEY_RO:-${K8S_HOST_KEY:-DB_HOST}}"
   K8S_PORT_KEY="${K8S_PORT_KEY_RO:-${K8S_PORT_KEY:-}}"; export K8S_SECRET K8S_HOST_KEY K8S_PORT_KEY; RO=1
-elif [[ -n "${SECRET_ID_RO:-}" && "${SECRET_ID:-}" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
+elif [[ "$DR_DB_ACCESS" != none && -n "${SECRET_ID_RO:-}" && "${SECRET_ID:-}" == "$SECRET_ID_RO" ]]; then K8S_SECRET="${K8S_SECRET_RO:-db-creds-ro}"; fi
 : "${K8S_SECRET:?}"
 [[ "$SECRET_MODE" == k8s ]] || : "${SECRET_ID:?SECRET_ID required for SECRET_MODE=eso}"
 SAFE_ID="${SECRET_ID:-k8s}"; SAFE_ID="${SAFE_ID//\//_}"
@@ -38,18 +45,66 @@ K="kubectl --context ${EKS_CONTEXT} -n ${K8S_NS}"
 
 EP=("$HERE/k8s-secret-endpoint.sh" --context "$EKS_CONTEXT" -n "$K8S_NS" -s "$K8S_SECRET" -k "${K8S_HOST_KEY:-DB_HOST}" ${K8S_PORT_KEY:+--port-key "$K8S_PORT_KEY"})
 NEW_HOST=""; NEW_PORT=""
-if [[ "$CMD" =~ ^(precheck|fix-password|apply)$ ]]; then
+if [[ "$CMD" =~ ^(precheck|fix-password|apply|verify-routing|check-target)$ ]]; then
   : "${TARGET_DB:?run dr_set_target <id> first, or export TARGET_DB}"
-  read -r NEW_HOST NEW_PORT <<<"$(dr_endpoint "$TARGET_DB")"
+  ENDPOINT="$(dr_endpoint "$TARGET_DB")" || { echo "Cannot resolve TARGET_DB $TARGET_DB" >&2; exit 1; }
+  read -r NEW_HOST NEW_PORT <<<"$ENDPOINT"
   [[ -z "$NEW_HOST" || "$NEW_HOST" == "None" ]] && { echo "TARGET_DB $TARGET_DB has no endpoint (not available?)"; exit 1; }
 fi
 
-secret_json() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage AWSCURRENT --query SecretString --output text; }
+secret_json() {
+  [[ "$DR_DB_ACCESS" != none ]] || { echo "REFUSED: operator mode does not permit secret-value access" >&2; return 1; }
+  aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager get-secret-value --secret-id "$SECRET_ID" --version-stage AWSCURRENT --query SecretString --output text
+}
 current_version() { aws --profile "$AWS_PROFILE" --region "$AWS_REGION" secretsmanager describe-secret --secret-id "$SECRET_ID" \
   --query 'VersionIdsToStages' --output json | jq -r 'to_entries[] | select(.value | index("AWSCURRENT")) | .key'; }
 
+endpoint_secret() {
+  local endpoint_data
+  if ! jq -en --arg hosts "${K8S_HOST_KEY:-DB_HOST}" --arg port "${K8S_PORT_KEY:-}" \
+    --arg user "${K8S_USER_KEY:-POSTGRES_DB_USER}" --arg password "${K8S_PASSWORD_KEY:-POSTGRES_DB_PASSWORD}" '
+      ($hosts | split(",")) as $hosts |
+      ($hosts + (if $port == "" then [] else [$port] end)) as $keys |
+      ($keys | length) == ($keys | unique | length) and
+      all($keys[]; test("^[A-Za-z0-9._-]+$") and . != $user and . != $password and
+        (ascii_downcase | test("password|passwd|pwd|user|credential|secret|token|pgpass|dsn|uri|url") | not))' >/dev/null; then
+    echo "REFUSED: endpoint keys must be distinct, non-credential Kubernetes data keys" >&2
+    return 1
+  fi
+  endpoint_data="$($K get secret "$K8S_SECRET" -o json)" || return 1
+  if ! jq -e --arg hosts "${K8S_HOST_KEY:-DB_HOST}" --arg port "${K8S_PORT_KEY:-}" '
+      (($hosts | split(",")) + (if $port == "" then [] else [$port] end) | sort) as $keys |
+      (.data | type) == "object" and (.data | keys) == $keys and
+      all(.data[]; type == "string" and (@base64d | length > 0))' <<<"$endpoint_data" >/dev/null; then
+    echo "REFUSED: Secret $K8S_NS/$K8S_SECRET must contain exactly the configured endpoint keys with nonempty values" >&2
+    return 1
+  fi
+  printf '%s\n' "$endpoint_data"
+}
+
+check_target() {
+  local target_status
+  [[ -n "$NEW_HOST" && "$NEW_HOST" != None && "$NEW_PORT" =~ ^[0-9]+$ ]] || { echo "REFUSED: invalid TARGET_DB endpoint" >&2; return 1; }
+  target_status="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$TARGET_DB" \
+    --query 'DBInstances[0].DBInstanceStatus' --output text)" || return 1
+  [[ "$target_status" == available ]] || { echo "REFUSED: TARGET_DB $TARGET_DB status is $target_status, expected available" >&2; return 1; }
+}
+
+verify_routing() {
+  local endpoint_data
+  [[ "$SECRET_MODE" == k8s ]] || { echo "verify-routing requires SECRET_MODE=k8s" >&2; return 2; }
+  check_target || return 1
+  endpoint_data="$(endpoint_secret)" || return 1
+  jq -e --arg hosts "${K8S_HOST_KEY:-DB_HOST}" --arg port "${K8S_PORT_KEY:-}" --arg host "$NEW_HOST" --arg value "$NEW_PORT" '
+    .data as $data | all(($hosts | split(","))[]; ($data[.] | @base64d) == $host) and
+    (if $port == "" then true else ($data[$port] | @base64d) == $value end)' <<<"$endpoint_data" >/dev/null \
+    || { echo "REFUSED: endpoint Secret does not match TARGET_DB $TARGET_DB ($NEW_HOST:$NEW_PORT)" >&2; return 1; }
+  echo "ROUTING OK: $K8S_NS/$K8S_SECRET -> $TARGET_DB ($NEW_HOST:$NEW_PORT), status=available"
+}
+
 # app credentials + current host, from Secrets Manager (eso) or from the K8s Secret itself (k8s) → "user<TAB>pw<TAB>host"
 app_creds() {
+  [[ "$DR_DB_ACCESS" != none ]] || { echo "REFUSED: operator mode does not permit app credential access" >&2; return 1; }
   if [[ "$SECRET_MODE" == k8s ]]; then
     $K get secret "$K8S_SECRET" -o json | jq -r --arg u "${K8S_USER_KEY:-POSTGRES_DB_USER}" --arg p "${K8S_PASSWORD_KEY:-POSTGRES_DB_PASSWORD}" \
       --arg keys "${K8S_HOST_KEY:-DB_HOST}" '
@@ -81,6 +136,7 @@ verify_secret_host_is_original() {
 }
 
 precheck() {
+  [[ "$DR_DB_ACCESS" != none ]] || { echo "REFUSED: operator mode does not permit SQL prechecks" >&2; return 1; }
   local user pw host
   IFS=$'\t' read -r user pw host <<<"$(app_creds)"
   echo "secret ${SECRET_MODE}:$([[ $SECRET_MODE == k8s ]] && echo "$K8S_NS/$K8S_SECRET" || echo "$SECRET_ID"): host(now)=$host → target=$NEW_HOST:$NEW_PORT user=$user"
@@ -94,6 +150,7 @@ precheck() {
 }
 
 fix_password() {
+  [[ "$DR_DB_ACCESS" != none ]] || { echo "REFUSED: operator mode does not permit password repair" >&2; return 1; }
   local m user pw secret_hosts
   IFS=$'\t' read -r user pw secret_hosts <<<"$(app_creds)"
   verify_secret_host_is_original "$secret_hosts" || return 1
@@ -176,15 +233,25 @@ rollback() {
   "$HERE/dr-eks-rollout.sh" wait "$K8S_SECRET"
 }
 
+if [[ "$DR_DB_ACCESS" == none && "$CMD" =~ ^(apply|rollback|failback|history|show)$ ]]; then
+  endpoint_secret >/dev/null || exit 1
+fi
+
 case "$CMD" in
   precheck)     precheck ;;
   fix-password) dr_confirm "reset app password on $TARGET_DB" && fix_password ;;
-  apply)        precheck && dr_confirm "point $K8S_SECRET at $TARGET_DB (pods will restart)" \
+  verify-routing) verify_routing ;;
+  check-target) check_target ;;
+  apply)        if [[ "$DR_DB_ACCESS" == none ]]; then
+                  [[ "$TARGET_DB" != "${OLD_DB:-${PRIMARY_DB:-}}" ]] || { echo "REFUSED: apply target is the original DB; use failback <id>" >&2; exit 2; }
+                  check_target || exit 1
+                else precheck || exit 1; fi
+                dr_confirm "point $K8S_SECRET at $TARGET_DB (pods will restart)" \
                   && if [[ "$SECRET_MODE" == k8s ]]; then apply_k8s; else apply; fi ;;
   rollback)     dr_confirm "roll back $K8S_SECRET" && if [[ "$SECRET_MODE" == k8s ]]; then revert_k8s rollback; else rollback; fi ;;
   failback)     [[ "$SECRET_MODE" == k8s ]] || { echo "failback <id> needs SECRET_MODE=k8s (eso: run apply with TARGET_DB=<original instance>)"; exit 2; }
                 dr_confirm "fail back $K8S_SECRET to the endpoint before ${2:?change id, see: $0 history}" && revert_k8s failback "$2" ;;
   history)      "${EP[@]}" history ;;
   show)         "${EP[@]}" show ;;
-  *) echo "usage: $0 {precheck|fix-password|apply|rollback|failback <id>|history|show}"; exit 2 ;;
+  *) echo "usage: $0 {precheck|fix-password|verify-routing|apply|rollback|failback <id>|history|show}"; exit 2 ;;
 esac

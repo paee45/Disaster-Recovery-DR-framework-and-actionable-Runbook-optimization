@@ -25,7 +25,7 @@
 # Gates (⛳) wait for a typed GO + approver name(s) and record DECISION in the timeline (approvals/<ID>.txt).
 # Inputs are asked once and saved for --resume (run-vars.env); set them in advance to skip the prompt:
 #   T0_AT (first error, UTC ISO; empty = now) · SNAPSHOT_ID (S3; default newest automated) · BAD_TS [and optional RESTORE_TS] (S4)
-#   RESTORE_MODE A|B (S4) · RESTORED_DB · FENCE readonly|skip · E2E_REF (test transaction id)
+#   RESTORE_MODE A|B (S4) · RESTORED_DB · FENCE readonly|stop|skip · E2E_REF (test transaction id)
 # PROD: every change step asks for the typed 'prod' confirmation first (dr_confirm).
 # Local test bed only: DR_RUN_GATES=auto answers gates/inputs automatically (refused in any other env);
 #   DR_RUN_AUTO_NO=<gate id,…> answers NO at those gates (tests the stop + resume path).
@@ -61,7 +61,7 @@ COMMON_PRE=(
   "P1-S01|input|open the incident: T0 (first error) + T1 (now)|dr_mark T0 --at <ts>; dr_mark T1"
 )
 CUTOVER_STEPS=(
-  "FENCE|change|fence the old instance (CP-04 F1) — N/A if stopped/unreachable|dr-fence-instance.sh readonly \$OLD_DB"
+  "FENCE|change|fence old DB: read-only or asynchronous stop (CP-04)|dr-fence-instance.sh \$FENCE \$OLD_DB"
   "APPLY|change|CUTOVER: write the new endpoint into the Secret, Reloader restarts the pods (CP-01)|dr-secret-cutover.sh apply  [+ CUTOVER_SECRET=ro … apply]"
   "AFTER|change|resume CronJobs + no consumer left on the old Secret (stale check / restart-stale)|dr-eks-rollout.sh resume-cronjobs; dr-eks-rollout.sh check || restart-stale"
 )
@@ -77,12 +77,12 @@ if [[ "$SC" == S3 ]]; then
     "P2-S05|check|DB verification: app login (fix-password if needed), pg_settings, SQL verify, row counts|dr-secret-cutover.sh precheck; dr-restore.sh validate-pg; psql -f 20-postfailover-verify.sql; dr-verify.sh compare-counts"
     "P3-G0|gate|GO for the cutover (restored DB VALIDATED and verified)|dr_mark DECISION …"
     "${CUTOVER_STEPS[0]/FENCE/P3-S01}" "${CUTOVER_STEPS[1]/APPLY/P3-S02}" "${CUTOVER_STEPS[2]/AFTER/P3-S03}"
-    "P4-S01|check|app sessions on the new DB, none left on the old|dr-verify.sh connections"
+    "P4-S01|check|confirm old DB stopped if requested, then inspect app sessions|dr-fence-instance.sh wait-stopped (FENCE=stop); dr-verify.sh connections"
     "P4-S02|input|E2E: dashboard + one test transaction (playbook) → T9|dr_mark T9 \"e2e ref=…\""
     "P4-G4|gate|declare services restored → T10 + phase summary|dr_mark T10; dr_summary"
     "P5-S01|change|evidence bundle: KPIs, CloudTrail, RDS events, SHA-256 manifest → WORM bucket|dr-collect-evidence.sh")
   declare -A NEEDS=([P1-G1]="P0-S03 P1-S02" [P2-S00]=P1-S02 [P2-S01]="P1-G1 P2-S00" [P2-S03]=P2-S01 [P2-S04]=P2-S03 [P2-S05]=P2-S04
-    [P3-G0]="P2-S04 P2-S05" [P3-S01]=P3-G0 [P3-S02]="P3-G0 P3-S01" [P3-S03]=P3-S02 [P4-S01]=P3-S02 [P4-S02]=P3-S02 [P4-G4]=P4-S02)
+    [P3-G0]="P2-S04 P2-S05" [P3-S01]=P3-G0 [P3-S02]="P3-G0 P3-S01" [P3-S03]=P3-S02 [P4-S01]=P3-S03 [P4-S02]=P4-S01 [P4-G4]=P4-S02)
   declare -A PSTART=([P1-S01]="prepare 3" [P2-S01]="restore 12" [P2-S04]="harden 4" [P3-S01]="cutover 5" [P4-S01]="app-verify 5" [P5-S01]="close 1")
   declare -A PEND=([P1-G1]="prepare 3" [P2-S03]="restore 12" [P2-S05]="harden 4" [P3-S03]="cutover 5" [P4-G4]="app-verify 5" [P5-S01]="close 1")
   declare -A COND=()
@@ -99,16 +99,16 @@ else
     "P2-G3|gate|restore point signed off (DBA + QA)|dr_mark DECISION …"
     "P3B-S01|manual|MODE B: export the rows from RESTORED_DB, apply the reviewed repair on PRIMARY_DB (DBA)|pg_dump --data-only -t … / \\copy; repair script in one transaction"
     "P3A-S01|check|MODE A: parity — all RDS settings + pg_settings equal to the source (CP-03)|dr-restore.sh validate \$RESTORED_DB; dr-restore.sh validate-pg"
-    "P3A-G0|gate|MODE A: GO for the cutover|dr_mark DECISION …"
+    "P3A-G0|gate|MODE A: prepare consumers and app login, then GO for cutover|dr-eks-rollout.sh inventory/suspend-cronjobs; precheck; dr_mark DECISION …"
     "${CUTOVER_STEPS[0]/FENCE/P3A-S02}"
-    "P3A-S03|change|MODE A: CUTOVER (CP-01): inventory, suspend CronJobs, app login, write endpoint, Reloader, resume, stale check|dr-eks-rollout.sh inventory/suspend-cronjobs; dr-secret-cutover.sh precheck|fix-password; apply; resume-cronjobs; check"
-    "P3A-S04|check|MODE A: app sessions on the new DB, none left on the old (CP-02)|dr-verify.sh connections"
+    "P3A-S03|change|MODE A: CUTOVER (CP-01): write endpoint, Reloader, resume, stale check|dr-secret-cutover.sh apply; resume-cronjobs; check"
+    "P3A-S04|check|MODE A: confirm old DB stopped if requested, then inspect app sessions|dr-fence-instance.sh wait-stopped (FENCE=stop); dr-verify.sh connections"
     "P3A-S05|input|MODE A: E2E: dashboard + one test transaction → T9|dr_mark T9 \"e2e ref=…\""
     "P3A-G5|gate|MODE A: declare services restored → T10 + phase summary|dr_mark T10; dr_summary"
     "P4-S01|change|evidence bundle (RPO_RESTORE_TS) → WORM bucket (CP-05)|dr-collect-evidence.sh")
   declare -A NEEDS=([P1-G1]="P0-S03 P1-S03 P1-S04" [P2-S00]=P1-S03 [P2-S01]="P1-G1 P2-S00" [P2-S02]=P2-S01 [P2-S03]=P2-S02 [P2-G3]=P2-S03
     [P3B-S01]=P2-G3 [P3A-S01]="P2-S02 P2-G3" [P3A-G0]=P3A-S01 [P3A-S02]=P3A-G0 [P3A-S03]="P3A-G0 P3A-S02"
-    [P3A-S04]=P3A-S03 [P3A-S05]=P3A-S03 [P3A-G5]=P3A-S05)
+    [P3A-S04]=P3A-S03 [P3A-S05]=P3A-S04 [P3A-G5]=P3A-S05)
   declare -A PSTART=([P1-S01]="prepare 5" [P2-S01]="restore 16" [P3A-S02]="cutover 5" [P3A-S04]="app-verify 5" [P4-S01]="close 1")
   declare -A PEND=([P1-G1]="prepare 5" [P2-S02]="restore 16" [P3A-S03]="cutover 5" [P3A-G5]="app-verify 5" [P4-S01]="close 1")
   declare -A COND=([P3B-S01]=mode_b [P3A-S01]=mode_a [P3A-G0]=mode_a [P3A-S02]=mode_a [P3A-S03]=mode_a [P3A-S04]=mode_a
@@ -116,6 +116,29 @@ else
 fi
 IDS=(); declare -A KIND=() TITLE=() CMD=() POS=()
 for _l in "${STEPS[@]}"; do IFS='|' read -r _i _k _t _c <<<"$_l"; POS[$_i]=${#IDS[@]}; IDS+=("$_i"); KIND[$_i]=$_k; TITLE[$_i]=$_t; CMD[$_i]=$_c; done
+if [[ "${DR_DB_ACCESS:-none}" == none ]]; then
+  TITLE[P1-G1]='owner approval of restore point and data-loss window'
+  CMD[P1-G1]='record DATA_OWNER and DATA_ACCEPTANCE_REF; approval -> T2'
+  if [[ "$SC" == S3 ]]; then
+    TITLE[P2-S05]='API configuration/status validation only; application validation pending'
+    CMD[P2-S05]='dr-restore.sh validate $RESTORED_DB (no SQL or credential access)'
+    TITLE[P4-S01]='confirm original stop, endpoint destination and consumer rollouts'
+    CMD[P4-S01]='wait-stopped; verify-routing; consumer check'
+    TITLE[P4-S02]='app owner attests restored-DB connectivity and business E2E -> T9'
+    CMD[P4-S02]='APP_OWNER + APP_DB_DESTINATION + E2E_REF; app-owner GO gate'
+  else
+    TITLE[P2-S03]='app/data-owner PITR-point review evidence; no operator SQL'
+    CMD[P2-S03]='record RESTORE_POINT_REF'
+    TITLE[P3A-S01]='RDS API configuration parity; no SQL settings/login checks'
+    CMD[P3A-S01]='dr-restore.sh validate $RESTORED_DB'
+    TITLE[P3A-G0]='prepare consumers and approve full endpoint cutover'
+    CMD[P3A-G0]='inventory/suspend CronJobs; API validation; GO'
+    TITLE[P3A-S04]='confirm original stop, endpoint destination and consumer rollouts'
+    CMD[P3A-S04]='wait-stopped; verify-routing; consumer check'
+    TITLE[P3A-S05]='app owner attests restored-DB connectivity and business E2E -> T9'
+    CMD[P3A-S05]='APP_OWNER + APP_DB_DESTINATION + E2E_REF; app-owner GO gate'
+  fi
+fi
 for _i in "$FROM" "$TO"; do [[ -z "$_i" || -n "${POS[$_i]:-}" ]] || { echo "unknown step id: $_i (see --list)"; exit 2; }; done
 
 icon() { case "$1" in check) echo "🔍";; change) echo "✏️ ";; input) echo "⌨️ ";; gate) echo "⛳";; manual) echo "🙋";; esac; }
@@ -154,12 +177,25 @@ if (( DRYRUN )); then
 fi
 
 # ───────────────────── start / resume the run ─────────────────────
+export DR_DB_ACCESS="${DR_DB_ACCESS:-none}"
+REQUESTED_DB_ACCESS="$DR_DB_ACCESS"
+[[ "$DR_DB_ACCESS" == none || "$DR_DB_ACCESS" == readonly ]] || { echo 'DR_DB_ACCESS must be none or readonly'; exit 2; }
+if [[ "$DR_DB_ACCESS" == none && "${SECRET_MODE:-eso}" != k8s ]]; then
+  echo 'REFUSED: operator mode requires SECRET_MODE=k8s and an endpoint-only Secret; ESO updates read credential payloads.' >&2
+  exit 2
+fi
+unset TARGET_DSN OLD_DSN
 cd "$ROOT" || exit 2
 if [[ -n "$RESUME" ]]; then
   [[ -d "$ROOT/evidence/$RESUME" ]] || { echo "no evidence folder evidence/$RESUME to resume"; exit 2; }
   export DR_ID="$RESUME"
   # shellcheck source=/dev/null
   [[ -f "$ROOT/evidence/$RESUME/run-vars.env" ]] && source "$ROOT/evidence/$RESUME/run-vars.env"
+  if [[ "$DR_DB_ACCESS" != "$REQUESTED_DB_ACCESS" ]] ||
+     { [[ "$DR_DB_ACCESS" == none ]] && ! grep -q '^export DR_DB_ACCESS=' "$ROOT/evidence/$RESUME/run-vars.env"; }; then
+    echo 'REFUSED: resume cannot change validation modes or treat an older SQL run as operator-mode evidence. Start a new run.' >&2
+    exit 2
+  fi
 fi
 # one run = one DR_ID = one evidence folder evidence/<DR_ID> (an inherited DR_EVIDENCE_DIR is not used)
 export DR_ID="${DR_ID:-DR-$(date -u +%Y%m%d-%H%M)-${DR_ENV}-${SC}}"
@@ -177,7 +213,7 @@ exec 3>&1 4>&2; exec > >(tee -a "$RUNLOG") 2>&1; TEE_PID=$!
 
 declare -A STATUS=() PREV=()
 if [[ -f "$STATEF" ]]; then while IFS=$'\t' read -r i st _; do PREV[$i]="$st"; done < "$STATEF"; fi
-SAVE_VARS=(OLD_DB RESTORED_DB SNAPSHOT_ID BAD_TS RESTORE_TS RESTORE_MODE FENCE E2E_REF T0_AT)
+SAVE_VARS=(OLD_DB RESTORED_DB SNAPSHOT_ID BAD_TS RESTORE_TS RESTORE_MODE FENCE E2E_REF T0_AT DR_DB_ACCESS APP_OWNER APP_DB_DESTINATION DATA_OWNER DATA_ACCEPTANCE_REF RESTORE_POINT_REF)
 save_vars() {
   { for v in "${SAVE_VARS[@]}"; do [[ -n "${!v:-}" ]] && printf 'export %s=%q\n' "$v" "${!v}"; done
     for v in "${!DR_PHASE_START_@}"; do printf 'export %s=%q\n' "$v" "${!v}"; done; } > "$VARSF"
@@ -203,7 +239,7 @@ ask() {
     tty_prompt "   │ $var> "; read -r v </dev/tty; v="${v:-$def}"; echo "$var=$v"
   elif (( AUTO )) && [[ -n "$def" ]]; then v="$def"; echo "$var=$v  (auto)"
   else echo "$var is required: $q — set it in the environment (export $var=…) or run on a terminal"; return 1; fi
-  [[ -n "$v" ]] || { echo "$var must not be empty"; return 1; }
+  [[ "$v" =~ [^[:space:]] ]] || { echo "$var must not be empty or whitespace"; return 1; }
   printf -v "$var" '%s' "$v"; export "${var?}"; save_vars
 }
 # gate <id> <question> — typed GO / NO + approver names → approvals/<id>.txt + DECISION marker
@@ -226,6 +262,7 @@ gate() {
   printf 'gate: %s\nquestion: %s\nanswer: %s\napprovers: %s\nrecorded_by: %s\nat: %s\n' "$id" "$q" "$ans" "${who:-?}" \
     "${DR_ACTOR:-?}" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/$id.txt"
   dr_mark DECISION "$id $ans by ${who:-?}: $q"
+  GATE_APPROVER="${who:-}"; export GATE_APPROVER
   [[ "$ans" == GO ]] || return 4
 }
 # manual <id> <what> — a person does it; record who confirmed
@@ -316,13 +353,26 @@ s_S3_P1-S02() {
   echo "SNAPSHOT_ID=$SNAPSHOT_ID  created/status: $t  (= the RPO reference)"
   dr_mark SNAPSHOT_CHOSEN "$SNAPSHOT_ID created=${t%%[[:space:]]*}"
 }
-s_S3_P1-G1()  { gate P1-G1 "restore $SNAPSHOT_ID into $RESTORED_DB — data written after the snapshot time is lost" && dr_mark T2 "GO to restore"; }
+approve_restore() {
+  if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+    ask DATA_OWNER 'Owner accepting the selected restore point and potential data loss' || return 1
+    ask DATA_ACCEPTANCE_REF 'Approval evidence accepting the restore point and loss window (which may extend until fencing)' || return 1
+  fi
+  gate P1-G1 "$1${DATA_OWNER:+; data owner=$DATA_OWNER evidence=${DATA_ACCEPTANCE_REF:-}}" && dr_mark T2 'GO to restore'
+}
+s_S3_P1-G1()  { approve_restore "restore $SNAPSHOT_ID into $RESTORED_DB; writes after the displayed snapshot time may be lost"; }
 s_S3_P2-S00() { x "$S/dr-restore.sh" plan snapshot "$SNAPSHOT_ID" "$RESTORED_DB"; }
 s_S3_P2-S01() { x "$S/dr-restore.sh" snapshot "$SNAPSHOT_ID" "$RESTORED_DB"; }
 s_S3_P2-S02() { x "$S/dr-eks-rollout.sh" inventory && x "$S/dr-eks-rollout.sh" suspend-cronjobs; }
 s_S3_P2-S03() { x "$S/dr-restore.sh" wait "$RESTORED_DB"; }
 s_S3_P2-S04() { x "$S/dr-restore.sh" harden "$RESTORED_DB"; }
 db_verify() { # app login (fix the password on the NEW instance if needed) + pg_settings + SQL verify + counts
+  if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+    x "$S/dr-restore.sh" validate "$RESTORED_DB" || return 1
+    export TARGET_DB="$RESTORED_DB"
+    dr_mark DATABASE_API_VERIFIED "target=$RESTORED_DB; API configuration/available only; no SQL/login/credential access; app E2E pending"
+    return 0
+  fi
   target || return 1
   export TARGET_DB="$RESTORED_DB"
   if ! x "$S/dr-secret-cutover.sh" precheck; then
@@ -341,15 +391,27 @@ s_S3_P2-S05() { db_verify; }
 s_S3_P3-G0()  { gate P3-G0 "cut the application over to $RESTORED_DB (VALIDATED + verified)"; }
 pre_fence() { # main shell: decide whether to fence (it changes the OLD instance)
   local st; st="$(db_status "$OLD_DB")"
-  if [[ "$st" != available ]]; then FENCE=skip; echo "OLD_DB $OLD_DB is '$st' → nothing to fence"; return 0; fi
-  ask FENCE "OLD_DB $OLD_DB is available — fence it read-only now? readonly | skip (exercise)" readonly
+  case "$st" in
+    available)
+      if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+        ask FENCE "Fence $OLD_DB: stop (AWS API, or host lifecycle for local); no SQL" stop
+      else
+        ask FENCE "Fence $OLD_DB: readonly (SQL), stop (AWS API, overlaps rollout), or skip (exercise)" readonly
+      fi ;;
+    stopping|stopped) FENCE=stop; export FENCE; save_vars; echo "OLD_DB is $st; confirm stopped after rollout." ;;
+    *) echo "REFUSED: OLD_DB status '$st' is not proof of isolation. Review it before cutover."; return 1 ;;
+  esac
 }
 fence() {
+  if [[ "${DR_DB_ACCESS:-readonly}" == none && "${FENCE:-}" != stop ]]; then
+    echo 'REFUSED: operator mode currently requires confirmed stop; SQL, unproven SG isolation and skip are not allowed.' >&2; return 1
+  fi
   [[ "${FENCE:-}" == skip ]] && { echo "fence: skipped (FENCE=skip / old instance $(db_status "$OLD_DB"))"; dr_mark FENCE_SKIPPED "$OLD_DB $(db_status "$OLD_DB")"; return 3; }
-  [[ "${FENCE:-}" == readonly ]] || { echo "FENCE must be readonly or skip (got '${FENCE:-}')"; return 1; }
-  x "$S/dr-fence-instance.sh" readonly "$OLD_DB"
+  [[ "${FENCE:-}" == readonly || "${FENCE:-}" == stop || "${FENCE:-}" == quarantine ]] || { echo "FENCE must be readonly, quarantine, stop or skip (got '${FENCE:-}')"; return 1; }
+  x "$S/dr-fence-instance.sh" "$FENCE" "$OLD_DB"
 }
 cutover() {
+  [[ "${DR_DB_ACCESS:-readonly}" != none || -z "${K8S_SECRET_RO:-}" ]] || { echo 'REFUSED: operator reader endpoint cutover must be separately configured before any main endpoint change.' >&2; return 1; }
   export TARGET_DB="$RESTORED_DB" CUTOVER_ID="${CUTOVER_ID:-$DR_ID}"
   x "$S/dr-secret-cutover.sh" apply || return 1
   if [[ "$SECRET_MODE" == k8s && -n "${K8S_SECRET_RO:-}" ]]; then
@@ -370,8 +432,47 @@ after_cutover() {
 s_S3_P3-S01() { fence; }
 s_S3_P3-S02() { cutover; }
 s_S3_P3-S03() { after_cutover; }
-connections() { export TARGET_DB="$RESTORED_DB"; dr_run connections "$S/dr-verify.sh" connections; }
+connections() {
+  if [[ "${FENCE:-}" == stop ]]; then
+    x "$S/dr-fence-instance.sh" wait-stopped "$OLD_DB" || return 1
+  fi
+  if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+    if [[ "${FENCE:-}" == quarantine ]]; then x "$S/dr-fence-instance.sh" verify-quarantine "$OLD_DB" || return 1; fi
+    export TARGET_DB="$RESTORED_DB"
+    x "$S/dr-secret-cutover.sh" verify-routing || return 1
+    x "$S/dr-eks-rollout.sh" check || return 1
+    dr_mark ROUTING_VERIFIED "target=$RESTORED_DB; endpoint/consumer checks only; application confirmation pending"
+    return 0
+  fi
+  export TARGET_DB="$RESTORED_DB"; dr_run connections "$S/dr-verify.sh" connections
+}
 e2e() {
+  if [[ "${FENCE:-}" == stop ]]; then
+    x "$S/dr-fence-instance.sh" wait-stopped "$OLD_DB" || return 1
+  fi
+  if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+    connections || return 1
+    ask APP_OWNER 'Application owner who verified DB connectivity and a business transaction' || return 1
+    [[ -z "${APP_DB_DESTINATION:-}" || "$APP_DB_DESTINATION" == "$RESTORED_DB" ]] || { echo 'App destination does not match RESTORED_DB'; unset APP_DB_DESTINATION; save_vars; return 1; }
+    local destination_confirmed=no
+    echo "Did you verify application connectivity and a successful business transaction on $RESTORED_DB?"
+    if has_tty; then
+      tty_prompt '   │ Confirm this DB [yes/no]> '; read -r destination_confirmed </dev/tty
+    elif (( AUTO )); then
+      destination_confirmed=yes; echo 'Destination confirmed automatically (local test bed).'
+    fi
+    [[ "${destination_confirmed,,}" == yes || "${destination_confirmed,,}" == y ]] \
+      || { echo 'App destination not confirmed; business recovery remains unverified.' >&2; return 1; }
+    export APP_DB_DESTINATION="$RESTORED_DB"
+    save_vars
+    ask E2E_REF 'Evidence proving application DB connectivity AND a successful business transaction on the restored DB' || return 1
+    [[ "$APP_OWNER" =~ [^[:space:]] && "$E2E_REF" =~ [^[:space:]] && ! "${APP_OWNER^^}" =~ ^(GO|NO|RECONCILED|ACCEPT_LOCAL_DATA_LOSS)$ ]] \
+      || { echo 'A named application owner and meaningful evidence reference are required.' >&2; return 1; }
+    gate E2E-APP-OWNER "App owner $APP_OWNER confirms business E2E on $RESTORED_DB; evidence=$E2E_REF; operator ran no SQL" || return $?
+    [[ "${GATE_APPROVER:-}" == "$APP_OWNER" ]] || { echo 'REFUSED: E2E gate must be attested by the named application owner.' >&2; return 1; }
+    dr_mark T9 "app-owner=$APP_OWNER target=$RESTORED_DB e2e=$E2E_REF; operator performed no SQL"
+    return 0
+  fi
   echo "run the E2E validation playbook: dashboard reachable + ONE successful test transaction"
   ask E2E_REF "test transaction ID / reference (proves the E2E check passed)" "$( (( AUTO )) && echo "auto-local-$(date -u +%H%M%S)")" || return 1
   dr_mark T9 "e2e passed ref=$E2E_REF"
@@ -440,13 +541,19 @@ s_S4_P1-S03() {
 s_S4_P1-S04() {
   ask RESTORE_MODE "Choose A: restored DB becomes primary, or B: repair data on the current primary" A || return 1
   RESTORE_MODE="${RESTORE_MODE^^}"; [[ "$RESTORE_MODE" =~ ^[AB]$ ]] || { echo "mode must be A or B"; unset RESTORE_MODE; save_vars; return 1; }
+  [[ "${DR_DB_ACCESS:-readonly}" != none || "$RESTORE_MODE" == A ]] || { echo 'Operator mode supports full cutover A; surgical B requires a separate DBA workflow.'; unset RESTORE_MODE; save_vars; return 1; }
   save_vars; dr_mark DECISION "mode=$RESTORE_MODE"
 }
-s_S4_P1-G1()  { gate P1-G1 "restore $PRIMARY_DB to $RESTORE_TS into $RESTORED_DB (mode $RESTORE_MODE) — writes after that time are not in the restored DB" && dr_mark T2 "GO to restore"; }
+s_S4_P1-G1()  { approve_restore "restore $PRIMARY_DB to $RESTORE_TS into $RESTORED_DB (mode $RESTORE_MODE); writes after that point may be lost"; }
 s_S4_P2-S00() { x "$S/dr-restore.sh" plan pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"; }
 s_S4_P2-S01() { x "$S/dr-restore.sh" pitr "$PRIMARY_DB" "$RESTORED_DB" "$RESTORE_TS"; }
 s_S4_P2-S02() { x "$S/dr-restore.sh" wait "$RESTORED_DB" && x "$S/dr-restore.sh" harden "$RESTORED_DB"; }
 s_S4_P2-S03() {
+  if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+    ask RESTORE_POINT_REF 'App/data-owner evidence reviewing the PITR point and bad change; no operator SQL' || return 1
+    dr_mark RESTORE_POINT_REVIEW "$RESTORE_POINT_REF; operator SQL validation not performed"
+    return 0
+  fi
   target || return 1
   local out="$DR_EVIDENCE_DIR/db/restore-point-check.txt"
   echo "\$ psql \"\$TARGET_DSN\" -v cutoff=\"'$RESTORE_TS'\" -f automation/sql/05-restore-point-check.sql"
@@ -458,11 +565,13 @@ s_S4_P2-S03() {
 s_S4_P2-G3()   { gate P2-G3 "restore point of $RESTORED_DB signed off by DBA + QA (bad change absent)"; }
 s_S4_P3B-S01() { manual P3B-S01 "MODE B: export the affected rows from $RESTORED_DB (pg_dump --data-only -t … / \\copy), apply the reviewed repair script on $PRIMARY_DB in ONE transaction, release F1; delete $RESTORED_DB after 3 days"; }
 s_S4_P3A-S01() { x "$S/dr-restore.sh" validate "$RESTORED_DB" || return 1; db_verify settings-only; }
-s_S4_P3A-G0()  { gate P3A-G0 "cut the application over to $RESTORED_DB (mode A, VALIDATED)"; }
+s_S4_P3A-G0()  {
+  x "$S/dr-eks-rollout.sh" inventory && x "$S/dr-eks-rollout.sh" suspend-cronjobs || return 1
+  db_verify settings-only || return 1
+  gate P3A-G0 "cut the application over to $RESTORED_DB (mode A, VALIDATED)"
+}
 s_S4_P3A-S02() { fence; }
-s_S4_P3A-S03() { x "$S/dr-eks-rollout.sh" inventory && x "$S/dr-eks-rollout.sh" suspend-cronjobs || return 1
-                 db_verify settings-only >/dev/null || { echo "app login / settings check failed (see steps log of P3A-S01)"; return 1; }
-                 cutover && after_cutover; }
+s_S4_P3A-S03() { cutover && after_cutover; }
 s_S4_P3A-S04() { connections; }
 s_S4_P3A-S05() { e2e; }
 s_S4_P3A-G5()  { declare_restored P3A-G5; }
@@ -563,8 +672,19 @@ step() { # <id>
 finish() {
   local i st
   {
-    printf '# DR run %s — %s — %s\n\nenv %s · runner dr-run.sh · actor %s · git %s\n\n| Step | Kind | Title | Result |\n|---|---|---|---|\n' \
+    printf '# DR run %s — %s — %s\n\nenv %s · runner dr-run.sh · actor %s · git %s\n\n' \
       "$SC" "$DR_ID" "$(date -u +%FT%TZ)" "$DR_ENV" "${DR_ACTOR:-?}" "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo n/a)"
+    printf 'Database access mode: **%s**.\n\n' "$DR_DB_ACCESS"
+    if [[ "$DR_DB_ACCESS" == none ]]; then
+      printf 'The operator performed no SQL or database-credential retrieval. RDS API status and endpoint/rollout checks are not business recovery proof.\n\n'
+      if jq -e -s 'any(.marker=="T9")' "$DR_TIMELINE" >/dev/null 2>&1; then
+        printf 'App-owner attestation: %s; destination: %s; evidence: %s. Review the app-owner approval and referenced evidence separately.\n\n' \
+          "${APP_OWNER:-not recorded}" "${APP_DB_DESTINATION:-not recorded}" "${E2E_REF:-not recorded}"
+      else
+        printf '**Business recovery is not verified:** app-owner T9 attestation is still pending.\n\n'
+      fi
+    fi
+    printf '| Step | Kind | Title | Result |\n|---|---|---|---|\n'
     for i in "${IDS[@]}"; do st="${STATUS[$i]:-${PREV[$i]:-not run}}"; printf '| %s | %s | %s | %s |\n' "$i" "${KIND[$i]}" "${TITLE[$i]}" "$st"; done
   } > "$REPORT"
   echo; line

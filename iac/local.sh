@@ -6,6 +6,7 @@ usage() {
   printf '%s\n' \
     'Usage: bash iac/local.sh create|doctor|prepare|ready|shell|test|dr [S3|S4]|failback [<change-id>]' \
     '       bash iac/local.sh unfence <DR_ID> <local-db-id>' \
+    '       bash iac/local.sh db <old|replica|restored> <start|stop|status>' \
     '       bash iac/local.sh <platform|mock|addons|workloads|normalization> <terraform arguments...>' \
     'Build order: platform plan/apply, prepare, mock plan/apply, addons plan/apply, workloads plan/apply.' \
     'Always plan -out=NAME.plan, review, then apply NAME.plan. State is local, not real S3.' \
@@ -23,7 +24,7 @@ mkdir -p "$STATE/evidence"
 runner() { docker exec -i drtest-tools "$@"; }
 dr_runner() {
   local name command=(docker exec -it)
-  for name in SNAPSHOT_ID FENCE RESTORED_DB OLD_DB T0_AT BAD_TS RESTORE_TS RESTORE_MODE E2E_REF DR_ID DR_SELECTOR; do
+  for name in SNAPSHOT_ID FENCE RESTORED_DB OLD_DB T0_AT BAD_TS RESTORE_TS RESTORE_MODE E2E_REF DR_ID DR_SELECTOR DR_DB_ACCESS APP_OWNER APP_DB_DESTINATION DATA_OWNER DATA_ACCEPTANCE_REF RESTORE_POINT_REF; do
     if declare -p "$name" >/dev/null 2>&1; then
       command+=(-e "$name=${!name}")
     fi
@@ -71,6 +72,44 @@ case "$stage" in
   doctor)
     docker ps --filter name=drtest --format '{{.Names}} {{.Status}}'
     ;;
+  db)
+    [[ $# == 2 && "$1" =~ ^(old|replica|restored)$ && "$2" =~ ^(start|stop|status)$ ]] \
+      || { usage; exit 2; }
+    fixture="$1"; action="$2"
+    container="drtest-pg-$fixture"
+    if [[ "$action" == status ]]; then
+      docker inspect "$container" --format '{{json .State}}'
+      exit 0
+    fi
+    running='{}'
+    for name in old replica restored; do
+      current="$(docker inspect "drtest-pg-$name" --format '{{.State.Running}}')"
+      running="$(jq --arg key "$name" --argjson value "$current" '. + {($key): $value}' <<<"$running")"
+    done
+    want=false; [[ "$action" != start ]] || want=true
+    running="$(jq --arg key "$fixture" --argjson value "$want" '. + {($key): $value}' <<<"$running")"
+    plan="$STATE/db-$fixture-$action-$(date -u +%Y%m%dT%H%M%SZ).plan"
+    bash "$ROOT/iac/local.sh" platform plan "-var=postgres_running=$running" "-out=$plan"
+    plan_json="$(terraform -chdir="$ROOT/iac/local/platform" show -json "$plan")"
+    jq -e --arg address "docker_container.postgres[\"$fixture\"]" \
+      --arg lifecycle "terraform_data.postgres_lifecycle[\"$fixture\"]" '
+      [.resource_changes[]? | select(.change.actions != ["no-op"])] |
+      all(.[];
+        (.address == $address and .change.actions == ["update"]) or
+        (.address == $lifecycle and
+          (.change.actions == ["create"] or .change.actions == ["delete", "create"])))
+    ' <<<"$plan_json" >/dev/null \
+      || { echo 'REFUSED: lifecycle plan changes unrelated resources or requires replacement. Review the saved plan.' >&2; exit 2; }
+    read -r -p "Type APPLY for the reviewed $fixture $action plan (data volume retained): " answer
+    [[ "$answer" == APPLY ]] || exit 2
+    bash "$ROOT/iac/local.sh" platform apply "$plan"
+    actual="$(docker inspect "$container" --format '{{.State.Running}}')"
+    [[ "$actual" == "$want" ]] || { echo 'Lifecycle state verification failed.' >&2; exit 1; }
+    jq -n --argjson running "$running" '{postgres_running:$running}' > "$STATE/postgres-running.tfvars.json"
+    docker inspect "$container" | jq --arg at "$(date -u +%FT%TZ)" \
+      '.[0] | {observedAt:$at,container:.Name,id:.Id,state:.State}' > "$STATE/local-db-$fixture.json"
+    echo "Verified $container running=$actual; data volume preserved."
+    ;;
   platform)
     command -v terraform >/dev/null || { echo 'Install Terraform on the host for the container platform.' >&2; exit 2; }
     export TF_VAR_repository_path="$ROOT"
@@ -90,7 +129,12 @@ case "$stage" in
     [[ "$state_context" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'Unsafe Docker context name for state path.' >&2; exit 2; }
     terraform -chdir="$ROOT/iac/local/platform" init -reconfigure -input=false \
       -backend-config="path=$STATE/platform-${state_context}.tfstate"
-    terraform -chdir="$ROOT/iac/local/platform" "$@"
+    if [[ "${1:-}" == plan && -f "$STATE/postgres-running.tfvars.json" ]]; then
+      shift
+      terraform -chdir="$ROOT/iac/local/platform" plan "-var-file=$STATE/postgres-running.tfvars.json" "$@"
+    else
+      terraform -chdir="$ROOT/iac/local/platform" "$@"
+    fi
     ;;
   prepare)
     ready=0

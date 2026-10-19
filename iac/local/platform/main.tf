@@ -47,6 +47,8 @@ resource "docker_container" "postgres" {
   for_each = local.databases
   name     = "drtest-pg-${each.key}"
   image    = docker_image.postgres.image_id
+  start    = true
+  must_run = false
   env      = ["POSTGRES_PASSWORD=masterpw"]
   networks_advanced {
     name         = docker_network.lab.name
@@ -73,6 +75,25 @@ resource "docker_container" "postgres" {
   }
   wait         = true
   wait_timeout = 120
+}
+
+resource "terraform_data" "postgres_lifecycle" {
+  for_each = local.databases
+  triggers_replace = {
+    container_id = docker_container.postgres[each.key].id
+    running      = var.postgres_running[each.key]
+    docker_host  = var.docker_host
+  }
+  provisioner "local-exec" {
+    command = "bash \"$LIFECYCLE_SCRIPT\""
+    environment = {
+      LIFECYCLE_SCRIPT = "${path.module}/postgres-lifecycle.sh"
+      DOCKER_HOST      = var.docker_host
+      CONTAINER_ID     = docker_container.postgres[each.key].id
+      CONTAINER_NAME   = "drtest-pg-${each.key}"
+      WANT_RUNNING     = tostring(var.postgres_running[each.key])
+    }
+  }
 }
 
 resource "docker_image" "localstack" {

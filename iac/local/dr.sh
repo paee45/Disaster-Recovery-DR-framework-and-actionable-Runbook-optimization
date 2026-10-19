@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
-inputs=(FENCE SNAPSHOT_ID T0_AT OLD_DB RESTORED_DB BAD_TS RESTORE_TS RESTORE_MODE E2E_REF DR_ID DR_SELECTOR)
+failback_data_policy() {
+  case "$1" in
+    RECONCILED) printf '%s\n' reconciled ;;
+    ACCEPT_LOCAL_DATA_LOSS)
+      [[ "${DR_ENV:-}" == local ]] || { echo 'REFUSED: data-loss waiver is local-test-only.' >&2; return 1; }
+      printf '%s\n' local-test-data-loss-accepted ;;
+    *) echo 'Failback cancelled: data handling was not confirmed.' >&2; return 1 ;;
+  esac
+}
+inputs=(FENCE SNAPSHOT_ID T0_AT OLD_DB RESTORED_DB BAD_TS RESTORE_TS RESTORE_MODE E2E_REF DR_ID DR_SELECTOR DR_DB_ACCESS APP_OWNER APP_DB_DESTINATION DATA_OWNER DATA_ACCEPTANCE_REF RESTORE_POINT_REF)
 saved_names=() saved_values=()
 for name in "${inputs[@]}"; do
   if [[ -v "$name" ]]; then
@@ -30,6 +39,22 @@ for argument in "$@"; do
 done
 export SECRET_MODE=k8s K8S_SECRET=app-db-direct K8S_HOST_KEY=POSTGRES_DB_HOST1,POSTGRES_DB_HOST2
 export K8S_PORT_KEY=POSTGRES_DB_PORT K8S_USER_KEY=POSTGRES_DB_USER K8S_PASSWORD_KEY=POSTGRES_DB_PASSWORD
+export DR_DB_ACCESS="${DR_DB_ACCESS:-none}"
+[[ "$DR_DB_ACCESS" == none || "$DR_DB_ACCESS" == readonly ]] || { echo 'DR_DB_ACCESS must be none or readonly'; exit 2; }
+if [[ "$DR_DB_ACCESS" == none ]]; then
+  export K8S_SECRET=app-db-endpoint RESTART_UNANNOTATED=false
+  [[ -f /workspace/tests/local/.state/operator-kubeconfig ]] \
+    || { echo 'REFUSED: app/platform owner must run iac/local/prepare-operator.sh in the tools container first.' >&2; exit 2; }
+  export KUBECONFIG=/workspace/tests/local/.state/operator-kubeconfig
+  identity="$(kubectl --context "$EKS_CONTEXT" auth whoami -o json | jq -er '.status.userInfo.username')"
+  [[ "$identity" == system:serviceaccount:app:dr-operator ]] \
+    || { echo 'REFUSED: operator mode must use the dr-operator ServiceAccount, not the platform/admin identity.' >&2; exit 2; }
+else
+  if kubectl --context "$EKS_CONTEXT" -n app get deployment app-d -o json 2>/dev/null |
+    jq -e 'any(.spec.template.spec.containers[].envFrom[]?; .secretRef.name == "app-db-endpoint")' >/dev/null; then
+    echo 'REFUSED: the split-endpoint fixture requires operator mode; legacy SQL drills require the legacy fixture configuration.' >&2; exit 2
+  fi
+fi
 export DR_SELECTOR="$demo_selector"
 cd /workspace
 if [[ "${1:-}" == failback ]]; then
@@ -97,10 +122,12 @@ if [[ "${1:-}" == failback ]]; then
     target_port="$(jq -r --arg key "$K8S_PORT_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
   fi
   [[ "$target_port" == "$mapped_port" ]] || { echo 'REFUSED: effective failback port does not match the local target.' >&2; exit 2; }
-  app_user="$(jq -r --arg key "$K8S_USER_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
-  app_password="$(jq -r --arg key "$K8S_PASSWORD_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+  if [[ "$DR_DB_ACCESS" != none ]]; then
+    app_user="$(jq -r --arg key "$K8S_USER_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+    app_password="$(jq -r --arg key "$K8S_PASSWORD_KEY" '.data[$key] // "" | @base64d' <<<"$secret")"
+  fi
   unset secret
-  [[ "$app_user" == app_user && -n "$app_password" && "$DB_NAME" == app ]] \
+  [[ "$DR_DB_ACCESS" == none || ( "$app_user" == app_user && -n "$app_password" && "$DB_NAME" == app ) ]] \
     || { echo 'REFUSED: expected local app_user credentials and app database.' >&2; exit 2; }
   fence_help() {
     local state evidence_dir found=0
@@ -118,6 +145,11 @@ if [[ "${1:-}" == failback ]]; then
     echo 'Fence files may remain after restore. No fence removal or data reconciliation was performed.' >&2
   }
   verify_target() {
+    if [[ "$DR_DB_ACCESS" == none ]]; then
+      DR_EVIDENCE_DIR=/workspace/tests/local/.state/evidence/adhoc automation/scripts/dr-secret-cutover.sh check-target || return 1
+      echo 'API target availability verified; app-owner connectivity/business E2E remains required after failback.'
+      return 0
+    fi
     local settings probe
     if ! settings="$(PGPASSWORD="$app_password" PGSSLMODE="${DR_PGSSLMODE:-disable}" PGCONNECT_TIMEOUT=5 \
       PGAPPNAME=dr-failback-check psql -h "$target_host" -p "$target_port" -U "$app_user" -d "$DB_NAME" -XAtq -v ON_ERROR_STOP=1 \
@@ -134,24 +166,25 @@ if [[ "${1:-}" == failback ]]; then
     fi
     if ! probe="$(PGPASSWORD="$app_password" PGSSLMODE="${DR_PGSSLMODE:-disable}" PGCONNECT_TIMEOUT=5 \
       PGAPPNAME=dr-failback-check psql -h "$target_host" -p "$target_port" -U "$app_user" -d "$DB_NAME" -XAtq -v ON_ERROR_STOP=1 \
-      -c "SET statement_timeout = '5s'; SET lock_timeout = '3s'; BEGIN;
-        WITH written AS (UPDATE public.orders SET id = id
-          WHERE id = (SELECT id FROM public.orders ORDER BY id LIMIT 1) RETURNING id)
-        SELECT CASE WHEN count(*) = 1 THEN 'WRITE_OK' ELSE 'WRITE_EMPTY' END FROM written; ROLLBACK;" 2>/dev/null)" \
-      || [[ "$probe" != WRITE_OK ]]; then
-      echo 'REFUSED: app_user transaction WRITE probe failed; target is not proven writable.' >&2
+      -c "BEGIN READ ONLY; SET LOCAL statement_timeout = '5s';
+        SELECT 'READ_OK' FROM public.orders LIMIT 1; COMMIT;" 2>/dev/null)" \
+      || [[ "$probe" != READ_OK ]]; then
+      echo 'REFUSED: app_user read probe failed; target readability is not verified.' >&2
       fence_help; return 1
     fi
+    echo 'Read-only database checks passed; committed business writes require separate application E2E.'
   }
   verify_target || exit 2
   echo "Endpoint failback only: $K8S_NS/$K8S_SECRET -> $TARGET_DB (before change $requested_ref)."
   echo 'Writes made on the restored database are NOT copied back. Reconcile them manually before continuing.'
-  read -r -p 'Type RECONCILED after completing and verifying data reconciliation: ' reconciliation
-  [[ "$reconciliation" == RECONCILED ]] || exit 2
+  echo 'For disposable local test data only, ACCEPT_LOCAL_DATA_LOSS leaves restored-side writes behind; it does not mean reconciled.'
+  read -r -p 'Data handling [RECONCILED / ACCEPT_LOCAL_DATA_LOSS]> ' reconciliation
+  data_policy="$(failback_data_policy "$reconciliation")" || exit 2
   read -r -p 'Type GO to approve this endpoint failback: ' answer
   [[ "$answer" == GO ]] || exit 2
   read -r -p 'Approver name(s): ' approver
-  [[ "$approver" =~ [^[:space:]] ]] || exit 2
+  [[ "$approver" =~ [^[:space:]] && ! "${approver^^}" =~ ^(GO|NO|RECONCILED|ACCEPT_LOCAL_DATA_LOSS)$ ]] \
+    || { echo 'REFUSED: enter a person name, not a decision token.' >&2; exit 2; }
   verify_target || exit 2
   unset app_password
   current_record="$(kubectl --context "$EKS_CONTEXT" --request-timeout=20s -n "$K8S_NS" \
@@ -164,13 +197,37 @@ if [[ "${1:-}" == failback ]]; then
   export DR_EVIDENCE_DIR="/workspace/evidence/$DR_ID"
   dr_init FB-S3S4
   printf '%s\n' "$record" > "$DR_EVIDENCE_DIR/k8s/failback-reference.json"
-  printf 'reference: %s\ntarget: %s\nreconciliation: %s\nanswer: %s\napprovers: %s\nat: %s\n' \
-    "$requested_ref" "$TARGET_DB" "$reconciliation" "$answer" "$approver" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/endpoint-failback.txt"
-  dr_mark DECISION "endpoint failback GO by $approver; reconciliation confirmed; ref=$requested_ref target=$TARGET_DB"
+  printf 'reference: %s\ntarget: %s\ndata_policy: %s\nconfirmation: %s\nanswer: %s\napprovers: %s\nat: %s\n' \
+    "$requested_ref" "$TARGET_DB" "$data_policy" "$reconciliation" "$answer" "$approver" "$(date -u +%FT%TZ)" > "$DR_EVIDENCE_DIR/approvals/endpoint-failback.txt"
+  dr_mark DECISION "endpoint failback GO by $approver; data_policy=$data_policy; ref=$requested_ref target=$TARGET_DB"
   automation/scripts/dr-secret-cutover.sh failback "$requested_ref"
   if ! automation/scripts/dr-eks-rollout.sh check; then
     automation/scripts/dr-eks-rollout.sh restart-stale
     automation/scripts/dr-eks-rollout.sh check
+  fi
+  if [[ "$DR_DB_ACCESS" == none ]]; then
+    automation/scripts/dr-secret-cutover.sh verify-routing
+    dr_mark ROUTING_VERIFIED "failback target=$TARGET_DB; operator performed no SQL"
+    echo "App owner must independently verify connectivity to $TARGET_DB and the business E2E before failback is declared verified."
+    read -r -p 'App owner name> ' app_owner </dev/tty
+    read -r -p "Did you verify connectivity and a successful business transaction on $TARGET_DB? [yes/no]> " app_destination_confirmed </dev/tty
+    [[ "${app_destination_confirmed,,}" == yes || "${app_destination_confirmed,,}" == y ]] \
+      || { echo 'Failback endpoint changed but destination is not confirmed; do not stop the restored DB.' >&2; exit 2; }
+    app_destination="$TARGET_DB"
+    read -r -p 'New failback E2E evidence reference> ' app_evidence </dev/tty
+    [[ "$app_owner" =~ [^[:space:]] && ! "${app_owner^^}" =~ ^(GO|NO|RECONCILED|ACCEPT_LOCAL_DATA_LOSS)$ &&
+       "$app_destination" == "$TARGET_DB" && "$app_evidence" =~ [^[:space:]] ]] \
+      || { echo 'Failback endpoint changed but app-owner verification is incomplete; do not stop the restored DB.' >&2; exit 2; }
+    read -r -p 'App owner: type GO to attest connectivity and business E2E passed> ' app_decision </dev/tty
+    [[ "$app_decision" == GO ]] \
+      || { echo 'Failback endpoint changed but app-owner approval is missing; do not stop the restored DB.' >&2; exit 2; }
+    automation/scripts/dr-secret-cutover.sh verify-routing
+    automation/scripts/dr-eks-rollout.sh check
+    printf 'owner: %s\ntarget: %s\nevidence: %s\nanswer: %s\noperator_sql: none\n' \
+      "$app_owner" "$app_destination" "$app_evidence" "$app_decision" > "$DR_EVIDENCE_DIR/approvals/app-owner-e2e.txt"
+    dr_mark T9 "failback app-owner=$app_owner target=$TARGET_DB evidence=$app_evidence; operator performed no SQL"
+    printf '# Local Failback\n\nDatabase access: none (no operator SQL).\n\nTarget: %s\n\nData policy: %s\n\nApp owner: %s\n\nE2E evidence: %s\n' \
+      "$TARGET_DB" "$data_policy" "$app_owner" "$app_evidence" > "$DR_EVIDENCE_DIR/run-report.md"
   fi
 else
   if [[ "${1:-}" == S3 ]]; then

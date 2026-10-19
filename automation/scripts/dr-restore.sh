@@ -47,7 +47,7 @@ capture() { # <source-db> → prints the file path
   inst="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$src" --query 'DBInstances[0]' --output json)"
   arn="$(jq -r .DBInstanceArn <<<"$inst")"
   tags="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds list-tags-for-resource --resource-name "$arn" --query TagList --output json 2>/dev/null || jq -c '.TagList // []' <<<"$inst")"
-  if dsn="$(dr_dsn "$src" 2>/dev/null)" && [[ -n "$dsn" ]]; then     # pg_settings as the DB actually runs them (best effort)
+  if [[ "${DR_DB_ACCESS:-readonly}" != none ]] && dsn="$(dr_dsn "$src" 2>/dev/null)" && [[ -n "$dsn" ]]; then     # pg_settings as the DB actually runs them (best effort)
     pg="$(psql "$dsn" -XAtq -F$'\t' -c 'select name, setting from pg_settings order by 1' 2>/dev/null \
           | jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries' 2>/dev/null)" || pg="{}"   # a failed psql must not leave two JSON values
   fi
@@ -231,6 +231,7 @@ validate() { # <db> — exit 1 on unexpected differences
 }
 
 validate_pg() { # TARGET_DSN vs live OLD_DSN (else the baseline's pgSettings)
+  [[ "${DR_DB_ACCESS:-readonly}" != none ]] || { echo 'REFUSED: operator mode does not run PostgreSQL queries.' >&2; return 1; }
   : "${TARGET_DSN:?run dr_set_target <db> first}"
   local q='select name, setting from pg_settings order by 1' ref src cur report="$OUT/validate-pg-${TARGET_DB:-target}.txt"
   local ign="^(data_directory|hba_file|ident_file|config_file|external_pid_file|listen_addresses|application_name|transaction_.*|default_transaction_read_only|in_hot_standby|ssl_.*_file|krb_server_keyfile|log_directory)$"

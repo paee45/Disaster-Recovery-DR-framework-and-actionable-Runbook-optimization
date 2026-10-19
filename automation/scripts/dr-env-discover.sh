@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dr-env-discover.sh — build env/<env>.env from what exists in AWS and the cluster, so nothing is looked up by hand.
 # Read-only: it only describes/lists (RDS, Secrets Manager, EC2 security groups, S3, EKS) and, if the kube context
-# exists, lists Secret NAMES and KEYS (never values). It copies env/<env>.env.example and replaces what it finds.
+# exists, reads cluster identity only; Secret references are supplied explicitly, without fetching Secret objects.
 #
 # Usage:  ./automation/scripts/dr-env-discover.sh <dev|uat|prod> --profile <named-profile> --region <region> \
 #             [--db <instance-id>] [--cluster <eks-name>] [--context <kube-context>] [--namespace <ns> --secret <name>] \
@@ -12,6 +12,22 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 die() { echo "dr-env-discover: $*" >&2; exit 2; }
 say() { printf '%s\n' "$*" >&2; }
+validate_env_template() {
+  local line variable
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*= ]] || continue
+    while [[ "$line" =~ ([A-Z][A-Z0-9_]*)= ]]; do
+      variable="${BASH_REMATCH[1]}"
+      line="${line#*"${BASH_REMATCH[0]}"}"
+      case "$variable" in
+        *_KEY) ;;
+        *PASSWORD*|*PASSWD*|PGPASSFILE)
+          echo "REFUSED: env template exports credential variable $variable; use a Secret reference, never a password value." >&2
+          return 1 ;;
+      esac
+    done
+  done < "$1"
+}
 
 # ───────────────────────────── arguments ─────────────────────────────
 ENVN="${1:-}"; [[ "$ENVN" =~ ^(dev|uat|prod)$ ]] || die "first argument must be dev, uat or prod (see --help in the header)"; shift
@@ -32,6 +48,7 @@ done
   || die "AWS keys are exported in this shell: unset them and use the named profile $P"
 for t in aws jq; do command -v "$t" >/dev/null || die "$t is missing"; done
 TPL="$ROOT/env/$ENVN.env.example"; [[ -f "$TPL" ]] || die "template $TPL not found"
+validate_env_template "$TPL" || exit 2
 OUT="${OUT:-$ROOT/env/$ENVN.env}"
 if (( ! PRINT )) && [[ -e "$OUT" && $FORCE -eq 0 ]]; then die "$OUT exists — use --force (a .bak copy is kept) or --print"; fi
 
@@ -158,25 +175,11 @@ if [[ -n "$CLUSTER" ]]; then
   elif ! command -v kubectl >/dev/null; then INFO+=("kubectl is missing: the Secret/namespace could not be looked up")
   else
     kq() { KUBECONFIG="$KC" kubectl --context "$CTX" --request-timeout=15s "$@"; }
-    if [[ -n "$NS" && -n "$SEC" ]]; then cands="$NS/$SEC"
-    else   # Secrets that hold a *HOST* key: names and key names only, never values
-      cands="$(kq get secrets -A -o json 2>/dev/null \
-        | jq -r '.items[] | select(.data != null) | select([.data | keys[] | test("HOST"; "i")] | any)
-                 | "\(.metadata.namespace)/\(.metadata.name)"' || true)"
-    fi
-    if [[ -n "$cands" && "$(wc -l <<<"$cands")" -eq 1 ]]; then
-      NS="${cands%%/*}"; SEC="${cands##*/}"
-      keys="$(kq -n "$NS" get secret "$SEC" -o json 2>/dev/null | jq -r '.data | keys[]' || true)"
-      found K8S_NS "$NS"; found K8S_SECRET "$SEC"
-      hk="$(grep -iE 'HOST' <<<"$keys" | paste -sd, -)"; [[ -n "$hk" ]] && found K8S_HOST_KEY "$hk"
-      pk="$(grep -iE 'PORT' <<<"$keys" | head -1)"; [[ -n "$pk" ]] && found K8S_PORT_KEY "$pk"
-      uk="$(grep -iE 'USER' <<<"$keys" | head -1)"; pw="$(grep -iE 'PASS' <<<"$keys" | head -1)"
-      [[ -n "$uk" ]] && found K8S_USER_KEY "$uk"; [[ -n "$pw" ]] && found K8S_PASSWORD_KEY "$pw"
-      [[ "$(kq -n kube-system get configmap dr-cluster-identity -o jsonpath='{.data.env}' 2>/dev/null)" == "$ENVN" ]] \
-        || INFO+=("kube-system/dr-cluster-identity does not say env=$ENVN (REQUIRE_CLUSTER_IDENTITY=true will refuse): create it per docs/12")
-    elif [[ -n "$cands" ]]; then INFO+=("several Secrets hold a HOST key: $(tr '\n' ' ' <<<"$cands")— pass --namespace and --secret")
-    else INFO+=("no Secret with a *HOST* key found through context $CTX — pass --namespace and --secret (or check access)")
-    fi
+    [[ -z "$NS" ]] || found K8S_NS "$NS"
+    [[ -z "$SEC" ]] || found K8S_SECRET "$SEC"
+    INFO+=("Kubernetes Secret values are not requested: pass --namespace and --secret for the endpoint-only Secret; review host/port key names from the application configuration")
+    [[ "$(kq -n kube-system get configmap dr-cluster-identity -o jsonpath='{.data.env}' 2>/dev/null)" == "$ENVN" ]] \
+      || INFO+=("kube-system/dr-cluster-identity does not say env=$ENVN (REQUIRE_CLUSTER_IDENTITY=true will refuse): create it per docs/12")
   fi
 fi
 

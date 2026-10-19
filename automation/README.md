@@ -1,8 +1,47 @@
 # Automation
 
+## SQL-free operator recovery
+
+The S3/S4 runner defaults to `DR_DB_ACCESS=none`. It requires `SECRET_MODE=k8s` and an endpoint-only Secret
+(host/port, no credentials). In this mode it runs no SQL, fetches or caches no database passwords, and never runs
+`fix-password`. `DR_DB_ACCESS=readonly` is a separate, explicitly selected legacy workflow, not the operator default;
+ESO and the SQL/password tools listed below are not part of SQL-free recovery.
+
+- Only `FENCE=stop` is accepted by the runner in `none` mode. Confirm the old DB is stopped before E2E/T9;
+  SQL read-only fencing, quarantine and skip are not accepted substitutes. S4 supports full cutover (mode A), not surgical repair.
+- RDS API availability/configuration and endpoint/consumer/Reloader checks prove only those checks passed. They do not
+  prove database login, application connectivity, committed business writes or data correctness.
+- Record `DATA_OWNER` and `DATA_ACCEPTANCE_REF` for acceptance of the restore point/loss window; S4 also needs
+  `RESTORE_POINT_REF`. Before T9, the application owner supplies `APP_OWNER`, `APP_DB_DESTINATION` matching the restored
+  DB, and `E2E_REF` proving connectivity and a successful business transaction there. The E2E gate needs typed GO and
+  an approver matching `APP_OWNER`. Do not replace owner evidence with an API success or an operator SQL probe.
+
+### Local migration (pending)
+
+New Terraform `direct_only` configuration splits `app-db-endpoint` (host/port) from credential Secret `app-db-direct`.
+Both app-d/app-e consume the split configuration and are annotated for Reloader on `app-db-endpoint`.
+The `dr-operator` ServiceAccount can get/patch only the named endpoint Secret, with ledger and read-only inventory
+access. It cannot read credential Secrets, list Secrets, exec into pods or mutate workloads.
+
+After the owner reviews and approves a saved workloads plan and that exact plan is applied, the privileged app/platform
+owner runs `bash iac/local/prepare-operator.sh` **inside drtest-tools**. It writes
+`tests/local/.state/operator-kubeconfig` with a requested four-hour token without printing it, checks endpoint access,
+and runs negative authorization tests for credential reads, Secret listing, pod exec and workload mutation.
+Local `iac/local/dr.sh` requires this kubeconfig in `none` mode; renew it through the same privileged setup when needed.
+Host/platform provisioning and host DB lifecycle actions remain privileged. This is not isolation from a person who
+can use the host admin kubeconfig or control the tools container.
+
+Status (2026-10-19): code/offline checks only; the split configuration has **not** been applied or drilled. Old DB is
+running, restored DB is stopped, and apps still use `.21` through the legacy mixed Secret. Next: saved-plan approval,
+migration and operator-token preparation, then new restore/failback drills with data-owner acceptance and user-driven
+application E2E/GO gates. Endpoint failback does not copy restored-side writes; reconcile first or explicitly accept
+disposable local test-data loss. The app owner must verify the failback destination and business E2E before declaring recovery.
+Real AWS operations remain paused. Historical SQL drills/evidence are unchanged and are not SQL-free proof;
+local/mock RTO/RPO values are not AWS performance measurements.
+
 | Path | Used in | Purpose |
 |---|---|---|
-| `scripts/dr-env-discover.sh <env> --profile P --region R` | Setup (once per env) | **Builds `env/<env>.env` from what exists** (read-only): account, RDS primary/replica/tags/Multi-AZ, master secret, quarantine SG, evidence bucket, EKS cluster, and the app Secret (namespace, name, host/port/user/password keys; names only, never values). Copies `env/<env>.env.example`, leaves what it cannot find empty with `# TODO`, and lists it. `--print` shows it without writing; `--force` overwrites (keeps `.bak`). Then run `dr-env-check.sh` |
+| `scripts/dr-env-discover.sh <env> --profile P --region R` | Setup (once per env) | **Builds `env/<env>.env` from metadata** (read-only): account, RDS primary/replica/tags/Multi-AZ, Secret identifiers, quarantine SG, evidence bucket and EKS cluster. It never calls `GetSecretValue` or fetches Kubernetes Secret payloads. Supply the endpoint-only Secret namespace/name through `--namespace`/`--secret` and review host/port key names from application configuration. Templates containing password assignments are refused; key names/Secret IDs are references, not password values. `--print` previews; `--force` overwrites with `.bak`. Then run `dr-env-check.sh` |
 | `scripts/dr-lib.sh` | All | `dr_init <scenario>`, `dr_mark` (timeline), `dr_run` (evidence capture), `dr_set_target`, `dr_dsn` |
 | `scripts/dr-preflight.sh replica\|restore` | S2 / S3-S4 Phase 1 | Replica health/lag/LSN, PITR window, snapshots, restore inputs, EKS/ESO/Reloader, consumer inventory |
 | `scripts/dr-restore.sh` | S3/S4 | `capture` (source baseline), `plan`, `snapshot`, `pitr` (request built from the baseline, `--cli-input-json`), `wait`, `harden` (converge to baseline), `validate` (all settings), `validate-pg` (pg_settings) |
@@ -30,7 +69,7 @@ for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFromSnapsho
 done
 ```
 
-**IAM for the executor role (minimum):** `rds:Describe*`, `rds:PromoteReadReplica`, `rds:RestoreDBInstanceFromDBSnapshot`,
+**Legacy/privileged executor permissions (not the SQL-free operator role):** `rds:Describe*`, `rds:PromoteReadReplica`, `rds:RestoreDBInstanceFromDBSnapshot`,
 `rds:RestoreDBInstanceToPointInTime`, `rds:ModifyDBInstance`, `rds:CreateDBSnapshot`, `rds:CreateDBInstanceReadReplica`,
 `rds:AddTagsToResource`, `secretsmanager:GetSecretValue|DescribeSecret|PutSecretValue|UpdateSecretVersionStage|CancelRotateSecret|RotateSecret`
 (scoped to `<env>/app/*`), `cloudwatch:GetMetricStatistics|DescribeAlarms`, `cloudtrail:LookupEvents`, `ssm:StartAutomationExecution`,

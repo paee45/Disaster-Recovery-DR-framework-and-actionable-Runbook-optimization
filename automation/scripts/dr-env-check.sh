@@ -9,12 +9,14 @@ ok()   { printf 'OK    %s\n' "$*"; }
 bad()  { printf 'FAIL  %s\n' "$*"; fails=$((fails+1)); }
 warn() { printf 'WARN  %s\n' "$*"; }
 
-for t in aws jq psql kubectl python3; do command -v "$t" >/dev/null && ok "tool $t" || bad "tool $t missing"; done
+tools=(aws jq kubectl python3)
+[[ "${DR_DB_ACCESS:-readonly}" == none ]] || tools+=(psql)
+for t in "${tools[@]}"; do command -v "$t" >/dev/null && ok "tool $t" || bad "tool $t missing"; done
 
 req=(DR_ENV AWS_PROFILE AWS_REGION ACCOUNT_ID PRIMARY_DB DB_NAME EKS_CONTEXT K8S_NS K8S_SECRET EVIDENCE_BUCKET RTO_TARGET_MIN RPO_TARGET_S)
 [[ "${SECRET_MODE:-eso}" == k8s ]] || req+=(SECRET_ID)
 [[ "$SC" == "S2" ]] && req+=(REPLICA_DB)
-[[ "$SC" == "S3" || "$SC" == "S4" ]] && req+=(MASTER_SECRET_ID)
+[[ "${DR_DB_ACCESS:-readonly}" == none ]] || { [[ "$SC" != S3 && "$SC" != S4 ]] || req+=(MASTER_SECRET_ID); }
 for v in "${req[@]}"; do
   val="${!v:-}"
   if [[ -z "$val" ]]; then bad "$v is not set"
@@ -24,6 +26,10 @@ done
 [[ -n "${K8S_HOST_KEY:-}" ]] && ok "K8S_HOST_KEY=$K8S_HOST_KEY" || warn "K8S_HOST_KEY not set (default DB_HOST)"
 [[ "${SECRET_MODE:-eso}" =~ ^(k8s|eso)$ ]] && ok "SECRET_MODE=${SECRET_MODE:-eso}" || bad "SECRET_MODE must be k8s or eso"
 [[ -n "${VERIFY_TABLES:-}" ]] && ok "VERIFY_TABLES set" || warn "VERIFY_TABLES empty — compare-counts unavailable"
+if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
+  [[ "${SECRET_MODE:-eso}" == k8s ]] || bad 'operator mode requires a separate endpoint-only Kubernetes Secret'
+  [[ -z "${K8S_SECRET_RO:-}" ]] || bad 'operator reader endpoint cutover is not configured; do not start a partial cutover'
+fi
 
 if [[ -z "${AWS_PROFILE:-}" || -z "${EKS_CONTEXT:-}" ]]; then echo "ENV CHECK: FAIL — AWS_PROFILE and EKS_CONTEXT are mandatory"; exit 1; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"

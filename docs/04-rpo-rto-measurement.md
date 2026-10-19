@@ -11,6 +11,7 @@ Events go to `timeline.jsonl` via `dr_mark` ([`dr-lib.sh`](../automation/scripts
 | **T2** | Gate G1 GO (scenario + data loss accepted) | `DECISION:` / SSM approval | — | ✔ | ✔ |
 | DAMAGE_STOPPED | Offending job/deploy stopped | Engineer | — | — | S4 |
 | FENCE | Old instance fenced (level F1/F2/F3) | `dr-fence-instance.sh` | — | ✔ | ✔ |
+| STOP_REQUESTED | RDS accepted asynchronous stop; writes may still be accepted until stopped | `dr-fence-instance.sh stop` | — | — | ✔ |
 | **T4** | DB recovery started (failover start / promote / restore API call) | RDS event / CloudTrail | ✔ | ✔ | ✔ |
 | **T5** | New primary writable | RDS event (S1), `wait-promoted`, `wait db-instance-available` | ✔ | ✔ | ✔ |
 | **T6** | Secret updated (endpoint cutover) | `dr-secret-cutover.sh apply` (auto) | — | ✔ | ✔ |
@@ -33,6 +34,12 @@ Events go to `timeline.jsonl` via `dr_mark` ([`dr-lib.sh`](../automation/scripts
 `RTO_est(S3/S4) = decision + restore_minutes_per_100GB × size/100 + parity(10) + warm-up + cutover + validation`.
 Target: **30 min**. Until measured, S3/S4 are assumed to exceed it (risk R3, [09](09-iso27001-scope.md)). If `RTO_est` > 30 min → backlog item (archiving/smaller DB, faster storage, prefer S2/S4-mode-B where valid).
 
+Automated database verification and local failback probes are read-only: they do not create tables or insert/update
+business or probe rows. Login, recovery/read-only settings, and read access do not prove committed-write capability.
+The application owner performs the separate business E2E transaction and records its evidence before T9; a green SQL
+read check alone must not be reported as business recovery. Restore, password repair and fencing remain explicit
+operational changes, not read-only verification.
+
 ## 3. RPO per scenario
 
 **Committed RPO target: 24 h** for all environments, based on the RDS daily automated snapshot with **7-day retention**.
@@ -49,6 +56,10 @@ All scenarios are expected to do better (below). The KPI report compares the act
 `loss_end` = the latest of `T0`, `DAMAGE_STOPPED` and `FENCE`. Writes the old primary accepted after the restore point are
 lost **unless reconciled** (`30-reconciliation-hints.sql`). For data-corruption incidents some of that loss is intentional
 (the bad change), so report both the "RPO window" and the "records reconciled".
+
+With F3, `STOP_REQUESTED` does not change the RPO cutoff. `FENCE` uses the time `stopped` is observed after rollout;
+this is a conservative bound, not an exact last-commit timestamp. Stop time overlaps endpoint update/rollout and remains
+inside business RTO (`T9 - T0`). A failure to confirm stop must not be reported as successful F3 isolation.
 
 ### Heartbeat (S2, UAT/PROD)
 `automation/k8s/heartbeat-writer.yaml` writes `dr.heartbeat.ts` every second through the app secret and logs every commit.

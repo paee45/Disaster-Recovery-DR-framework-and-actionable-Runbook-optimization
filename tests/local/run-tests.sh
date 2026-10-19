@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"; STATE=
 S="$ROOT/automation/scripts"; LOGS="$STATE/logs"; mkdir -p "$LOGS"; cd "$HERE" || exit 1
 # shellcheck source=/dev/null
 source "$STATE/local.env"
+export DR_DB_ACCESS=readonly
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ENDPOINT_URL PGPASSWORD
 DR_ID="DR-localtest-$(date -u +%Y%m%d%H%M%S)"; export DR_ID
 RESTORED_DB="app-pg-local-r$(date -u +%Y%m%d%H%M)"; PITR_DB="app-pg-local-p$(date -u +%Y%m%d%H%M)"
@@ -79,6 +80,16 @@ t  A25 "discovery uses environment tags, not DEV name matching; ambiguity stays 
 a26() { local out; out="$("$S/dr-env-discover.sh" dev --profile "$AWS_PROFILE" --region "$AWS_REGION" --db orders-primary-01 --print </dev/null 2>&1)"; echo "$out"
         grep -q '^export PRIMARY_DB=orders-primary-01$' <<<"$out"; }
 t  A26 "discovery --db selects a DEV-tagged primary whose name has no DEV" a26
+a27() {
+        eval "$(sed -n '/^validate_env_template() {/,/^}/p' "$S/dr-env-discover.sh")"
+        local template
+        for template in "$ROOT"/env/*.env.example; do validate_env_template "$template" || return 1; done
+        if validate_env_template <(printf '%s\n' 'export DB_PASSWORD=test-sentinel'); then return 1; fi
+        if validate_env_template <(printf '%s\n' 'export SAFE=value PGPASSWORD=test-sentinel'); then return 1; fi
+        if validate_env_template <(printf '%s\n' 'POSTGRES_PASSWORD=test-sentinel'); then return 1; fi
+        validate_env_template <(printf '%s\n' 'export K8S_PASSWORD_KEY=POSTGRES_DB_PASSWORD' 'export MASTER_SECRET_ID=local/reference')
+}
+t  A27 "discovery env templates refuse password values but allow Secret/key references" a27
 
 echo "=== B. Environment check, inventory, pre-flight"
 t  B01 "dr-env-check.sh S3 → PASS"                                   "$S/dr-env-check.sh" S3
@@ -157,7 +168,27 @@ c07c() { mpsql "$IP_RESTORED" "alter database app set work_mem = '7MB'" && ! "$S
          mpsql "$IP_RESTORED" "alter database app reset work_mem"; (( rc == 0 )) && has 'DIFF +work_mem' "$LOGS/C07c.log" && "$S/dr-restore.sh" validate-pg; }
 t  C07c "validate-pg detects a changed parameter (work_mem), passes after reset" c07c
 t  C08 "compare-counts: orders old=100 vs restored=80"                 bash -c "'$S/dr-verify.sh' compare-counts | grep -Eq 'public.orders +100 +80'"
-t  C09 "DB verification SQL on restored"                               bash -c "psql \"\$TARGET_DSN\" -f '$ROOT/automation/sql/20-postfailover-verify.sql' | grep -vq FAIL"
+c09_state() {
+        psql "$TARGET_DSN" -XAtq -v ON_ERROR_STOP=1 -c "SELECT json_build_object(
+                'orders',(SELECT md5(coalesce(jsonb_agg(to_jsonb(rows) ORDER BY id)::text,'')) FROM public.orders rows),
+                'payments',(SELECT md5(coalesce(jsonb_agg(to_jsonb(rows) ORDER BY id)::text,'')) FROM public.payments rows),
+                'probe_table',to_regclass('dr.write_probe'));" || return 1
+        if [[ -n "$(psql "$TARGET_DSN" -XAtq -v ON_ERROR_STOP=1 -c "SELECT to_regclass('dr.write_probe');")" ]]; then
+                psql "$TARGET_DSN" -XAtq -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM dr.write_probe;'
+        fi
+}
+c09() { local before after output
+                                before="$(c09_state)" || return 1
+                                output="$(psql "$TARGET_DSN" -XAtq -v ON_ERROR_STOP=1 -f "$ROOT/automation/sql/20-postfailover-verify.sql")" || return 1
+                                printf '%s\n' "$output"
+                                ! grep -q '^FAIL' <<<"$output" || return 1
+                                "$S/dr-verify.sh" db || return 1
+                                if PGOPTIONS='-c default_transaction_read_only=on' "$S/dr-verify.sh" db; then
+                                        echo 'FAIL: read-only primary settings were accepted'; return 1
+                                fi
+                                after="$(c09_state)" || return 1
+                                [[ "$before" == "$after" ]]; }
+t  C09 "DB verification SQL/helper are read-only: data and probe table unchanged" c09
 
 echo "=== D. Cutover: secret → ESO → Reloader (app-c NOT annotated)"
 APPC_POD_BEFORE="$(k get pods -l app=app-c -o jsonpath='{.items[0].metadata.name}')"

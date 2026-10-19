@@ -73,6 +73,34 @@ Guard failures print `GUARD FAIL: …` and the script stops **before** any chang
 - `dr_confirm` asks you to type `prod` before PROD changes (restore, harden, secret apply/rollback/fix-password, fencing, mass restart). In non-interactive runs it **aborts** unless `DR_ASSUME_YES=1` is set explicitly (test A08).
 - Irreversible steps (promotion, cutover) also have the runbook gates (G2/G3) with recorded approvers (SSM `aws:approve`).
 
+## SQL-free operator boundary
+
+The S3/S4 runner defaults to `DR_DB_ACCESS=none`: `SECRET_MODE=k8s`, endpoint-only Secret, no SQL, no database
+password fetch/cache and no `fix-password`. Only stop fencing is accepted in this runner mode; confirm stopped
+before E2E/T9. Legacy SQL/password workflows require separate privileges and are not operator-mode evidence.
+
+In the new local Terraform `direct_only` configuration, `app-db-endpoint` contains only host/port;
+`app-db-direct` holds credentials. app-d/app-e use both and have Reloader annotations for the endpoint Secret.
+RBAC for ServiceAccount `dr-operator` grants get/patch of the named endpoint Secret, ledger access and read-only
+inventory. It grants no credential Secret reads, Secret listing, pod exec or workload mutation.
+
+After approval and apply of the saved workloads plan, a privileged app/platform owner runs
+`iac/local/prepare-operator.sh` inside drtest-tools. It writes `tests/local/.state/operator-kubeconfig` using a
+requested four-hour token without printing it and checks allowed endpoint access and denied credential/workload access.
+Local `dr.sh` enforces use of this kubeconfig in `none` mode. Host admin kubeconfig access, platform provisioning,
+container control and host DB lifecycle remain separate privileged powers. The restricted ServiceAccount does not
+prove that the person operating the host cannot access credentials through those powers.
+
+API configuration/availability and routing checks are not application or business proof. Record data-owner acceptance
+(`DATA_OWNER`, `DATA_ACCEPTANCE_REF`; S4 restore-point review via `RESTORE_POINT_REF`). Before T9, require app-owner
+connectivity and successful business-transaction evidence (`E2E_REF`), `APP_DB_DESTINATION` matching the restored DB,
+and typed GO with the approver matching `APP_OWNER`. Failback also needs a data decision and app-owner E2E on its target;
+an endpoint change does not reconcile data. A local test-data-loss waiver is not production acceptance.
+
+Status (2026-10-19): code/offline checks only, not applied or drilled. Old DB runs, restored DB is stopped, apps use
+`.21` through the legacy mixed Secret. Next is saved-plan review/approval, migration, then restore/failback user E2E
+gates. Real AWS remains paused. Keep historical evidence and local/mock RTO/RPO caveats; neither proves this boundary.
+
 ## How you log in to AWS — SSO or a static key (both supported)
 
 The guard reads what the profile uses (`_dr_auth_type`) and checks it against `DR_AUTH_ALLOWED` in the env file:

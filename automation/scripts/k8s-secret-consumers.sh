@@ -89,7 +89,7 @@ state_of() { # kind/name rl stamped selector current_fp changed_epoch
   [[ "$stamped" == "$fp" ]] && { printf 'UP-TO-DATE\tstamped fingerprint matches\n'; return; }
   sel_q="$(jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$sel")"
   oldest="$("${K[@]}" get pods -l "$sel_q" --field-selector=status.phase=Running -o json \
-            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | .status.startTime] | min // empty')"
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | .status.startTime] | min // empty')" || return 1
   [[ -z "$oldest" ]] && { printf 'STALE\tno running pods\n'; return; }
   if (( $(to_epoch "$oldest") < chg )); then printf 'STALE\toldest pod started %s < secret changed %s\n' "$oldest" "$(date -u -d "@$chg" +%FT%TZ)"
   else printf 'UP-TO-DATE\tall pods started after the secret changed (%s)\n' "$oldest"; fi
@@ -113,12 +113,18 @@ case "$CMD" in
     consumers | while IFS=$'\t' read -r obj order rl st _; do printf '%-40s %-6s %-9s %s\n' "$obj" "$order" "$rl" "$st"; done ;;
   check)
     echo "secret $NS/$SECRET  fingerprint=$FP  data-changed-at=$CHG_TS  context=$CTX"
-    stale=0
+    consumer_rows="$(consumers)" || { echo 'ERROR: consumer inventory failed; refusing to report stale=0.' >&2; exit 3; }
+    stale=0; active=0
     while IFS=$'\t' read -r obj order rl st sel; do
-      IFS=$'\t' read -r state detail <<<"$(state_of "$obj" "$rl" "$st" "$sel" "$FP" "$CHG")"
+      [[ -n "$obj" ]] || continue
+      [[ "$obj" == cronjob/* ]] || active=$((active+1))
+      state_result="$(state_of "$obj" "$rl" "$st" "$sel" "$FP" "$CHG")" || { echo 'ERROR: consumer pod verification failed.' >&2; exit 3; }
+      IFS=$'\t' read -r state detail <<<"$state_result"
+      [[ "$state" =~ ^(UP-TO-DATE|STALE|N/A)$ ]] || { echo 'ERROR: unknown consumer state.' >&2; exit 3; }
       printf '%-11s %-40s reloader=%-3s order=%s  %s\n' "$state" "$obj" "$rl" "$order" "$detail"
       [[ "$state" == STALE ]] && stale=$((stale+1))
-    done < <(consumers)
+    done <<<"$consumer_rows"
+    [[ "${DR_DB_ACCESS:-readonly}" != none || "$active" -gt 0 ]] || { echo 'ERROR: no active endpoint consumers found; application routing is unverified.' >&2; exit 3; }
     echo "stale=$stale"; (( stale == 0 )) ;;
   restart)
     n=0

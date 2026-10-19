@@ -8,7 +8,7 @@ E2E check set is defined in the [E2E validation playbook](../../templates/report
 
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
-| CP02-S01 | **DB checks** on the current primary: `dr_run db-post psql "$TARGET_DSN" -f automation/sql/20-postfailover-verify.sql` (not in recovery, not read-only, write probe, invalid indexes, leftover slots, connection headroom) | DBA | 3 | All `OK` |
+| CP02-S01 | **Read-only DB checks** on the current primary: `dr_run db-post psql "$TARGET_DSN" -f automation/sql/20-postfailover-verify.sql` (recovery/read-only settings, heartbeat, invalid indexes, leftover slots, connection headroom). No DDL/DML or probe rows. Settings checks do not prove committed writes; verify those through the separate application E2E before T9. | DBA | 3 | All `OK`; application write proof remains separate |
 | CP02-S02 | **Restore-point validation** (S3/S4 only): `psql "$TARGET_DSN" -v cutoff="'<restore time>'" -f automation/sql/05-restore-point-check.sql`. The latest business timestamps must match the expected restore point, and the bad data (for a data incident) must be **absent** | DBA + App owner | 3 | App owner signs off: "data as of <ts>, bad change absent" |
 | CP02-S03 | **App connections land on TARGET_DB**: `./automation/scripts/dr-verify.sh connections` (counts `pg_stat_activity` by `application_name` on TARGET and **OLD** instances) | DBA | 2 | TARGET has the expected consumers; **OLD has 0 app sessions** |
 | CP02-S04 | **App deep health**: `./automation/scripts/dr-verify.sh app` (readiness/deep-health endpoints of critical services) | App owner | 2 | All 200 |

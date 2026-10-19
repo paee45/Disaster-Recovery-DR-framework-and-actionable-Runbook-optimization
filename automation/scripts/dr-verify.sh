@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dr-verify.sh — verification helpers.
 #   wait-promoted : block until TARGET_DB (promoted replica) is standalone + writable (S2 P2-S05/S06)
-#   db            : writability probe on TARGET_DB
+#   db            : read-only identity and recovery/settings checks on TARGET_DB (no write proof)
 #   connections   : app sessions per application_name on TARGET_DB and OLD_DB (old must reach 0)
 #   app           : deep-health URLs (APP_HEALTH_URLS)
 #   compare-counts: row counts of VERIFY_TABLES on OLD vs TARGET
@@ -10,6 +10,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=dr-lib.sh
 source "$HERE/dr-lib.sh"
 dr_guard || exit 1
+if [[ "${DR_DB_ACCESS:-readonly}" == none && "${1:-}" != app ]]; then
+  echo 'REFUSED: operator mode does not run PostgreSQL verification; use app-owner E2E evidence.' >&2
+  exit 2
+fi
 : "${TARGET_DB:?run dr_set_target first}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1800}"
 
@@ -32,12 +36,18 @@ wait_promoted() {
 }
 
 db_probe() {
-  psql "$(dr_dsn "$TARGET_DB")" -XAtq -v ON_ERROR_STOP=1 <<'SQL'
+  local output
+  output="$(psql "$(dr_dsn "$TARGET_DB")" -XAtq -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN READ ONLY;
+select 'server=' || inet_server_addr() || ' database=' || current_database() || ' user=' || current_user;
 select 'in_recovery=' || pg_is_in_recovery() || ' read_only_default=' || current_setting('default_transaction_read_only');
-create schema if not exists dr;
-create table if not exists dr.write_probe(id bigserial primary key, ts timestamptz default clock_timestamp(), note text);
-insert into dr.write_probe(note) values ('dr-verify') returning 'write_probe_ok id=' || id || ' ts=' || ts;
+select 'INFO read-only database checks; committed business writes must be verified by separate application E2E';
+COMMIT;
 SQL
+  )" || return 1
+  printf '%s\n' "$output"
+  grep -Fx 'in_recovery=false read_only_default=off' <<<"$output" >/dev/null \
+    || { echo 'FAIL target recovery/read-only settings are not suitable for a primary.' >&2; return 1; }
 }
 
 sessions() { # sessions <db-id> <label> <required:0|1>
