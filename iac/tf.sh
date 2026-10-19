@@ -14,6 +14,7 @@ Stacks (state key = <project>/<env or shared>/<component>/terraform.tfstate):
   platform/state-bucket   platform/terrakube   platform/terrakube-config      shared by all envs
   lab/network   lab/eks   lab/addons                                           shared by all envs
   lab/db <env>  lab/app <env>                                                  env = dev | uat | prod
+  lab/bb3-db <env>                                                            isolated sandbox DB + replica
 
 Examples:
   iac/tf.sh status                          what exists: state in S3 + resources in AWS, per stack
@@ -38,6 +39,18 @@ done
 profile="$TF_VAR_aws_profile"; region="$TF_VAR_region"; bucket="$TF_VAR_state_bucket"
 lab_name="dr-lab"; platform_name="dr-platform"      # default resource-name prefixes of the stacks
 
+if [[ "${1%/}" == lab/bb3-db ]]; then
+  git -C "$HERE" check-ignore -q "$cfg" || die "BB3 settings must be in ignored sandbox config"
+  [[ "$TF_VAR_account_id" =~ ^[0-9]{12}$ ]] || die "BB3 sandbox account must be 12 digits"
+  [[ ( "$profile" == lab_sandbox || "$profile" == pa_aws_sandbox ) && "$region" == ap-southeast-1 ]] || die "BB3 requires lab_sandbox or pa_aws_sandbox in ap-southeast-1"
+  [[ "${2:-}" =~ ^(dev|uat|prod)$ ]] || die "lab/bb3-db needs an env: dev | uat | prod"
+  [[ "${3:-}" != stop && "${3:-}" != start ]] || die "BB3 primary with a replica cannot be stopped for fencing"
+  [[ "${3:-}" != destroy ]] || die "BB3 teardown requires plan -destroy, review, then apply the saved plan"
+  if [[ "${3:-}" == apply ]]; then
+    [[ $# == 4 && "$4" == *.plan && -f "$HERE/lab/bb3-db/$4" ]] || die "BB3 apply requires one existing stack-local .plan file"
+  fi
+fi
+
 awsx() { aws --profile "$profile" --region "$region" "$@"; }
 state_key() { echo "${1%%/*}/$2/${1#*/}/terraform.tfstate"; }      # <stack> <env|shared>
 
@@ -60,6 +73,13 @@ profile_type() {   # <profile> → sso | process | role | key | none
   echo none
 }
 auth="$(profile_type "$profile")"
+if [[ "${1%/}" == lab/bb3-db ]]; then
+  if [[ "$profile" == lab_sandbox ]]; then
+    [[ "$auth" == sso ]] || die "BB3 requires an SSO lab_sandbox profile"
+  else
+    [[ "$auth" == key ]] || die "BB3 requires an IAM-key pa_aws_sandbox profile"
+  fi
+fi
 [[ "$auth" != none ]] || die "profile '$profile' is not configured in ~/.aws/config or ~/.aws/credentials (see iac/README.md, \"AWS login\")"
 [[ ",${TF_AUTH_ALLOWED:-sso,role,process,key}," == *",$auth,"* ]] \
   || die "profile '$profile' uses '$auth' credentials; allowed here: ${TF_AUTH_ALLOWED:-sso,role,process,key} (TF_AUTH_ALLOWED)"
@@ -73,6 +93,11 @@ if ! awsx sts get-caller-identity >/dev/null 2>&1; then
   else
     die "credentials of profile '$profile' ($auth) were rejected: check the access key / role / MFA token (nothing to log in to)"
   fi
+fi
+
+if [[ "${1%/}" == lab/bb3-db ]]; then
+  actual_account="$(awsx sts get-caller-identity --query Account --output text)"
+  [[ "$actual_account" == "$TF_VAR_account_id" ]] || die "BB3 profile account does not match ignored sandbox config"
 fi
 
 # ── What does AWS already hold for a stack? (read-only; prints a short text, or nothing) ───────────────
@@ -96,6 +121,11 @@ probe() {   # <stack> <env>
       out="$(awsx rds describe-db-instances --db-instance-identifier "$lab_name-$2-pg" \
         --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || true)"
       [[ -n "$out" ]] && out="RDS instance $lab_name-$2-pg ($out)" ;;
+    lab/bb3-db)
+      out="$(awsx rds describe-db-instances \
+        --query "DBInstances[?DBInstanceIdentifier=='dr-sandbox-bb3-$2-primary' || DBInstanceIdentifier=='dr-sandbox-bb3-$2-replica'].DBInstanceStatus" \
+        --output text 2>/dev/null || true)"
+      [[ -n "$out" ]] && out="BB3 sandbox RDS instance(s) ($out)" ;;
     lab/app)
       out="$(awsx rds describe-db-snapshots --db-snapshot-identifier "$lab_name-$2-seed" \
         --query 'DBSnapshots[0].Status' --output text 2>/dev/null || true)"
@@ -103,7 +133,7 @@ probe() {   # <stack> <env>
   esac
   echo "$out"
 }
-has_probe() { [[ "$1" =~ ^(platform/terrakube|lab/network|lab/eks|lab/db|lab/app)$ ]]; }
+has_probe() { [[ "$1" =~ ^(platform/terrakube|lab/network|lab/eks|lab/db|lab/bb3-db|lab/app)$ ]]; }
 
 # ── `status`: one table for every stack ───────────────────────────────────────────────────────────────
 status() {
@@ -148,13 +178,21 @@ if [[ "$1" == status ]]; then status; exit 0; fi
 stack="${1%/}"; shift
 [[ -d "$HERE/$stack" ]] || die "no such stack: $stack"
 case "$stack" in
-  lab/db|lab/app)        # per-env stacks take the env as the next word
+  lab/db|lab/bb3-db|lab/app)        # per-env stacks take the env as the next word
     env="${1:-}"; [[ "$env" =~ ^(dev|uat|prod)$ ]] || die "$stack needs an env: dev | uat | prod"
     shift; export TF_VAR_env="$env"; stack_env="$stack $env" ;;
   *) env="shared"; stack_env="$stack" ;;
 esac
 (( $# >= 1 )) || die "missing terraform command (plan, apply, destroy, output …)"
-tf() { terraform -chdir="$HERE/$stack" "$@"; }
+tf() {
+  if [[ "$stack" == lab/bb3-db && "$1" =~ ^(plan|import|refresh|console)$ ]]; then
+    terraform -chdir="$HERE/$stack" "$@" \
+      -var="account_id=$TF_VAR_account_id" -var="aws_profile=$profile" -var="region=$region" \
+      -var="state_bucket=$bucket" -var="env=$env"
+  else
+    terraform -chdir="$HERE/$stack" "$@"
+  fi
+}
 
 # ── Where does the state live?  S3 is the source of truth ─────────────────────────────────────────────
 #   state already in S3 → use it; a leftover local terraform.tfstate is set aside (never merged, never asked about)
@@ -195,7 +233,9 @@ else
     init_mode=(-migrate-state -force-copy); state_here="seeded"
     echo "note: no state in S3 yet; copying the local terraform.tfstate into it" >&2
   fi
-  tf init "${init_mode[@]}" -input=false \
+  backend_guard=()
+  if [[ "$stack" == lab/bb3-db ]]; then backend_guard=("-backend-config=allowed_account_ids=[\"$TF_VAR_account_id\"]"); fi
+  tf init "${init_mode[@]}" -input=false "${backend_guard[@]}" \
     -backend-config="bucket=$bucket" -backend-config="key=$key" \
     -backend-config="region=$region" -backend-config="profile=$profile" \
     -backend-config="encrypt=true" -backend-config="use_lockfile=true" >/dev/null

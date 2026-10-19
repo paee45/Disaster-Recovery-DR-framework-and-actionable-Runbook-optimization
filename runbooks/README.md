@@ -1,5 +1,13 @@
 # Runbook Catalogue — RDS PostgreSQL + EKS
 
+## BB3 Docker Swarm
+
+[RB-BB3-S3 - Snapshot restore and Swarm cutover](bb3/RB-BB3-S3-snapshot-restore-swarm.md)
+is the separate dev/uat/prod procedure for BB3: RDS snapshot -> Secrets Manager -> `bb3-infrastructure`
+deployment. It offers manual/SSM secret updates and manual/SSH-assisted deployment (production manual).
+It adapts the local SQL-free S3 gates, not the EKS/Reloader steps. Status: draft; BB3/sandbox Swarm testing pending.
+The existing `dr-run.sh` runner is still EKS-only.
+
 ## 1. Scenarios × environments
 
 | Scenario | What happens | DEV (primary only) | UAT (primary + replica) | PROD (Multi-AZ + replica) |

@@ -14,11 +14,20 @@ ct() { # CloudTrail management events by name (regional; RDS/Secrets Manager/EC2
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" cloudtrail lookup-events --start-time "$LOOKBACK_START" \
     --lookup-attributes AttributeKey=EventName,AttributeValue="$1" --output json > "$A/cloudtrail-$1.json" || true
 }
-for ev in PromoteReadReplica RestoreDBInstanceFromDBSnapshot RestoreDBInstanceToPointInTime RebootDBInstance \
-          ModifyDBInstance CreateDBInstanceReadReplica CreateDBSnapshot StopDBInstance DeleteDBInstance \
-          PutSecretValue UpdateSecretVersionStage CancelRotateSecret RotateSecret StartAutomationExecution; do
-  ct "$ev"
-done
+collect_cloudtrail() {
+  if [[ "$DR_ENV" == local ]]; then
+    printf '%s\n' '{"status":"skipped","reason":"Local fixture does not support CloudTrail LookupEvents; real AWS audit events are not collected."}' \
+      > "$A/cloudtrail-status.json"
+    echo 'INFO CloudTrail skipped: LookupEvents is unsupported in the local fixture (not an IAM permission failure).'
+    return 0
+  fi
+  for ev in PromoteReadReplica RestoreDBInstanceFromDBSnapshot RestoreDBInstanceToPointInTime RebootDBInstance \
+            ModifyDBInstance CreateDBInstanceReadReplica CreateDBSnapshot StopDBInstance DeleteDBInstance \
+            PutSecretValue UpdateSecretVersionStage CancelRotateSecret RotateSecret StartAutomationExecution; do
+    ct "$ev"
+  done
+}
+collect_cloudtrail
 
 for db in ${TARGET_DB:-} ${OLD_DB:-} ${REPLICA_DB:-}; do
   aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances --db-instance-identifier "$db" > "$D/describe-${db}.json" 2>/dev/null || echo "{\"absent\":\"$db\"}" > "$D/describe-${db}.json"

@@ -32,6 +32,8 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 ## Lab on real AWS (owner decision)
 - Real UAT is in another account the owner's SSO cannot reach; no profile of a real account may be used for the lab.
 - Tests on real AWS run in the owner's **sandbox account** via SSO profile `lab_sandbox` (region ap-southeast-1),
+  or owner-approved sandbox-only IAM-user profile `pa_aws_sandbox` (keys entered directly in the local terminal;
+  verify its account before switching ignored config; SSO remains preferred),
   built with **Terraform only** (stacks `iac/lab/{network,eks,addons,db,app}`, run with `iac/tf.sh`; anything reusable
   lives in git/IaC, no ad-hoc shell builders). dev/uat/prod all play in the sandbox: one shared VPC + EKS, `db` and `app`
   once per env. Small/free-tier sizes: RDS `db.t4g.micro`, EKS node `t3.small` (t3.micro cannot fit the pods).
@@ -67,6 +69,30 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **BB3 RDS sandbox (2026-10-19):** `iac/lab/bb3-db` prepares an isolated PostgreSQL primary plus cross-AZ read replica,
+  both `db.t4g.micro` by default, in dedicated private subnets and a local-only route table. No public DB endpoint,
+  NAT gateway or laptop CIDR is required for AWS CLI API-only restore tests. Terraform schema validation and 20
+  wrapper tests passed, including SSO/IAM-user authentication and wrong-account rejection. Nothing provisioned yet:
+  owner repaired SSO cache ownership/login, then requested `pa_aws_sandbox` IAM-user profile setup; enter keys locally
+  and verify the account before switching ignored config, generating and approving `bb3-private-uat.plan`. Today is RDS-only: Swarm secret,
+  deployment and business E2E remain app-owner prompts/gates, not tested or certified. Read replicas and primaries
+  with replicas cannot be stopped; a snapshot-restored DB does not inherit/repoint the existing replica.
+- **BB3 Swarm S3 (2026-10-19):** separate draft runbook `runbooks/bb3/RB-BB3-S3-snapshot-restore-swarm.md`
+  adapts the local SQL-free recovery gates for RDS -> mixed Secrets Manager secret -> `bb3-infrastructure` deployment.
+  Choose manual custodian update or existing server-side SSM updater (current keys `host`/`port` only; review BB3 schema),
+  then manual or opt-in dev/uat SSH deployment of an approved `main` commit. Production deployment remains manual.
+  Operator must not fetch the mixed credential payload. Hostnames stay in ignored config. Existing runner/collector
+  remain EKS-specific; BB3 automation, IAM/document registration and sandbox Swarm exercise are not certified yet.
+- **SQL-free local close/failback (2026-10-19):** run `DR-20261018-1801-local-S3` has latest 20/20 PASS;
+  owner pa attested E2E reference 12345 and declared restored. RTO 569.11 min includes overnight pause; synthetic RPO
+  98,898.2 s. Both targets missed, not AWS performance. Separate failback `DR-local-failback-20261019041135-12495`
+  recorded owner Pa, reference 12345 and local-only data-loss acceptance; both endpoint keys returned to `.21`,
+  app-d/e reloaded and stale=0. Approved saved host plans restarted original, then stopped restored after owner GO;
+  IDs/volumes retained. Original runs, restored is stopped. Business reference content was not independently inspected.
+  Restore collection manifest has seven stale entries from post-collection writes; final integrity/upload proof pending.
+- **Local CloudTrail collection (2026-10-19):** evidence collection skips unsupported `LookupEvents` only for
+  `DR_ENV=local`, emits INFO and records `aws/cloudtrail-status.json` with skipped audit coverage. Real dev/uat/prod
+  collection and errors remain visible; real AWS needs `cloudtrail:LookupEvents`. Historical collection errors are preserved.
 - **Credential-free discovery (2026-10-19):** discovery no longer fetches Kubernetes Secret payloads or discovers
   password values. Endpoint Secret namespace/name are explicit inputs; key names are reviewed configuration.
   Env template validation refuses password/pgpass assignments but permits non-secret `*_KEY` and Secret-ID references.

@@ -28,6 +28,10 @@ for function_name in ask gate fence db_verify connections e2e; do
   function_code="$(extract_function "$SOURCE/dr-run.sh" "$function_name")" || exit 2
   eval "$function_code" || exit 2
 done
+for function_name in ct collect_cloudtrail; do
+  function_code="$(extract_function "$SOURCE/dr-collect-evidence.sh" "$function_name")" || exit 2
+  eval "$function_code" || exit 2
+done
 for function_name in capture validate_pg; do
   function_code="$(extract_function "$SOURCE/dr-restore.sh" "$function_name")" || exit 2
   eval "$function_code" || exit 2
@@ -596,6 +600,39 @@ failback_owner_gate() {
       no_marker T9 && expect_trace ''
   fi
 }
+
+cloudtrail_collection() {
+  local cloudtrail_variant="$1"
+  export DR_ENV="$cloudtrail_variant" LOOKBACK_START=2026-10-19T00:00:00Z
+  export A="$CASE_DIR/aws"
+  [[ "$cloudtrail_variant" != denied ]] || DR_ENV=uat
+  aws() {
+    [[ "$*" == "--profile $AWS_PROFILE --region $AWS_REGION cloudtrail lookup-events --start-time $LOOKBACK_START --lookup-attributes AttributeKey=EventName,AttributeValue="* ]] \
+      || { forbidden 'unexpected CloudTrail command'; return 98; }
+    trace 'cloudtrail lookup-events'
+    if [[ "$cloudtrail_variant" == denied ]]; then
+      echo 'AccessDenied: cloudtrail:LookupEvents' >&2; return 254
+    fi
+    printf '%s\n' '{"Events":[]}'
+  }
+  collect_cloudtrail > "$CASE_DIR/cloudtrail-output" 2> "$CASE_DIR/cloudtrail-errors" || return 1
+  if [[ "$cloudtrail_variant" == local ]]; then
+    expect_trace '' && [[ ! -s "$CASE_DIR/cloudtrail-errors" ]] &&
+      "$REAL_JQ" -e '.status == "skipped" and (.reason | contains("not collected"))' "$A/cloudtrail-status.json" >/dev/null &&
+      grep -F 'INFO CloudTrail skipped:' "$CASE_DIR/cloudtrail-output" >/dev/null
+  else
+    [[ "$(wc -l < "$CALLS" | tr -d ' ')" == 14 && ! -e "$A/cloudtrail-status.json" ]] || return 1
+    if [[ "$cloudtrail_variant" == denied ]]; then
+      grep -F 'AccessDenied: cloudtrail:LookupEvents' "$CASE_DIR/cloudtrail-errors" >/dev/null
+    else
+      [[ ! -s "$CASE_DIR/cloudtrail-errors" ]] &&
+        "$REAL_JQ" -e '.Events == []' "$A/cloudtrail-StopDBInstance.json" >/dev/null
+    fi
+  fi
+}
+for cloudtrail_variant in local dev uat prod denied; do
+  test_case "CloudTrail evidence collection: $cloudtrail_variant" cloudtrail_collection "$cloudtrail_variant"
+done
 
 for identity_variant in success admin wrong-namespace missing auth-error; do
   test_case "extracted local operator identity guard: $identity_variant" operator_identity "$identity_variant"

@@ -1,0 +1,140 @@
+# Isolated BB3 Sandbox Database
+
+DB only: one PostgreSQL 16 primary and, by default, one physical RDS read replica
+in a different AZ. Both default to `db.t4g.micro`; the primary may use
+`db.t4g.small`. This stack creates no EKS, Swarm, application, IAM role, or policy.
+It does not manage existing `lab/db` resources or real BB3 databases.
+
+Identifiers are `dr-sandbox-bb3-<env>-primary` and
+`dr-sandbox-bb3-<env>-replica`. Environment tags describe a sandbox role, even
+when `<env>` is `prod`. Do not replace these identifiers with real BB3 names.
+
+## Prerequisites and State
+
+Use `iac/tf.sh lab/bb3-db <env> ...`, where env is `dev`, `uat`, or `prod`.
+The wrapper reads the allowed account and bucket from ignored sandbox config,
+accepts `lab_sandbox` (SSO) or `pa_aws_sandbox` (sandbox IAM-user keys) in region
+`ap-southeast-1`, checks the
+profile account before accessing S3, and pins identity/state inputs on plans.
+Do not bypass the wrapper or apply a plan from a different stack, environment,
+account, or state key. Saved plan contents still require owner review.
+
+State is separate: `lab/<env>/bb3-db/terraform.tfstate` in the existing sandbox
+bucket, with S3 native locking, encryption, and allowed-account checks.
+The existing `lab/shared/network/terraform.tfstate` supplies the VPC and AZ placement.
+Existing shared network resources are not changed. This stack creates two private
+subnets, a dedicated local-only route table and two route-table associations in
+that VPC. At plan time, subnet reads verify the first two shared placement subnets
+belong to this VPC and occupy different AZs.
+Authenticate and inspect the shared network separately before approved planning.
+
+SSO is preferred because its credentials expire. The owner's alternative is an
+existing sandbox IAM user through `pa_aws_sandbox`; create the profile with AWS CLI
+and enter keys directly in the local terminal, never in chat, repository files,
+environment assignments or logs. Do not run credential setup through a recorded
+DR session. Use a narrowly scoped sandbox policy, protect/rotate the keys, and
+verify `sts get-caller-identity` matches the configured sandbox account before
+changing the ignored config to `TF_VAR_aws_profile=pa_aws_sandbox`. The account and
+region checks remain mandatory; a profile name alone does not establish identity.
+
+Both DBs have `publicly_accessible=false` with no public-exposure override.
+Their dedicated private subnets have no default route to an internet gateway or
+NAT gateway. The security group allows TCP 5432 only from the sandbox VPC CIDR;
+there is no laptop ingress or operator-IP discovery. No unrestricted ingress or
+egress rule is added. Per-environment subnet blocks are derived from the shared
+VPC CIDR using distinct offsets; review their availability in the saved plan.
+
+The Mac can run AWS CLI RDS snapshot/restore/configuration commands through AWS
+service APIs without a route to the database. SQL access would need a separately
+approved VPC access path and custodian credentials; it is not needed for today's
+RDS API-only drill. No NAT gateway is required for these managed RDS operations.
+
+## Credentials and Backups
+
+AWS does not support creating a PostgreSQL read replica from a source using
+[RDS-managed master credentials](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html#rds-secrets-manager-limitations).
+Instead, Terraform generates a sensitive 32-character password and writes a
+dedicated Secrets Manager secret. Outputs contain only its reference, never its
+contents. No DB password input, environment variable, secret read data source,
+or automatic rotation is provided. A custodian must separately approve any
+credential access or rotation. Keep this credential mode when disabling a replica
+so it can later be re-enabled without switching source credential management.
+
+**Terraform state and saved plans contain credential material.** Sensitive marking
+redacts ordinary CLI output; it is not encryption of local files. Restrict access
+to state, S3 versions, saved plans, backups and JSON plan exports. Never publish
+them or run commands that print raw state or secret contents. The secret uses
+Secrets Manager's default encryption and a seven-day deletion recovery window.
+
+Source and replica storage are encrypted. Primary backup retention defaults to
+seven days and cannot be below seven. The replica inherits the source database,
+credentials, encrypted storage and subnet group; it is asynchronous physical
+replication, not a Multi-AZ standby. Replica automated backups are disabled.
+
+## Later Approved Usage
+
+These are future commands for the parent/operator, not commands run during
+implementation. Keep account/bucket values in ignored sandbox config. Set the
+explicit operator CIDR there or in the shell; the wrapper does not discover it.
+
+```bash
+bash iac/tf.sh lab/bb3-db uat plan -out=bb3-private-uat.plan
+```
+
+No operator CIDR is required. Plan files are relative to this stack directory.
+Inspect the saved plan locally, obtain owner approval, then apply exactly that plan:
+
+```bash
+terraform -chdir=iac/lab/bb3-db show bb3-private-uat.plan
+bash iac/tf.sh lab/bb3-db uat apply bb3-private-uat.plan
+```
+
+Optional primary override before planning: `export TF_VAR_db_instance_class=db.t4g.small`.
+Replica remains `db.t4g.micro`. `TF_VAR_replica_enabled=false` is available for
+an explicitly approved topology change, never as a fencing shortcut. Defaults
+are private endpoints, replica enabled, and deletion protection disabled for
+disposable sandbox teardown. Final snapshots are skipped: decide retention and
+preserve evidence before approving destruction.
+
+## Fencing and Teardown
+
+**A primary with a read replica cannot be stopped for fencing.** The existing
+`FENCE=stop` recovery path is not suitable for this topology. The wrapper refuses
+BB3 `stop` and `start`. Never automatically stop, delete, or promote the replica
+to make fencing possible. Choose and validate real fencing separately, including
+all writers, before a timed recovery exercise. Recovery RTO is not certified here.
+
+A restored DB does not inherit the source's replica. Rebuilding replication after
+recovery needs separate planning and approval. Endpoint changes alone do not
+fence the original or reconcile writes. No live sandbox recovery, replication,
+fencing, RTO, or Swarm validation is claimed by this implementation.
+
+For later teardown, review restores and other dependencies first. Destroy the
+replica before the primary, then the stack-owned secret/network attachments.
+Terraform's replica-to-source dependency orders DB deletion correctly. The shared
+network must remain until all its consumers and independently restored DBs are
+removed. The existing global destroy script does not include this new stack.
+
+```bash
+bash iac/tf.sh lab/bb3-db uat plan -destroy -out=bb3-destroy.plan
+terraform -chdir=iac/lab/bb3-db show bb3-destroy.plan
+bash iac/tf.sh lab/bb3-db uat apply bb3-destroy.plan
+```
+
+Obtain owner approval between showing and applying each plan. Teardown is a
+separate disposal operation, never part of fencing or an automatic recovery step.
+
+## Offline Checks
+
+```bash
+terraform fmt -check iac/lab/bb3-db
+bash -n iac/tf.sh
+bash iac/lab/bb3-db/test-wrapper.sh
+```
+
+The wrapper test replaces configuration loading, Git ignore checks, AWS, curl and
+Terraform with shell stubs. It never reads real sandbox configuration, credentials,
+state or secrets, and never invokes cloud tools. Terraform schema validation can
+use already-installed providers with backend disabled and credentials removed.
+The generated provider lockfile currently has only local `darwin_arm64` checksums;
+other platforms need trusted checksums through a separately approved setup.
