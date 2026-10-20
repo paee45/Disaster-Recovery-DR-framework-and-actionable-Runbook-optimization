@@ -4,8 +4,64 @@ set +x
 umask 077
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
+STORE="$HERE/baselines"
+print_summary_table() {
+  local capture_dir="$1" field filter primary_value replica_value
+  local primary_file="$capture_dir/primary/baseline.json" replica_file="$capture_dir/replica/baseline.json"
+  local primary_parameters replica_parameters primary_parameter_file replica_parameter_file
+  printf '\nBaseline at a glance: %s\n' "$capture_dir"
+  printf '%-28s | %-48s | %s\n' 'Captured setting' 'Primary' 'Replica'
+  printf '%s\n' '-----------------------------+--------------------------------------------------+--------------------------------------------------'
+  while IFS=$'\t' read -r field filter; do
+    [[ -n "$field" ]] || continue
+    if [[ -f "$primary_file" ]]; then primary_value="$(jq -r "$filter" "$primary_file")"; else primary_value='not present'; fi
+    if [[ -f "$replica_file" ]]; then replica_value="$(jq -r "$filter" "$replica_file")"; else replica_value='not present'; fi
+    printf '%-28s | %-48s | %s\n' "$field" "$primary_value" "$replica_value"
+  done <<'EOF'
+Source ID	.source // "not captured"
+Engine	.instance.Engine // "not reported"
+Engine version	.instance.EngineVersion // "not reported"
+Instance class	.instance.DBInstanceClass // "not reported"
+Availability zone	.instance.AvailabilityZone // "not reported"
+Parameter group	.instance.DBParameterGroups[0].DBParameterGroupName // "not reported"
+Parameter apply status	.instance.DBParameterGroups[0].ParameterApplyStatus // "not reported"
+Subnet group	.instance.DBSubnetGroup.DBSubnetGroupName // "not reported"
+Security groups	([.instance.VpcSecurityGroups[]?.VpcSecurityGroupId] | join(", ")) // "not reported"
+Publicly accessible	(.instance.PubliclyAccessible | tostring) // "not reported"
+Multi-AZ	(.instance.MultiAZ | tostring) // "not reported"
+Backup retention days	(.instance.BackupRetentionPeriod | tostring) // "not reported"
+Backup window	.instance.PreferredBackupWindow // "not reported"
+Maintenance window	.instance.PreferredMaintenanceWindow // "not reported"
+Storage encrypted	(.instance.StorageEncrypted | tostring) // "not reported"
+Tag env	([.tags[]? | select(.Key=="env") | .Value] | first) // "not present"
+Tag app	([.tags[]? | select(.Key=="app") | .Value] | first) // "not present"
+Tag Role	([.tags[]? | select(.Key=="Role") | .Value] | first) // "not present"
+EOF
+  primary_parameter_file="$capture_dir/primary/parameters-1.json"
+  replica_parameter_file="$capture_dir/replica/parameters-1.json"
+  primary_parameters='not present'; replica_parameters='not present'
+  if [[ -f "$primary_parameter_file" ]]; then
+    primary_parameters="$(jq -r '[.Parameters[]? | select(.Source=="user") | "\(.ParameterName)=\(.ParameterValue)"] | if length==0 then "none" else join(", ") end' "$primary_parameter_file")"
+  fi
+  if [[ -f "$replica_parameter_file" ]]; then
+    replica_parameters="$(jq -r '[.Parameters[]? | select(.Source=="user") | "\(.ParameterName)=\(.ParameterValue)"] | if length==0 then "none" else join(", ") end' "$replica_parameter_file")"
+  fi
+  printf '%-28s | %-48s | %s\n' 'User parameter overrides' "$primary_parameters" "$replica_parameters"
+  printf '%s\n' 'Full API metadata, all parameter responses, and SHA-256 manifest remain in the capture directory.'
+}
+if [[ $# == 1 && "$1" == --show ]]; then
+  latest_file="$STORE/latest.json"
+  [[ -f "$latest_file" ]] || { echo 'No completed baseline exists yet.' >&2; exit 2; }
+  latest_directory="$(jq -er '.directory | select(test("^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]+$"))' "$latest_file")" \
+    || { echo 'Latest baseline reference is invalid.' >&2; exit 2; }
+  capture_dir="$STORE/$latest_directory"
+  [[ "$(jq -r '.status' "$latest_file")" == complete && -f "$capture_dir/primary/baseline.json" ]] \
+    || { echo 'Latest baseline capture is incomplete.' >&2; exit 2; }
+  print_summary_table "$capture_dir"
+  exit 0
+fi
 if [[ $# -gt 2 ]]; then
-  echo "Usage: bash iac/lab/bb3-db/capture-baseline.sh [primary-db-id [replica-db-id]]" >&2
+  echo "Usage: bash iac/lab/bb3-db/capture-baseline.sh [--show | primary-db-id [replica-db-id]]" >&2
   exit 2
 fi
 if [[ $# == 0 ]]; then
@@ -31,7 +87,6 @@ export AWS_PROFILE="${AWS_PROFILE:-${BB3_AWS_PROFILE:-beep}}" AWS_REGION="${AWS_
 [[ -z "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}" ]] \
   || { echo 'REFUSED: unset exported AWS credentials; use the named profile.' >&2; exit 2; }
 unset AWS_DEFAULT_PROFILE
-STORE="$HERE/baselines"
 git -C "$ROOT" check-ignore -q "$STORE/capture.json" \
   || { echo 'REFUSED: raw baseline directory must be git-ignored.' >&2; exit 2; }
 mkdir -p "$STORE"
@@ -119,3 +174,4 @@ mv "$STORE/.latest-$(basename "$CAPTURE").json" "$STORE/latest.json"
 complete=true
 echo "Complete read-only raw baseline: $CAPTURE"
 echo "Latest reference: $STORE/latest.json"
+print_summary_table "$CAPTURE"

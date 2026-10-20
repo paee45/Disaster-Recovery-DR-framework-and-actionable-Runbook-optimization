@@ -37,7 +37,9 @@ export AWS_PROFILE=offline AWS_REGION=ap-southeast-1 CALLS="$TEMP/calls"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 SCRIPT="$TEMP/iac/lab/bb3-db/capture-baseline.sh"
 STORE="$TEMP/iac/lab/bb3-db/baselines"
-bash "$SCRIPT" offline-primary offline-replica >/dev/null
+capture_output="$(bash "$SCRIPT" offline-primary offline-replica)"
+[[ "$capture_output" == *'Baseline at a glance:'* && "$capture_output" == *'Parameter group'* \
+  && "$capture_output" == *'Tag app'* && "$capture_output" == *'User parameter overrides'* ]]
 first="$(jq -r .directory "$STORE/latest.json")"
 jq -e '.status == "complete"' "$STORE/latest.json" >/dev/null
 jq -e '.Parameters[0].ParameterName == "max_connections"' "$STORE/$first/primary/parameters-1.json" >/dev/null
@@ -47,6 +49,9 @@ while IFS=$'\t' read -r path expected; do
   [[ "${actual%% *}" == "$expected" ]]
 done < <(jq -r '.files[] | [.path,.sha256] | @tsv' "$STORE/$first/manifest.json")
 echo 'PASS complete raw capture, full parameters, compatibility JSON and all hashes'
+show_output="$(bash "$SCRIPT" --show)"
+[[ "$show_output" == *"Baseline at a glance: $STORE/$first"* && "$show_output" == *'Storage encrypted'* ]]
+echo 'PASS latest baseline summary can be displayed without AWS calls'
 bash "$SCRIPT" offline-primary offline-replica >/dev/null
 second="$(jq -r .directory "$STORE/latest.json")"
 [[ "$first" != "$second" && -f "$STORE/$first/capture.json" ]]
@@ -58,6 +63,14 @@ for failure in parameters topology; do
 done
 [[ "$(wc -l < "$CALLS")" -ge 40 ]]
 echo 'PASS only pinned read-only AWS metadata actions executed'
+mkdir -p "$TEMP/iac"
+printf '%s\n' \
+  'export BB3_SOURCE_PRIMARY_ID=offline-primary' \
+  'export BB3_SOURCE_REPLICA_ID=offline-replica' > "$TEMP/iac/sandbox.env"
+bash "$SCRIPT" >/dev/null
+from_env="$(jq -r .directory "$STORE/latest.json")"
+jq -e '.status=="complete" and .replica=="replica/baseline.json"' "$STORE/$from_env/capture.json" >/dev/null
+echo 'PASS baseline capture reads discovered source IDs from sandbox.env'
 TEST_REPLICA=none bash "$SCRIPT" offline-primary >/dev/null
 single="$(jq -r .directory "$STORE/latest.json")"
 jq -e '.status == "complete" and .replica == null' "$STORE/$single/capture.json" >/dev/null

@@ -33,29 +33,33 @@ credential. Never use default credentials or exported keys.
 
 ### 1. Capture Original Baseline
 
-Before an incident, discover and review the sandbox source inputs. This updates the existing ignored
-`iac/sandbox.env`; it does not create a second env file. The default summary is read-only:
+Before an incident, run guided discovery and review the sandbox source inputs. The one command can update the
+existing ignored `iac/sandbox.env`; it does not create a second env file:
 
 ```bash
 bash /Users/pa/dr-framework/iac/lab/bb3-db/discover-env.sh uat
 ```
 
-If the selection is correct, write it by running:
-
-```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/discover-env.sh uat --write
-```
-
-Review the printed primary, optional replica and snapshot candidate, then type `WRITE` when prompted. If
-multiple eligible primaries are found, select one with `--primary <id>` after review; use `--replica` or
-`--snapshot` only for reviewed overrides. `--force` is required to refresh existing `BB3_*` selections.
-Discovery verifies account/tags/topology and never reads secret values or SQL.
+Select a primary and, if present, an attached replica from the numbered lists. A valid saved selection or a
+single eligible match is highlighted green; press Enter to accept it. The snapshot list shows all available
+automated backups newest-first, with the latest daily backup highlighted green as the default. Press Enter to
+accept it or enter another number. If no primary matches `env=uat` and `app=bb3`, discovery warns and shows
+available PostgreSQL RDS instances in red; there is no default in this fallback. The final env-file prompt is
+`[Y/n]`, so Enter saves reviewed selections and target IDs; `n` cancels. If all saved values already match,
+discovery makes no change. It verifies account/tags/topology and never reads secret values or SQL.
 
 Capture before restore using the saved selections. The helper writes complete read-only AWS API metadata to
-the ignored `iac/lab/bb3-db/baselines/` directory and does not read Secrets Manager values or SQL:
+the ignored `iac/lab/bb3-db/baselines/` directory, prints a primary/replica summary table, and does not read
+Secrets Manager values or SQL:
 
 ```bash
 bash /Users/pa/dr-framework/iac/lab/bb3-db/capture-baseline.sh
+```
+
+To redisplay the latest captured table later without AWS access:
+
+```bash
+bash /Users/pa/dr-framework/iac/lab/bb3-db/capture-baseline.sh --show
 ```
 
 For a one-off source not saved in the env file, pass the primary and optional replica IDs explicitly. A replica
@@ -81,27 +85,30 @@ provided.
 
 ### 2. Select Snapshot And Approve Data Loss
 
-List snapshots for the source primary and check timestamp, status and encryption:
+Discovery lists all available automated snapshots for the selected source primary and defaults to the newest
+daily backup. Review the selected timestamp, status and encryption; `--print` shows the options without
+prompting. Record its age and potential lost writes. Obtain data-owner acceptance, including the incident-to-
+snapshot loss window, then IC GO. GO is a required typed gate and is never accepted by pressing Enter. Do not
+issue restore before this gate.
 
-```bash
-aws --profile pa_iam_aws_sandbox --region ap-southeast-1 rds describe-db-snapshots \
-  --db-instance-identifier <source-primary-id> --snapshot-type automated \
-  --query 'DBSnapshots[].[DBSnapshotIdentifier,SnapshotCreateTime,Status,Encrypted]' --output table
-```
-
-Select an `available`, encrypted snapshot. Record its age and potential lost writes. Obtain data-owner
-acceptance, including the incident-to-snapshot loss window, then IC GO. Do not issue restore before this gate.
-Choose two unique targets: a restore primary and a new replica.
+The selected snapshot and deterministic restore-primary/replica target IDs are saved in `sandbox.env`.
 
 ### 3. Preview Restore Requests (No Mutation)
 
 ```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh preview \
-  <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh preview
 ```
 
-The helper discovers whether the source has a replica and shows the primary and replica baselines separately.
-Tables include only populated API-supported request fields: `MATCH`, `NEW`, or `DIFF - REVIEW`. If no source
+The saved snapshot and target IDs are used when arguments are omitted. Positional IDs remain available for
+reviewed overrides.
+
+The helper verifies the latest capture's primary/replica baseline files against its checksum manifest and
+refuses a source/account/region mismatch. It compares the selected snapshot's available metadata and `env`,
+`app`, and `Role` tags against the captured primary, showing only mismatches in red. If mismatches exist, the
+restore stage requires the operator to type `ACCEPT-DIFF` before the separate default-No restore confirmation.
+RDS snapshot metadata does not expose parameter values; the restore request uses the captured primary
+parameter group, and the preview states this limitation. The helper shows primary and replica restore baselines
+separately. Tables include populated API-supported request fields: `MATCH`, `NEW`, or `DIFF - REVIEW`. If no source
 replica exists, the output explicitly says `Original replica: not present` and uses the primary baseline as the
 new replica template.
 
@@ -117,21 +124,19 @@ replica-create request. References:
 ### 4. Restore Primary (Separate Confirmation)
 
 ```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh restore \
-  <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh restore
 ```
 
-The script rechecks the snapshot and unused target, displays only the primary request table, and waits for
-typed `RESTORE`. Review target, snapshot, parameter group, subnet group, SGs, class/AZ, retention/window,
-and private access. Cancel on an unexplained difference. This creates a billable DB.
+The script rechecks the snapshot and unused target, shows any snapshot/baseline differences, then requires
+typed `ACCEPT-DIFF` if needed. It displays the primary request table and asks `Submit RESTORE? [y/N]`. Enter
+defaults to No; answer `y` only after reviewing target, snapshot, parameter
+group, subnet group, SGs, class/AZ, retention/window, and private access. Cancel on an unexplained difference.
+This creates a billable DB.
 
-Check status without launching a second restore:
+Check both saved target statuses without pasting identifiers:
 
 ```bash
-aws --profile pa_iam_aws_sandbox --region ap-southeast-1 rds describe-db-instances \
-  --db-instance-identifier <restore-primary-id> \
-  --query 'DBInstances[0].[DBInstanceStatus,DBSubnetGroup.DBSubnetGroupName,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus]' \
-  --output table
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh status
 ```
 
 Continue only when status is `available`. If a request was accepted but a command/session failed, inspect the
@@ -140,31 +145,29 @@ target and state; never submit the restore again under a new target without reco
 ### 5. Harden And Validate Primary
 
 ```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-primary \
-  <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-primary
 ```
 
 This compares original baseline, current restored settings, and populated `ModifyDBInstance` fields. If
-needed, it prompts `APPLY-PARAMETER-GROUP` before changing parameter group, backup retention/window, and
-maintenance window. Recheck `available`, parameter group `in-sync`, subnet group, SG set, private exposure,
-class, retention and windows before creating the replica.
+needed, it asks `Submit APPLY-PARAMETER-GROUP? [y/N]` before changing parameter group, backup retention/window,
+and maintenance window. Enter defaults to No. Recheck `available`, parameter group `in-sync`, subnet group,
+SG set, private exposure, class, retention and windows before creating the replica.
 
 ### 6. Create And Harden Replica (Separate Confirmations)
 
 ```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh replica \
-  <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh replica
 ```
 
 This step requires the restored primary to be available, baseline-matched, private, and parameter-group
 `in-sync`. The table shows only accepted `CreateDBInstanceReadReplica` values. AWS inherits the same-Region
-replica's subnet and parameter groups from the restored primary. Type `CREATE-REPLICA` only after review.
+replica's subnet and parameter groups from the restored primary. Enter `y` only after review at the
+`Submit CREATE-REPLICA? [y/N]` prompt; Enter cancels.
 
 After the replica is available:
 
 ```bash
-bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-replica \
-  <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-replica
 ```
 
 This verifies the new replica is attached to the restored primary and has matching SG/subnet topology, then
@@ -174,7 +177,8 @@ separately.
 
 ### 7. Optional App Cutover: Choose One Mode
 
-Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain P3-G0 GO. Select and
+Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain P3-G0 GO. GO must be
+typed explicitly and is never defaulted. Select and
 record `APP_CUTOVER_MODE=manual` or `ssh-script`. Both modes update only these fields in the existing mixed
 secret:
 

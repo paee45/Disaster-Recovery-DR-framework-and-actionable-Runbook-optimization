@@ -20,31 +20,38 @@ The full raw capture is saved locally under ignored `baselines/<UTC>-<unique>/`,
 instance descriptions, tags, 437 API parameters per DB, parameter-group definitions,
 security-group rules and subnet metadata, plus an integrity manifest. No credentials
 or SQL were collected. Refreshing preserves prior captures; incomplete captures do
-not replace the latest reference.
+not replace the latest reference. Each capture prints a primary/replica summary table;
+`capture-baseline.sh --show` renders the latest table locally without querying AWS.
 
-Before an incident, discover the current UAT-like source and snapshot candidate:
+Before an incident, run the guided discovery once. The `uat` argument selects
+`env=uat`; `app=bb3` identifies the application. `local` is not an AWS RDS environment.
 
 ```bash
 bash iac/lab/bb3-db/discover-env.sh uat
-bash iac/lab/bb3-db/discover-env.sh uat --print
 ```
 
-Discovery filters by the BB3 sandbox/environment/role tags, requires a unique primary,
-verifies the optional attached replica, and selects the newest available automated
-snapshot. If multiple primaries match, select one explicitly with `--primary` after
-review; `--replica` and `--snapshot` support reviewed overrides. `--write` shows the
-selection and requires typing `WRITE`, then updates only the `BB3_*` variables in the
-existing ignored `iac/sandbox.env`; `--force` is needed to refresh existing BB3 values.
-It does not read secret values or modify AWS. Run capture with no IDs to use the
-reviewed selections:
+Discovery matches `env=<environment>` plus `app=bb3`; neither tag alone is enough.
+It does not depend on the DB identifier prefix. Select a numbered primary, then a
+numbered available replica if one is attached. If no primary matches both tags, the
+script warns and shows all available PostgreSQL RDS instances in red for careful
+manual selection; this fallback has no default and does not imply a verified source.
+Saved or sole primary/replica choices are highlighted green, and Enter accepts the
+highlighted number. All available automated snapshots are listed newest-first; the
+latest is highlighted green and defaults to Enter. If selections differ from those
+saved, `[Y/n]` confirms writing `ENV`, `APP`, source IDs, snapshot ID, and deterministic
+restore target IDs into the existing ignored `iac/sandbox.env`; Enter accepts Yes, while
+`n` cancels. If values already match, no prompt or write occurs. `--print` is available
+for a noninteractive preview, while
+`--primary`, `--replica`, and `--snapshot` are reviewed overrides. Discovery reads no
+secret values and makes no AWS changes. Run capture with no IDs to use the saved
+selections:
 
 ```bash
-bash iac/lab/bb3-db/discover-env.sh uat --write
 bash iac/lab/bb3-db/capture-baseline.sh
 ```
 
-For an incident-time refresh, run discovery summary/print again and explicitly confirm
-the selected primary, optional replica and recovery point before `--write`.
+For an incident-time refresh, rerun guided discovery and review the selected primary,
+optional replica, and recovery point before answering `YES`.
 
 Use the **described values** for this drill: primary backup retention **7 days** and
 replica backup retention **0 days**. Terraform already matches these values. The earlier
@@ -145,21 +152,32 @@ It never prints or retrieves the Secrets Manager payload.
 
 ```bash
 # Read-only: compare original primary/replica baselines and the API requests
-bash iac/lab/bb3-db/restore-drill.sh preview <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash iac/lab/bb3-db/restore-drill.sh preview
 
-# Separately confirm and start the primary restore
-bash iac/lab/bb3-db/restore-drill.sh restore <snapshot-id> <restore-primary-id> <restore-replica-id>
+# Read-only: check both saved restore targets
+bash iac/lab/bb3-db/restore-drill.sh status
+
+# Separately confirm and start the primary restore; confirmation defaults to No
+bash iac/lab/bb3-db/restore-drill.sh restore
 
 # Once primary is available: compare/harden parameter group, backup window/retention,
 # and maintenance window (maintenance is not accepted by snapshot-restore API)
-bash iac/lab/bb3-db/restore-drill.sh harden-primary <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash iac/lab/bb3-db/restore-drill.sh harden-primary
 
 # Only after primary baseline validation: confirm and create a new replica
-bash iac/lab/bb3-db/restore-drill.sh replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash iac/lab/bb3-db/restore-drill.sh replica
 
 # Once replica is available: compare/harden inherited parameter group and maintenance window
-bash iac/lab/bb3-db/restore-drill.sh harden-replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+bash iac/lab/bb3-db/restore-drill.sh harden-replica
 ```
+
+Restore preview verifies the primary/replica baseline files against the checksums in
+the selected `latest.json` capture and refuses a source/account/region mismatch. It
+shows only differences between the selected snapshot and captured primary metadata,
+including `env`, `app`, and `Role` tags; interactive mismatch rows are red. A mismatch
+requires typing `ACCEPT-DIFF` before the restore stage proceeds to its separate
+default-No confirmation. RDS snapshot metadata does not expose parameter values, so
+the request uses the captured primary parameter group and reports that limit explicitly.
 
 The restore request explicitly supplies the captured subnet group, security groups,
 parameter group, class, retention and backup window. `PreferredMaintenanceWindow`
@@ -167,7 +185,9 @@ is applied later through `ModifyDBInstance`. For same-Region read replicas, AWS
 inherits subnet and parameter groups from the restored primary; the replica create
 request intentionally omits these fields. When the source has no replica, preview
 shows `Original replica: not present` and uses the primary baseline to plan a new
-replica in a different subnet-group AZ. Each mutation has its own typed approval.
+replica in a different subnet-group AZ. Each mutation has a `[y/N]` confirmation;
+Enter defaults to No. The discovery env-file prompt defaults to Yes. Typed GO gates
+and owner attestations never default on Enter.
 The RDS-only process does not change application secrets or deploy Swarm services.
 
 These are future commands for the parent/operator, not commands run during

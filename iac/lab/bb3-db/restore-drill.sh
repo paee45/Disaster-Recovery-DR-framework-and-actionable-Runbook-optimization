@@ -2,9 +2,9 @@
 set -euo pipefail
 set +x
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  GREEN=$'\033[32m'; RED=$'\033[31m'; RESET=$'\033[0m'
+  GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
 else
-  GREEN=''; RED=''; RESET=''
+  GREEN=''; RED=''; YELLOW=''; RESET=''
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -13,28 +13,21 @@ JQ_LIBRARY="$(<"$ROOT/automation/scripts/rds-requests.jq")"
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  bash iac/lab/bb3-db/restore-drill.sh preview <snapshot-id> <restore-primary-id> <restore-replica-id>
-  bash iac/lab/bb3-db/restore-drill.sh restore <snapshot-id> <restore-primary-id> <restore-replica-id>
-  bash iac/lab/bb3-db/restore-drill.sh harden-primary <snapshot-id> <restore-primary-id> <restore-replica-id>
-  bash iac/lab/bb3-db/restore-drill.sh replica <snapshot-id> <restore-primary-id> <restore-replica-id>
-  bash iac/lab/bb3-db/restore-drill.sh harden-replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+  bash iac/lab/bb3-db/restore-drill.sh <preview|status|restore|harden-primary|replica|harden-replica> [snapshot-id [restore-primary-id [restore-replica-id]]]
 
 preview is read-only. restore creates a standalone primary from the snapshot.
+status is read-only and checks both saved restore targets.
 harden-primary attaches the captured parameter group if restore did not apply it.
 replica creates a new read replica after the restored primary is available.
 harden-replica applies captured parameter/maintenance settings after replica availability.
-Every mutating action displays its comparison table and requires typed approval.
+Omitted IDs come from the reviewed selections in iac/sandbox.env. Positional IDs override them.
+Every mutating action displays its comparison table and defaults to No at confirmation.
 EOF
   exit 2
 }
-[[ $# == 4 ]] || usage
-MODE="$1"; SNAPSHOT_ID="$2"; TARGET_PRIMARY="$3"; TARGET_REPLICA="$4"
-[[ "$MODE" =~ ^(preview|restore|harden-primary|replica|harden-replica)$ ]] || usage
-[[ "$SNAPSHOT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9:_-]*$ ]] || { echo 'Invalid snapshot identifier.' >&2; exit 2; }
-for id in "$TARGET_PRIMARY" "$TARGET_REPLICA"; do
-  [[ "$id" =~ ^[A-Za-z][A-Za-z0-9-]{0,62}$ ]] || { echo 'Invalid target DB identifier.' >&2; exit 2; }
-done
-[[ "$TARGET_PRIMARY" != "$TARGET_REPLICA" ]] || { echo 'Primary and replica targets must differ.' >&2; exit 2; }
+[[ $# -ge 1 && $# -le 4 ]] || usage
+MODE="$1"; shift
+[[ "$MODE" =~ ^(preview|status|restore|harden-primary|replica|harden-replica)$ ]] || usage
 
 CONFIG="$ROOT/iac/sandbox.env"
 [[ -f "$CONFIG" ]] || { echo 'Missing ignored iac/sandbox.env.' >&2; exit 2; }
@@ -44,6 +37,14 @@ git -C "$ROOT" check-ignore -q "$CONFIG" || { echo 'Refusing non-ignored sandbox
 # shellcheck source=/dev/null
 source "${BB3_RESTORE_CONFIG:-$CONFIG}"
 unset TF_VAR_terrakube_token AWS_DEFAULT_PROFILE
+SNAPSHOT_ID="${1:-${BB3_SNAPSHOT_ID:-}}"
+TARGET_PRIMARY="${2:-${BB3_RESTORE_TARGET_PRIMARY_ID:-}}"
+TARGET_REPLICA="${3:-${BB3_RESTORE_TARGET_REPLICA_ID:-}}"
+[[ "$SNAPSHOT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9:_-]*$ ]] || { echo 'Invalid or missing snapshot identifier; run discovery first.' >&2; exit 2; }
+for id in "$TARGET_PRIMARY" "$TARGET_REPLICA"; do
+  [[ "$id" =~ ^[A-Za-z][A-Za-z0-9-]{0,62}$ ]] || { echo 'Invalid or missing target DB identifier; run discovery first.' >&2; exit 2; }
+done
+[[ "$TARGET_PRIMARY" != "$TARGET_REPLICA" ]] || { echo 'Primary and replica targets must differ.' >&2; exit 2; }
 PROFILE="${TF_VAR_aws_profile:-}"
 REGION="${TF_VAR_region:-}"
 ACCOUNT="${TF_VAR_account_id:-}"
@@ -53,20 +54,93 @@ awsx() { aws --profile "$PROFILE" --region "$REGION" --no-cli-pager "$@"; }
 CALLER_ACCOUNT="$(awsx sts get-caller-identity --query Account --output text)"
 [[ "$CALLER_ACCOUNT" == "$ACCOUNT" ]] || { echo 'AWS caller does not match the configured sandbox account.' >&2; exit 2; }
 
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else echo 'REFUSED: sha256sum or shasum is required to verify the baseline.' >&2; return 2
+  fi
+}
+
+verify_capture_member() {
+  local relative="$1" expected actual
+  expected="$(jq -er --arg path "$relative" '.files[] | select(.path==$path) | .sha256' "$CAPTURE_DIRECTORY/manifest.json")" \
+    || { echo "REFUSED: baseline manifest has no hash for $relative." >&2; return 2; }
+  [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && -f "$CAPTURE_DIRECTORY/$relative" ]] \
+    || { echo "REFUSED: baseline file is missing or has an invalid hash entry: $relative." >&2; return 2; }
+  actual="$(hash_file "$CAPTURE_DIRECTORY/$relative")"
+  [[ "$actual" == "$expected" ]] || { echo "REFUSED: baseline integrity check failed: $relative." >&2; return 2; }
+}
+
+if [[ "$MODE" == status ]]; then
+  for role in primary replica; do
+    target="$TARGET_PRIMARY"; [[ "$role" != replica ]] || target="$TARGET_REPLICA"
+    if ! instance="$(awsx rds describe-db-instances --db-instance-identifier "$target" --query 'DBInstances[0]' --output json 2>/dev/null)"; then
+      printf '%s target %s: not found or unavailable to query\n' "$role" "$target"
+      continue
+    fi
+    jq -r --arg role "$role" '
+      "\($role) target: \(.DBInstanceStatus) | class=\(.DBInstanceClass) | parameterGroup=\(.DBParameterGroups[0].DBParameterGroupName // "not set") | parameterApply=\(.DBParameterGroups[0].ParameterApplyStatus // "unknown")"
+    ' <<<"$instance"
+  done
+  exit 0
+fi
+
 snapshot="$(awsx rds describe-db-snapshots --db-snapshot-identifier "$SNAPSHOT_ID" --output json)"
 [[ "$(jq -r '.DBSnapshots | length' <<<"$snapshot")" == 1 ]] || { echo 'Snapshot was not found uniquely.' >&2; exit 2; }
 [[ "$(jq -r '.DBSnapshots[0].Status' <<<"$snapshot")" == available ]] || { echo 'Snapshot is not available.' >&2; exit 2; }
+snapshot_record="$(jq -c '.DBSnapshots[0]' <<<"$snapshot")"
 SOURCE_PRIMARY="$(jq -er '.DBSnapshots[0].DBInstanceIdentifier' <<<"$snapshot")"
-primary="$(awsx rds describe-db-instances --db-instance-identifier "$SOURCE_PRIMARY" --query 'DBInstances[0]' --output json)"
-[[ "$(jq -r '.DBInstanceStatus' <<<"$primary")" == available ]] || { echo 'Source primary is not available.' >&2; exit 2; }
-replica_ids="$(jq -c '[.ReadReplicaDBInstanceIdentifiers[]? | split(":") | last]' <<<"$primary")"
+snapshot_arn="$(jq -r '.DBSnapshotArn // empty' <<<"$snapshot_record")"
+[[ -n "$snapshot_arn" ]] || { echo 'Snapshot ARN is missing; cannot compare snapshot tags.' >&2; exit 2; }
+snapshot_tags="$(awsx rds list-tags-for-resource --resource-name "$snapshot_arn" --query TagList --output json)"
+live_primary="$(awsx rds describe-db-instances --db-instance-identifier "$SOURCE_PRIMARY" --query 'DBInstances[0]' --output json)"
+[[ "$(jq -r '.DBInstanceStatus' <<<"$live_primary")" == available ]] || { echo 'Source primary is not available.' >&2; exit 2; }
+replica_ids="$(jq -c '[.ReadReplicaDBInstanceIdentifiers[]? | split(":") | last]' <<<"$live_primary")"
 [[ "$(jq -r 'length' <<<"$replica_ids")" -le 1 ]] || { echo 'Expected at most one source read replica.' >&2; exit 2; }
 SOURCE_REPLICA="$(jq -r '.[0] // empty' <<<"$replica_ids")"
 if [[ -n "$SOURCE_REPLICA" ]]; then
-  replica="$(awsx rds describe-db-instances --db-instance-identifier "$SOURCE_REPLICA" --query 'DBInstances[0]' --output json)"
-  [[ "$(jq -r '.DBInstanceStatus' <<<"$replica")" == available ]] || { echo 'Source replica is not available.' >&2; exit 2; }
-  [[ "$(jq -r '.ReadReplicaSourceDBInstanceIdentifier | split(":") | last' <<<"$replica")" == "$SOURCE_PRIMARY" ]] \
+  live_replica="$(awsx rds describe-db-instances --db-instance-identifier "$SOURCE_REPLICA" --query 'DBInstances[0]' --output json)"
+  [[ "$(jq -r '.DBInstanceStatus' <<<"$live_replica")" == available ]] || { echo 'Source replica is not available.' >&2; exit 2; }
+  [[ "$(jq -r '.ReadReplicaSourceDBInstanceIdentifier | split(":") | last' <<<"$live_replica")" == "$SOURCE_PRIMARY" ]] \
     || { echo 'Source replica is not attached to the snapshot source primary.' >&2; exit 2; }
+else
+  live_replica="$live_primary"
+fi
+
+BASELINE_STORE="${BB3_RESTORE_BASELINE_DIR:-$HERE/baselines}"
+LATEST_CAPTURE="$BASELINE_STORE/latest.json"
+[[ -f "$LATEST_CAPTURE" ]] || { echo 'REFUSED: capture a source baseline before restoring.' >&2; exit 2; }
+CAPTURE_DIRECTORY_NAME="$(jq -er '.directory | select(test("^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]+$"))' "$LATEST_CAPTURE")" \
+  || { echo 'REFUSED: latest baseline reference is invalid.' >&2; exit 2; }
+CAPTURE_DIRECTORY="$BASELINE_STORE/$CAPTURE_DIRECTORY_NAME"
+[[ "$(jq -r '.status' "$LATEST_CAPTURE")" == complete && -f "$CAPTURE_DIRECTORY/manifest.json" ]] \
+  || { echo 'REFUSED: latest baseline capture is incomplete.' >&2; exit 2; }
+verify_capture_member capture.json || exit 2
+cmp -s "$LATEST_CAPTURE" "$CAPTURE_DIRECTORY/capture.json" \
+  || { echo 'REFUSED: latest.json does not match the captured metadata file.' >&2; exit 2; }
+verify_capture_member primary/baseline.json || exit 2
+PRIMARY_BASELINE="$(jq -c . "$CAPTURE_DIRECTORY/primary/baseline.json")"
+[[ "$(jq -r '.source' <<<"$PRIMARY_BASELINE")" == "$SOURCE_PRIMARY" \
+  && "$(jq -r '.account' <<<"$PRIMARY_BASELINE")" == "$ACCOUNT" \
+  && "$(jq -r '.region' <<<"$PRIMARY_BASELINE")" == "$REGION" ]] \
+  || { echo 'REFUSED: latest baseline does not match this snapshot source, account, and region.' >&2; exit 2; }
+[[ "$(jq -r '.primary' "$LATEST_CAPTURE")" == 'primary/baseline.json' \
+  && "$(jq -r '.profile' "$LATEST_CAPTURE")" == "$PROFILE" \
+  && "$(jq -r '.region' "$LATEST_CAPTURE")" == "$REGION" ]] \
+  || { echo 'REFUSED: latest capture reference does not match this source, account, and region.' >&2; exit 2; }
+if [[ -n "$SOURCE_REPLICA" ]]; then
+  verify_capture_member replica/baseline.json || exit 2
+  REPLICA_BASELINE="$(jq -c . "$CAPTURE_DIRECTORY/replica/baseline.json")"
+  [[ "$(jq -r '.source' <<<"$REPLICA_BASELINE")" == "$SOURCE_REPLICA" ]] \
+    || { echo 'REFUSED: captured replica does not match the live source topology.' >&2; exit 2; }
+else
+  [[ "$(jq -r '.replica // ""' "$LATEST_CAPTURE")" == '' ]] \
+    || { echo 'REFUSED: latest baseline contains a replica but the live source does not.' >&2; exit 2; }
+  REPLICA_BASELINE=''
+fi
+primary="$(jq -c '.instance' <<<"$PRIMARY_BASELINE")"
+if [[ -n "$REPLICA_BASELINE" ]]; then
+  replica="$(jq -c '.instance' <<<"$REPLICA_BASELINE")"
 else
   replica="$primary"
 fi
@@ -99,9 +173,9 @@ else
   replica_pg='not present'
   printf '%s\n' 'Original replica: not present in source baseline.' >&2
 fi
-primary_tags="$(awsx rds list-tags-for-resource --resource-name "$(jq -er '.DBInstanceArn' <<<"$primary")" --query TagList --output json)"
+primary_tags="$(jq -c '.tags' <<<"$PRIMARY_BASELINE")"
 if [[ -n "$SOURCE_REPLICA" ]]; then
-  replica_tags="$(awsx rds list-tags-for-resource --resource-name "$(jq -er '.DBInstanceArn' <<<"$replica")" --query TagList --output json)"
+  replica_tags="$(jq -c '.tags' <<<"$REPLICA_BASELINE")"
 else
   replica_tags="$primary_tags"
 fi
@@ -206,18 +280,85 @@ print_request_table() {
     ] end)
     | .[] | select(.[2] != null and .[2] != "" and .[2] != [])
     | [.[0], (.[1]|fmt), (.[2]|fmt),
-       (if .[1]==null then "NEW" elif (.[1]|tojson)==(.[2]|tojson) then "MATCH" else "DIFF - REVIEW" end)] | @tsv
+       (if $kind=="replica" and .[0]=="SourceDBInstanceIdentifier" then "EXPECTED: NEW RESTORE PRIMARY"
+        elif .[1]==null then "NEW" elif (.[1]|tojson)==(.[2]|tojson) then "MATCH"
+        else "DIFF - REVIEW" end)] | @tsv
   ' | while IFS=$'\t' read -r field original value check; do
     case "$check" in
       MATCH) check="${GREEN}MATCH${RESET}" ;;
+      'EXPECTED: NEW RESTORE PRIMARY') check="${GREEN}EXPECTED: NEW RESTORE PRIMARY${RESET}" ;;
       'DIFF - REVIEW') check="${RED}DIFF - REVIEW${RESET}" ;;
     esac
     printf '%-26s | %-34s | %-34s | %s\n' "$field" "${original:-not set}" "$value" "$check"
   done
 }
 
+snapshot_diff_rows() {
+  jq -nr --argjson baseline "$PRIMARY_BASELINE" --argjson snapshot "$snapshot_record" \
+    --argjson snapshot_tags "$snapshot_tags" '
+    def tag($items;$key): [$items[]? | select(.Key==$key) | .Value] | first;
+    [
+      ["Engine", $baseline.instance.Engine, $snapshot.Engine],
+      ["EngineVersion", $baseline.instance.EngineVersion, $snapshot.EngineVersion],
+      ["Port", $baseline.instance.Endpoint.Port, $snapshot.Port],
+      ["AllocatedStorage", $baseline.instance.AllocatedStorage, $snapshot.AllocatedStorage],
+      ["StorageEncrypted", $baseline.instance.StorageEncrypted, $snapshot.Encrypted],
+      ["KmsKeyId", $baseline.instance.KmsKeyId, $snapshot.KmsKeyId],
+      ["VpcId", $baseline.instance.DBSubnetGroup.VpcId, $snapshot.VpcId],
+      ["AvailabilityZone", $baseline.instance.AvailabilityZone, $snapshot.AvailabilityZone],
+      ["Tag:env", tag($baseline.tags;"env"), tag($snapshot_tags;"env")],
+      ["Tag:app", tag($baseline.tags;"app"), tag($snapshot_tags;"app")],
+      ["Tag:Role", tag($baseline.tags;"Role"), tag($snapshot_tags;"Role")]
+    ]
+    | map(select(
+        if (.[0]|startswith("Tag:")) then .[1]!=.[2]
+        else .[1]!=null and .[2]!=null and (.[1]|tojson)!=(.[2]|tojson)
+        end
+      ))[]
+    | [.[0], (if .[1]==null then "not present" else (.[1]|tostring) end),
+       (if .[2]==null then "not present" else (.[2]|tostring) end)] | @tsv
+  '
+}
+SNAPSHOT_DIFFS="$(snapshot_diff_rows)"
+
+print_snapshot_baseline_diffs() {
+  local rows="$1" field captured snapshot_value formatted
+  if [[ -n "$rows" ]]; then
+    printf '\nSnapshot vs captured primary baseline (differences only):\n'
+    printf '%-26s | %-38s | %s\n' 'Field' 'Captured primary' 'Selected snapshot'
+    printf '%s\n' '---------------------------+----------------------------------------+----------------------------------------'
+    while IFS=$'\t' read -r field captured snapshot_value; do
+      [[ -n "$field" ]] || continue
+      if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+        formatted="$(printf '%-26s | %-38s | %s' "$field" "$captured" "$snapshot_value")"
+        printf '%b\n' "${RED}${formatted}${RESET}"
+      else
+        printf '%-26s | %-38s | %s\n' "$field" "$captured" "$snapshot_value"
+      fi
+    done <<< "$rows"
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      printf '%b\n' "${RED}Review each listed difference. The restore is blocked until you type ACCEPT-DIFF.${RESET}"
+    else
+      printf '%s\n' 'Review each listed difference. The restore is blocked until you type ACCEPT-DIFF.'
+    fi
+  else
+    printf '\nSnapshot metadata/tag comparison: no differences in comparable fields.\n'
+  fi
+  printf 'Snapshot parameter metadata: not exposed by RDS; restore uses captured source parameter group %s.\n' \
+    "$(jq -r '.instance.DBParameterGroups[0].DBParameterGroupName // "not reported"' <<<"$PRIMARY_BASELINE")"
+}
+
+confirm_snapshot_diffs() {
+  local rows="$1" answer
+  [[ -n "$rows" ]] || return 0
+  [[ -t 0 && -t 1 ]] || { echo 'Snapshot differences require explicit interactive acceptance.' >&2; exit 2; }
+  read -r -p 'Type ACCEPT-DIFF to accept these snapshot differences: ' answer </dev/tty
+  [[ "$answer" == ACCEPT-DIFF ]] || { echo 'Cancelled; snapshot differences were not accepted.' >&2; exit 2; }
+}
+
 print_primary_confirmation() {
   printf 'Snapshot: %s (source primary: %s)\n' "$SNAPSHOT_ID" "$SOURCE_PRIMARY"
+  print_snapshot_baseline_diffs "$SNAPSHOT_DIFFS"
   printf 'Primary parameter group: original=%s; restore request=%s\n' \
     "$primary_pg" "$(jq -r '.DBParameterGroupName' <<<"$restore_request")"
   print_request_table 'Primary restore request (populated fields only)' primary "$primary" "$restore_request"
@@ -306,20 +447,26 @@ require_absent() {
 }
 
 confirm() {
-  local token="$1" answer
+  local action="$1" answer
   [[ -t 0 && -t 1 ]] || { echo 'Confirmation requires an interactive terminal.' >&2; exit 2; }
-  read -r -p "Type $token to continue: " answer </dev/tty
-  [[ "$answer" == "$token" ]] || { echo 'Cancelled; no RDS request was submitted.'; exit 2; }
+  read -r -p "Submit $action? [y/N]: " answer </dev/tty
+  case "${answer,,}" in
+    y|yes) ;;
+    *) echo 'Cancelled; no RDS request was submitted.' >&2; exit 2 ;;
+  esac
 }
 
 case "$MODE" in
   preview)
     print_preview
     ;;
+  status)
+    ;;
   restore)
     require_absent "$TARGET_PRIMARY"
     require_absent "$TARGET_REPLICA"
     print_primary_confirmation
+    confirm_snapshot_diffs "$SNAPSHOT_DIFFS"
     confirm RESTORE
     umask 077
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-restore-request.XXXXXX")"
@@ -328,9 +475,9 @@ case "$MODE" in
     awsx rds restore-db-instance-from-db-snapshot --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,BackupRetentionPeriod]' --output text
     printf 'Primary restore started. After it is available, harden/check its parameter group with:\n'
-    printf 'bash iac/lab/bb3-db/restore-drill.sh harden-primary %q %q %q\n' "$SNAPSHOT_ID" "$TARGET_PRIMARY" "$TARGET_REPLICA"
+    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh harden-primary'
     printf 'Then create the replica with:\n'
-    printf 'bash iac/lab/bb3-db/restore-drill.sh replica %q %q %q\n' "$SNAPSHOT_ID" "$TARGET_PRIMARY" "$TARGET_REPLICA"
+    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh replica'
     ;;
   harden-primary)
     restored_primary="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_PRIMARY" --query 'DBInstances[0]' --output json)"
@@ -385,7 +532,7 @@ case "$MODE" in
     awsx rds create-db-instance-read-replica --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,DBSubnetGroup.DBSubnetGroupName]' --output text
     printf 'After replica availability, compare/apply its maintenance and parameter settings with:\n'
-    printf 'bash iac/lab/bb3-db/restore-drill.sh harden-replica %q %q %q\n' "$SNAPSHOT_ID" "$TARGET_PRIMARY" "$TARGET_REPLICA"
+    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh harden-replica'
     ;;
   harden-replica)
     restored_replica="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_REPLICA" --query 'DBInstances[0]' --output json)"
