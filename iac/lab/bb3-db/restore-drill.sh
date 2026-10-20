@@ -51,8 +51,15 @@ ACCOUNT="${TF_VAR_account_id:-}"
 [[ "$PROFILE" =~ ^(lab_sandbox|pa_aws_sandbox|pa_iam_aws_sandbox)$ && "$REGION" == ap-southeast-1 \
   && "$ACCOUNT" =~ ^[0-9]{12}$ ]] || { echo 'Sandbox profile, account or region is invalid.' >&2; exit 2; }
 awsx() { aws --profile "$PROFILE" --region "$REGION" --no-cli-pager "$@"; }
+PARAMETER_TEMP_DIR=''
+cleanup() {
+  [[ -z "$PARAMETER_TEMP_DIR" ]] || rm -rf "$PARAMETER_TEMP_DIR"
+  [[ -z "${request_file:-}" ]] || rm -f "$request_file"
+}
 CALLER_ACCOUNT="$(awsx sts get-caller-identity --query Account --output text)"
 [[ "$CALLER_ACCOUNT" == "$ACCOUNT" ]] || { echo 'AWS caller does not match the configured sandbox account.' >&2; exit 2; }
+PARAMETER_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bb3-parameter-check.XXXXXX")"
+trap cleanup EXIT
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -173,11 +180,90 @@ else
   replica_pg='not present'
   printf '%s\n' 'Original replica: not present in source baseline.' >&2
 fi
+verify_capture_member primary/parameters-1.json || exit 2
+awsx rds describe-db-parameters --db-parameter-group-name "$primary_pg" --output json \
+  > "$PARAMETER_TEMP_DIR/primary.json"
+jq -e '.Parameters | type=="array"' "$PARAMETER_TEMP_DIR/primary.json" >/dev/null \
+  || { echo 'Current primary parameter API response is invalid.' >&2; exit 2; }
 primary_tags="$(jq -c '.tags' <<<"$PRIMARY_BASELINE")"
 if [[ -n "$SOURCE_REPLICA" ]]; then
   replica_tags="$(jq -c '.tags' <<<"$REPLICA_BASELINE")"
 else
   replica_tags="$primary_tags"
+fi
+snapshot_tag_diff_rows() {
+  jq -nr --argjson baseline "$primary_tags" --argjson snapshot "$snapshot_tags" '
+    def tags_by_key: reduce .[]? as $tag ({}; .[$tag.Key]=$tag.Value);
+    ($baseline | map(select((.Key|startswith("aws:"))|not)) | tags_by_key) as $base |
+    ($snapshot | map(select((.Key|startswith("aws:"))|not)) | tags_by_key) as $snap |
+    ((($base|keys)+($snap|keys))|unique[]) as $key |
+    select($key!="Name" and $key!="Role" and $key!="dr-restore" and $key!="dr-restored-from") |
+    ($base[$key] // null) as $old |
+    ($snap[$key] // null) as $new |
+    select($old!=$new) |
+    [$key,(if $old==null then "not present" else $old end),(if $new==null then "not present" else $new end)] | @tsv
+  '
+}
+SNAPSHOT_TAG_DIFFS="$(snapshot_tag_diff_rows)"
+RESTORE_TAG_DECISIONS=()
+RESTORE_TAG_DECISIONS_JSON='{}'
+print_snapshot_tag_choice_table() {
+  local tag_key baseline_value snapshot_value old_cell snapshot_cell
+  [[ -n "$SNAPSHOT_TAG_DIFFS" ]] || return 0
+  printf '\nSnapshot tag differences (one choice at a time; option 1 is the default):\n'
+  printf '%-24s | %-34s | %s\n' 'Tag' 'Captured primary [1]' 'Selected snapshot [2]'
+  printf '%s\n' '-------------------------+------------------------------------+------------------------------------'
+  while IFS=$'\t' read -r tag_key baseline_value snapshot_value; do
+    [[ -n "$tag_key" ]] || continue
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      old_cell="$(printf '%-34s' "$baseline_value (default)")"
+      snapshot_cell="$(printf '%s' "$snapshot_value")"
+      printf '%-24s | %b | %b\n' "$tag_key" "${GREEN}${old_cell}${RESET}" "${RED}${snapshot_cell}${RESET}"
+    else
+      printf '%-24s | %-34s | %s\n' "$tag_key" "$baseline_value (default)" "$snapshot_value"
+    fi
+  done <<< "$SNAPSHOT_TAG_DIFFS"
+}
+if [[ "$MODE" == restore && -n "$SNAPSHOT_TAG_DIFFS" ]]; then
+  [[ -t 0 && -t 1 ]] || { echo 'Snapshot tag differences require interactive per-tag choices.' >&2; exit 2; }
+  while IFS=$'\t' read -r tag_key baseline_value snapshot_value; do
+    [[ -n "$tag_key" ]] || continue
+    printf '\nTag %s\n' "$tag_key"
+    printf '%-24s | %-34s | %s\n' 'Tag' 'Captured primary [1]' 'Selected snapshot [2]'
+    printf '%s\n' '-------------------------+------------------------------------+------------------------------------'
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      old_cell="$(printf '%-34s' "$baseline_value (default)")"
+      printf '%-24s | %b | %b\n' "$tag_key" "${GREEN}${old_cell}${RESET}" "${RED}${snapshot_value}${RESET}"
+    else
+      printf '%-24s | %-34s | %s\n' "$tag_key" "$baseline_value (default)" "$snapshot_value"
+    fi
+    tag_prompt="Choose '$tag_key' [1/2, default 1: $baseline_value]"
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      tag_prompt="Choose '$tag_key' [1/2, default 1: ${GREEN}${baseline_value}${RESET}]"
+    fi
+    read -r -p "$tag_prompt: " tag_choice </dev/tty
+    tag_choice="${tag_choice:-1}"
+    [[ "$tag_choice" == 1 || "$tag_choice" == 2 ]] || { echo 'A tag choice of 1 or 2 is required; no restore was submitted.' >&2; exit 2; }
+    selected_tag_value="$baseline_value"; [[ "$tag_choice" == 2 ]] && selected_tag_value="$snapshot_value"
+    if [[ "$selected_tag_value" == 'not present' ]]; then
+      primary_tags="$(jq -cn --argjson tags "$primary_tags" --arg key "$tag_key" '$tags|map(select(.Key!=$key))')"
+    else
+      primary_tags="$(jq -cn --argjson tags "$primary_tags" --arg key "$tag_key" --arg value "$selected_tag_value" '
+        if any($tags[]?;.Key==$key) then $tags|map(if .Key==$key then .Value=$value else . end)
+        else $tags+[{Key:$key,Value:$value}] end
+      ')"
+    fi
+    RESTORE_TAG_DECISIONS+=("$tag_key=$selected_tag_value")
+    RESTORE_TAG_DECISIONS_JSON="$(jq -cn --argjson choices "$RESTORE_TAG_DECISIONS_JSON" --arg key "$tag_key" --arg value "$selected_tag_value" \
+      'if $value=="not present" then $choices + {($key):null} else $choices + {($key):$value} end')"
+  done <<< "$SNAPSHOT_TAG_DIFFS"
+  replica_tags="$(jq -cn --argjson tags "$replica_tags" --argjson choices "$RESTORE_TAG_DECISIONS_JSON" '
+    reduce ($choices|to_entries[]) as $entry ($tags;
+      if $entry.value==null then map(select(.Key!=$entry.key))
+      elif any(.[]?;.Key==$entry.key) then map(if .Key==$entry.key then .Value=$entry.value else . end)
+      else .+[{Key:$entry.key,Value:$entry.value}] end
+    )
+  ')"
 fi
 RUN_ID="DR-$(date -u +%Y%m%d-%H%M)-uat-BB3-S3"
 PRIMARY_AZ="$(jq -r '.AvailabilityZone // empty' <<<"$primary")"
@@ -201,7 +287,7 @@ build_tags() {
     | reduce .[] as $tag ({}; .[$tag.Key]=$tag.Value) | to_entries | map({Key:.key,Value:.value})'
 }
 
-primary_restore_tags="$(build_tags "$primary_tags" "$TARGET_PRIMARY" restore "$SNAPSHOT_ID")"
+primary_restore_tags="$(build_tags "$primary_tags" "$TARGET_PRIMARY" primary "$SNAPSHOT_ID")"
 restore_op="$(jq -nc --arg id "$TARGET_PRIMARY" --arg snapshot "$SNAPSHOT_ID" --argjson source "$primary" \
   '{DBInstanceIdentifier:$id,DBSnapshotIdentifier:$snapshot}
   + (if $source.MultiAZ then {} else {AvailabilityZone:$source.AvailabilityZone} end)')"
@@ -298,42 +384,62 @@ snapshot_diff_rows() {
     --argjson snapshot_tags "$snapshot_tags" '
     def tag($items;$key): [$items[]? | select(.Key==$key) | .Value] | first;
     [
-      ["Engine", $baseline.instance.Engine, $snapshot.Engine],
-      ["EngineVersion", $baseline.instance.EngineVersion, $snapshot.EngineVersion],
-      ["Port", $baseline.instance.Endpoint.Port, $snapshot.Port],
-      ["AllocatedStorage", $baseline.instance.AllocatedStorage, $snapshot.AllocatedStorage],
-      ["StorageEncrypted", $baseline.instance.StorageEncrypted, $snapshot.Encrypted],
-      ["KmsKeyId", $baseline.instance.KmsKeyId, $snapshot.KmsKeyId],
-      ["VpcId", $baseline.instance.DBSubnetGroup.VpcId, $snapshot.VpcId],
-      ["AvailabilityZone", $baseline.instance.AvailabilityZone, $snapshot.AvailabilityZone],
-      ["Tag:env", tag($baseline.tags;"env"), tag($snapshot_tags;"env")],
-      ["Tag:app", tag($baseline.tags;"app"), tag($snapshot_tags;"app")],
-      ["Tag:Role", tag($baseline.tags;"Role"), tag($snapshot_tags;"Role")]
+      ["ENGINE", "Engine", $baseline.instance.Engine, $snapshot.Engine],
+      ["ENGINE", "EngineVersion", $baseline.instance.EngineVersion, $snapshot.EngineVersion],
+      ["ENGINE", "LicenseModel", $baseline.instance.LicenseModel, $snapshot.LicenseModel],
+      ["ENGINE", "OptionGroupName", $baseline.instance.OptionGroupMemberships[0].OptionGroupName, $snapshot.OptionGroupName],
+      ["NETWORK", "Port", $baseline.instance.Endpoint.Port, $snapshot.Port],
+      ["NETWORK", "VpcId", $baseline.instance.DBSubnetGroup.VpcId, $snapshot.VpcId],
+      ["NETWORK", "AvailabilityZone", $baseline.instance.AvailabilityZone, $snapshot.AvailabilityZone],
+      ["STORAGE", "AllocatedStorage", $baseline.instance.AllocatedStorage, $snapshot.AllocatedStorage],
+      ["STORAGE", "StorageType", $baseline.instance.StorageType, $snapshot.StorageType],
+      ["STORAGE", "Iops", $baseline.instance.Iops, $snapshot.Iops],
+      ["SECURITY", "StorageEncrypted", $baseline.instance.StorageEncrypted, $snapshot.Encrypted],
+      ["SECURITY", "KmsKeyId", $baseline.instance.KmsKeyId, $snapshot.KmsKeyId]
     ]
     | map(select(
-        if (.[0]|startswith("Tag:")) then .[1]!=.[2]
-        else .[1]!=null and .[2]!=null and (.[1]|tojson)!=(.[2]|tojson)
-        end
+        .[2]!=null and .[3]!=null and (.[2]|tojson)!=(.[3]|tojson)
       ))[]
-    | [.[0], (if .[1]==null then "not present" else (.[1]|tostring) end),
-       (if .[2]==null then "not present" else (.[2]|tostring) end)] | @tsv
+    | [.[0], .[1], (.[2]|tostring), (.[3]|tostring)] | @tsv
   '
 }
 SNAPSHOT_DIFFS="$(snapshot_diff_rows)"
 
+parameter_diff_rows() {
+  local captured_file="$1" current_file="$2"
+  jq -nr --slurpfile captured "$captured_file" --slurpfile current "$current_file" '
+    def by_name: reduce .Parameters[] as $parameter ({}; .[$parameter.ParameterName]=$parameter);
+    def fmt($parameter): if $parameter==null then "not present"
+      else "\($parameter.ParameterValue // "not set") [\($parameter.Source // "unknown")]" end;
+    ($captured[0]|by_name) as $baseline |
+    ($current[0]|by_name) as $live |
+    ((($baseline|keys)+($live|keys))|unique[]) as $name |
+    ($baseline[$name] // null) as $old |
+    ($live[$name] // null) as $new |
+    select($old!=$new) |
+    ([((($old // {})|keys[]),(($new // {})|keys[]))] | unique |
+      map(. as $field | select(($old // {})[$field] != ($new // {})[$field]))) as $changed |
+    [$name,fmt($old),fmt($new),($changed|join(","))] | @tsv
+  '
+}
+PRIMARY_PARAMETER_DIFFS="$(parameter_diff_rows "$CAPTURE_DIRECTORY/primary/parameters-1.json" "$PARAMETER_TEMP_DIR/primary.json")"
+PRIMARY_PARAMETER_COUNT="$(jq -r '.Parameters|length' "$CAPTURE_DIRECTORY/primary/parameters-1.json")"
+PRIMARY_LIVE_PARAMETER_COUNT="$(jq -r '.Parameters|length' "$PARAMETER_TEMP_DIR/primary.json")"
+REPLICA_PARAMETER_DIFFS=''; REPLICA_PARAMETER_COUNT=0; REPLICA_LIVE_PARAMETER_COUNT=0
+
 print_snapshot_baseline_diffs() {
-  local rows="$1" field captured snapshot_value formatted
+  local rows="$1" diff_type field captured snapshot_value formatted
   if [[ -n "$rows" ]]; then
     printf '\nSnapshot vs captured primary baseline (differences only):\n'
-    printf '%-26s | %-38s | %s\n' 'Field' 'Captured primary' 'Selected snapshot'
-    printf '%s\n' '---------------------------+----------------------------------------+----------------------------------------'
-    while IFS=$'\t' read -r field captured snapshot_value; do
+    printf '%-10s | %-26s | %-38s | %s\n' 'Diff type' 'Field' 'Captured primary' 'Selected snapshot'
+    printf '%s\n' '-----------+---------------------------+----------------------------------------+----------------------------------------'
+    while IFS=$'\t' read -r diff_type field captured snapshot_value; do
       [[ -n "$field" ]] || continue
       if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-        formatted="$(printf '%-26s | %-38s | %s' "$field" "$captured" "$snapshot_value")"
+        formatted="$(printf '%-10s | %-26s | %-38s | %s' "$diff_type" "$field" "$captured" "$snapshot_value")"
         printf '%b\n' "${RED}${formatted}${RESET}"
       else
-        printf '%-26s | %-38s | %s\n' "$field" "$captured" "$snapshot_value"
+        printf '%-10s | %-26s | %-38s | %s\n' "$diff_type" "$field" "$captured" "$snapshot_value"
       fi
     done <<< "$rows"
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -351,16 +457,65 @@ print_snapshot_baseline_diffs() {
 confirm_snapshot_diffs() {
   local rows="$1" answer
   [[ -n "$rows" ]] || return 0
-  [[ -t 0 && -t 1 ]] || { echo 'Snapshot differences require explicit interactive acceptance.' >&2; exit 2; }
-  read -r -p 'Type ACCEPT-DIFF to accept these snapshot differences: ' answer </dev/tty
+  [[ -t 0 && -t 1 ]] || { echo 'Snapshot metadata/tag differences require explicit interactive acceptance.' >&2; exit 2; }
+  read -r -p 'Type ACCEPT-DIFF to accept snapshot metadata/tag differences: ' answer </dev/tty
   [[ "$answer" == ACCEPT-DIFF ]] || { echo 'Cancelled; snapshot differences were not accepted.' >&2; exit 2; }
+}
+
+confirm_current_parameters() {
+  local answer
+  [[ -n "$PRIMARY_PARAMETER_DIFFS" ]] || return 0
+  printf 'Parameter values differ from the captured primary. The snapshot has no parameter-value list.\n'
+  printf 'The restore request uses parameter group %s, with its current AWS values.\n' "$primary_pg"
+  printf '%s\n' 'To use the historical captured values instead, cancel and provision an approved parameter group; this helper will not rebuild it.'
+  [[ -t 0 && -t 1 ]] || { echo 'Parameter drift requires an explicit current-group choice or cancellation.' >&2; exit 2; }
+  read -r -p 'Type USE-CURRENT-PARAMETERS to continue with this group: ' answer </dev/tty
+  [[ "$answer" == USE-CURRENT-PARAMETERS ]] \
+    || { echo 'Cancelled; parameter values were not selected.' >&2; exit 2; }
+}
+
+print_parameter_diffs() {
+  local role="$1" rows="$2" captured_count="$3" live_count="$4"
+  if [[ -z "$rows" ]]; then
+    printf '%s parameters: %s captured / %s live API records; no differences (MATCH).\n' \
+      "$role" "$captured_count" "$live_count"
+    return
+  fi
+  printf '\n%s captured vs live parameter API (differences only):\n' "$role"
+  printf '%-34s | %-36s | %-36s | %s\n' 'Parameter' 'Captured value [source]' 'Live value [source]' 'Changed API fields'
+  printf '%s\n' '-----------------------------------+--------------------------------------+--------------------------------------+--------------------'
+  while IFS=$'\t' read -r name captured live changed; do
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+      formatted="$(printf '%-34s | %-36s | %-36s | %s' "$name" "$captured" "$live" "$changed")"
+      printf '%b\n' "${RED}${formatted}${RESET}"
+    else
+      printf '%-34s | %-36s | %-36s | %s\n' "$name" "$captured" "$live" "$changed"
+    fi
+  done <<< "$rows"
+  printf '%s parameters: %s captured / %s live API records; review differences.\n' \
+    "$role" "$captured_count" "$live_count"
 }
 
 print_primary_confirmation() {
   printf 'Snapshot: %s (source primary: %s)\n' "$SNAPSHOT_ID" "$SOURCE_PRIMARY"
   print_snapshot_baseline_diffs "$SNAPSHOT_DIFFS"
+  [[ "$MODE" == restore ]] || print_snapshot_tag_choice_table
+  if [[ -n "$SNAPSHOT_TAG_DIFFS" ]]; then
+    printf '\nSnapshot tag decisions (Name/Role are assigned to the new target automatically):\n'
+    if [[ ${#RESTORE_TAG_DECISIONS[@]} -gt 0 ]]; then
+      printf 'Selected tag values: %s\n' "${RESTORE_TAG_DECISIONS[*]}"
+    else
+      while IFS=$'\t' read -r tag_key baseline_value snapshot_value; do
+        printf '  %s: captured primary=%s | snapshot=%s | restore choices: 1=primary, 2=snapshot\n' \
+          "$tag_key" "$baseline_value" "$snapshot_value"
+      done <<< "$SNAPSHOT_TAG_DIFFS"
+    fi
+  fi
+  print_parameter_diffs primary "$PRIMARY_PARAMETER_DIFFS" "$PRIMARY_PARAMETER_COUNT" "$PRIMARY_LIVE_PARAMETER_COUNT"
   printf 'Primary parameter group: original=%s; restore request=%s\n' \
     "$primary_pg" "$(jq -r '.DBParameterGroupName' <<<"$restore_request")"
+  printf 'Restore tags (after per-tag choices):\n'
+  jq -r '.Tags[]? | "  \(.Key)=\(.Value)"' <<<"$restore_request"
   print_request_table 'Primary restore request (populated fields only)' primary "$primary" "$restore_request"
   printf '\nPost-restore hardening (not sent in snapshot-restore request):\n'
   printf 'PreferredMaintenanceWindow | baseline=%s | apply after restore with ModifyDBInstance\n' \
@@ -404,7 +559,7 @@ build_primary_harden_request() {
 build_replica_harden_request() {
   local current="$1" source="$replica"
   [[ -n "$SOURCE_REPLICA" ]] || source="$primary"
-  jq -cn --arg id "$TARGET_REPLICA" --arg group "$primary_pg" \
+  jq -cn --arg id "$TARGET_REPLICA" --arg group "$expected_replica_pg" \
     --arg maintenance "$(jq -r '.PreferredMaintenanceWindow // empty' <<<"$source")" \
     --argjson current "$current" '
       {DBInstanceIdentifier:$id}
@@ -456,6 +611,13 @@ confirm() {
   esac
 }
 
+confirm_go() {
+  local answer
+  [[ -t 0 && -t 1 ]] || { echo 'Explicit IC/data-owner GO gate requires an interactive terminal.' >&2; exit 2; }
+  read -r -p 'Type GO after data-owner loss acceptance and IC approval: ' answer </dev/tty
+  [[ "$answer" == GO ]] || { echo 'Cancelled; restore was not submitted.' >&2; exit 2; }
+}
+
 case "$MODE" in
   preview)
     print_preview
@@ -467,24 +629,46 @@ case "$MODE" in
     require_absent "$TARGET_REPLICA"
     print_primary_confirmation
     confirm_snapshot_diffs "$SNAPSHOT_DIFFS"
+    confirm_current_parameters
+    confirm_go
     confirm RESTORE
     umask 077
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-restore-request.XXXXXX")"
-    trap 'rm -f "$request_file"' EXIT
+    trap cleanup EXIT
     printf '%s\n' "$restore_request" > "$request_file"
-    awsx rds restore-db-instance-from-db-snapshot --cli-input-json "file://$request_file" \
+    printf 'AWS command: aws --profile %s --region %s --no-cli-pager rds restore-db-instance-from-db-snapshot --cli-input-json file://%s\n' \
+      "$PROFILE" "$REGION" "$request_file"
+    restore_result="$(awsx rds restore-db-instance-from-db-snapshot --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,BackupRetentionPeriod]' --output text
-    printf 'Primary restore started. After it is available, harden/check its parameter group with:\n'
-    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh harden-primary'
-    printf 'Then create the replica with:\n'
-    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh replica'
+    )"
+    printf 'AWS result (status, class, public, retention): %s\n' "$restore_result"
+    printf '%s\n' 'Next in all-in-one mode: P2-S02 waits for availability, then P2-S03 validates/hardens.'
+    printf 'Selected-step commands: bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S02\n'
+    printf 'Then: bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S03\n'
+    printf 'Create the replica later with: bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S05\n'
     ;;
   harden-primary)
     restored_primary="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_PRIMARY" --query 'DBInstances[0]' --output json)"
     [[ "$(jq -r '.DBInstanceStatus' <<<"$restored_primary")" == available ]] \
       || { echo 'Restored primary must be available before parameter-group hardening.' >&2; exit 2; }
+    restored_primary_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$restored_primary")"
+    awsx rds describe-db-parameters --db-parameter-group-name "$restored_primary_pg" --output json \
+      > "$PARAMETER_TEMP_DIR/restored-primary.json"
+    jq -e '.Parameters|type=="array"' "$PARAMETER_TEMP_DIR/restored-primary.json" >/dev/null \
+      || { echo 'Restored primary parameter API response is invalid.' >&2; exit 2; }
+    restored_primary_parameter_diffs="$(parameter_diff_rows "$CAPTURE_DIRECTORY/primary/parameters-1.json" "$PARAMETER_TEMP_DIR/restored-primary.json")"
+    restored_primary_parameter_count="$(jq -r '.Parameters|length' "$CAPTURE_DIRECTORY/primary/parameters-1.json")"
+    restored_primary_live_count="$(jq -r '.Parameters|length' "$PARAMETER_TEMP_DIR/restored-primary.json")"
+    print_parameter_diffs 'Restored primary vs captured original primary' "$restored_primary_parameter_diffs" \
+      "$restored_primary_parameter_count" "$restored_primary_live_count"
+    if [[ -n "$restored_primary_parameter_diffs" && "$restored_primary_pg" == "$primary_pg" ]]; then
+      echo 'REFUSED: restored primary uses the expected group but its full parameter API differs from the captured primary. Review the parameter group; this helper cannot reconstruct historical group contents.' >&2
+      exit 2
+    fi
     harden_request="$(build_primary_harden_request "$restored_primary")"
     if [[ "$(jq -r 'keys|length' <<<"$harden_request")" == 2 ]]; then
+      [[ -z "$restored_primary_parameter_diffs" ]] \
+        || { echo 'REFUSED: restored primary parameter values still differ from the captured primary.' >&2; exit 2; }
       printf '%s\n' 'Restored primary backup window, maintenance window, retention and parameter group match the baseline; no modify request needed.'
       exit 0
     fi
@@ -493,7 +677,7 @@ case "$MODE" in
     print_harden_table 'Primary post-restore hardening (baseline vs current vs ModifyDBInstance)' "$primary" "$restored_primary" "$harden_request"
     confirm APPLY-PARAMETER-GROUP
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-primary-harden.XXXXXX")"
-    trap 'rm -f "$request_file"' EXIT
+    trap cleanup EXIT
     printf '%s\n' "$harden_request" > "$request_file"
     awsx rds modify-db-instance --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus,PreferredBackupWindow,PreferredMaintenanceWindow,BackupRetentionPeriod]' \
@@ -527,7 +711,7 @@ case "$MODE" in
     confirm CREATE-REPLICA
     umask 077
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-replica-request.XXXXXX")"
-    trap 'rm -f "$request_file"' EXIT
+    trap cleanup EXIT
     printf '%s\n' "$replica_request" > "$request_file"
     awsx rds create-db-instance-read-replica --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,DBSubnetGroup.DBSubnetGroupName]' --output text
@@ -550,8 +734,32 @@ case "$MODE" in
     expected_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$expected_replica_source")"
     current_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$restored_replica")"
     current_replica_pg_status="$(jq -r '.DBParameterGroups[0].ParameterApplyStatus // "unknown"' <<<"$restored_replica")"
+    expected_replica_parameter_file='replica/parameters-1.json'
+    if [[ -z "$SOURCE_REPLICA" ]]; then expected_replica_parameter_file='primary/parameters-1.json'; fi
+    verify_capture_member "$expected_replica_parameter_file" || exit 2
+    awsx rds describe-db-parameters --db-parameter-group-name "$current_replica_pg" --output json \
+      > "$PARAMETER_TEMP_DIR/restored-replica.json"
+    jq -e '.Parameters|type=="array"' "$PARAMETER_TEMP_DIR/restored-replica.json" >/dev/null \
+      || { echo 'Restored replica parameter API response is invalid.' >&2; exit 2; }
+    restored_replica_parameter_diffs="$(parameter_diff_rows "$CAPTURE_DIRECTORY/$expected_replica_parameter_file" "$PARAMETER_TEMP_DIR/restored-replica.json")"
+    restored_replica_parameter_count="$(jq -r '.Parameters|length' "$CAPTURE_DIRECTORY/$expected_replica_parameter_file")"
+    restored_replica_live_count="$(jq -r '.Parameters|length' "$PARAMETER_TEMP_DIR/restored-replica.json")"
+    replica_parameter_label='New replica vs captured original replica'
+    [[ -n "$SOURCE_REPLICA" ]] || replica_parameter_label='New replica vs captured primary template'
+    print_parameter_diffs "$replica_parameter_label" "$restored_replica_parameter_diffs" \
+      "$restored_replica_parameter_count" "$restored_replica_live_count"
+    if [[ -n "$restored_replica_parameter_diffs" && "$current_replica_pg" == "$expected_replica_pg" ]]; then
+      if [[ -n "$SOURCE_REPLICA" ]]; then
+        echo 'REFUSED: new replica uses the expected group but its full parameter API differs from the captured original replica. Review the parameter group; this helper cannot reconstruct historical group contents.' >&2
+      else
+        echo 'REFUSED: new replica uses the expected group but its full parameter API differs from the captured primary template. Review the parameter group; this helper cannot reconstruct historical group contents.' >&2
+      fi
+      exit 2
+    fi
     replica_harden_request="$(build_replica_harden_request "$restored_replica")"
     if [[ "$(jq -r 'keys|length' <<<"$replica_harden_request")" == 2 && "$current_replica_pg" == "$expected_replica_pg" && "$current_replica_pg_status" == in-sync ]]; then
+      [[ -z "$restored_replica_parameter_diffs" ]] \
+        || { echo 'REFUSED: new replica parameter values still differ from the captured original replica.' >&2; exit 2; }
       printf 'Replica parameter group and maintenance window match baseline and are in-sync; no modify request needed.\n'
       exit 0
     fi
@@ -561,7 +769,7 @@ case "$MODE" in
     printf 'Parameter apply status: %s\n' "$current_replica_pg_status"
     confirm APPLY-REPLICA-HARDEN
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-replica-harden.XXXXXX")"
-    trap 'rm -f "$request_file"' EXIT
+    trap cleanup EXIT
     printf '%s\n' "$replica_harden_request" > "$request_file"
     awsx rds modify-db-instance --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus,PreferredMaintenanceWindow]' \

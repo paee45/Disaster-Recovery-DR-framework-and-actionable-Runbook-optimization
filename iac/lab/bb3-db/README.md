@@ -21,13 +21,14 @@ instance descriptions, tags, 437 API parameters per DB, parameter-group definiti
 security-group rules and subnet metadata, plus an integrity manifest. No credentials
 or SQL were collected. Refreshing preserves prior captures; incomplete captures do
 not replace the latest reference. Each capture prints a primary/replica summary table;
-`capture-baseline.sh --show` renders the latest table locally without querying AWS.
+`bb3-run.sh S3 --only P1-S03 --show` renders the latest table locally without querying AWS.
 
 Before an incident, run the guided discovery once. The `uat` argument selects
 `env=uat`; `app=bb3` identifies the application. `local` is not an AWS RDS environment.
 
 ```bash
-bash iac/lab/bb3-db/discover-env.sh uat
+bash iac/lab/bb3-db/bb3-run.sh S3 --list
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S02
 ```
 
 Discovery matches `env=<environment>` plus `app=bb3`; neither tag alone is enough.
@@ -47,7 +48,7 @@ secret values and makes no AWS changes. Run capture with no IDs to use the saved
 selections:
 
 ```bash
-bash iac/lab/bb3-db/capture-baseline.sh
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03
 ```
 
 For an incident-time refresh, rerun guided discovery and review the selected primary,
@@ -151,33 +152,50 @@ tables; `MATCH`, `NEW`, and `DIFF - REVIEW` are text indicators (color is option
 It never prints or retrieves the Secrets Manager payload.
 
 ```bash
+# All RDS recovery steps, including automatic availability waits
+bash iac/lab/bb3-db/bb3-run.sh S3
+
+# List step IDs, then run only the selected ordered steps
+bash iac/lab/bb3-db/bb3-run.sh S3 --list
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S02,P1-S03,P2-S00
+
 # Read-only: compare original primary/replica baselines and the API requests
-bash iac/lab/bb3-db/restore-drill.sh preview
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S00
 
 # Read-only: check both saved restore targets
-bash iac/lab/bb3-db/restore-drill.sh status
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S09
 
 # Separately confirm and start the primary restore; confirmation defaults to No
-bash iac/lab/bb3-db/restore-drill.sh restore
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S01
 
 # Once primary is available: compare/harden parameter group, backup window/retention,
 # and maintenance window (maintenance is not accepted by snapshot-restore API)
-bash iac/lab/bb3-db/restore-drill.sh harden-primary
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S03
 
 # Only after primary baseline validation: confirm and create a new replica
-bash iac/lab/bb3-db/restore-drill.sh replica
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S05
 
 # Once replica is available: compare/harden inherited parameter group and maintenance window
-bash iac/lab/bb3-db/restore-drill.sh harden-replica
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S07
 ```
 
-Restore preview verifies the primary/replica baseline files against the checksums in
-the selected `latest.json` capture and refuses a source/account/region mismatch. It
-shows only differences between the selected snapshot and captured primary metadata,
-including `env`, `app`, and `Role` tags; interactive mismatch rows are red. A mismatch
-requires typing `ACCEPT-DIFF` before the restore stage proceeds to its separate
-default-No confirmation. RDS snapshot metadata does not expose parameter values, so
-the request uses the captured primary parameter group and reports that limit explicitly.
+The all-in-one `S3` sequence waits automatically at the primary and replica availability checkpoints.
+Press Ctrl+C during a wait to stop; the runner prints the matching `--only P2-Sxx` resume command. After an
+accepted restore/create request, resume at its wait ID rather than resubmitting the mutation.
+
+Restore preview verifies the primary/replica baseline and parameter files against the
+checksums in the selected `latest.json` capture and refuses a source/account/region
+mismatch. It compares snapshot-returned metadata and `env`/`app` tags to the captured
+primary. In `restore`, choose each differing tag: `1` keeps the primary value, `2` uses
+the snapshot value. Choices apply only to the new primary/replica tags; `Name` and
+`Role=primary` are assigned for the new writer, and `dr-restore` marks its lifecycle.
+Non-tag snapshot differences require `ACCEPT-DIFF`. Snapshot APIs do not expose
+parameter values. The full captured primary parameter API set is compared to the
+current primary group; parameter drift requires `USE-CURRENT-PARAMETERS` or cancel.
+After restore, all primary parameters are checked against capture; after replica
+creation, all parameters are checked against the original replica (or primary template
+if no replica existed). The helper stops if an expected group name has different
+values, because it cannot reconstruct historical group contents.
 
 The restore request explicitly supplies the captured subnet group, security groups,
 parameter group, class, retention and backup window. `PreferredMaintenanceWindow`

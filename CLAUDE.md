@@ -50,7 +50,7 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 |---|---|
 | Build `env/<env>.env` from what exists in AWS/the cluster (no manual lookups) | `automation/scripts/dr-env-discover.sh <env> --profile P --region R` (then `dr-env-check.sh`) |
 | Run a restore step by step (live output, evidence per step, gates, resume) | `automation/scripts/dr-run.sh S3\|S4` (`--list`, `--dry-run`, `--to P2-S05`, `--resume <DR_ID>`) |
-| BB3 RDS snapshot drill (tag discovery, baseline, staged restore/status) | `iac/lab/bb3-db/discover-env.sh uat`, `capture-baseline.sh`, `restore-drill.sh <stage>` |
+| BB3 RDS snapshot drill (all-in-one or selected step IDs) | `iac/lab/bb3-db/bb3-run.sh S3 --list`, `bb3-run.sh S3`, or `bb3-run.sh S3 --only P1-S02,P2-S00` |
 | Recorded manual shell | `automation/scripts/dr-session.sh env/<env>.env <SCENARIO>` |
 | Run any Terraform stack (state in S3, plan/apply, stop/start DB) | `iac/tf.sh <stack> [env] <cmd>`, guide `iac/README.md` |
 | Build / destroy the sandbox lab (Terraform) | `iac/lab/README.md` |
@@ -70,15 +70,22 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
-- **BB3 guided drill UX (2026-10-20):** `discover-env.sh <env>` matches `env=<env>` plus `app=bb3`, shows
+- **BB3 guided drill UX (2026-10-20):** `bb3-run.sh S3 --only P1-S02` matches `env=<env>` plus `app=bb3`, shows
   numbered primary/replica selections and all automated snapshots, with saved/sole selections and newest snapshot
   highlighted as Enter defaults. It persists `ENV`, `APP`, source/snapshot IDs, and restore targets in ignored
-  `iac/sandbox.env`; occupied saved target IDs rotate on rediscovery. `restore-drill.sh` stages can use saved IDs
-  without positional copy/paste, and `status` checks both targets read-only. Baseline capture prints a primary/replica
-  table; `--show` displays the latest capture locally. Restore preview verifies baseline checksums and shows snapshot
-  metadata/tag differences in red; `ACCEPT-DIFF` is required before restore, followed by the default-No RDS gate.
-  Snapshot parameter values are not exposed by RDS; restore uses the captured primary parameter group. GO and owner
-  attestations require explicit input. Live UAT preview used saved IDs and submitted no mutation.
+  `iac/sandbox.env`; occupied saved target IDs rotate on rediscovery. `bb3-run.sh S3 --list` prints step IDs;
+  `bb3-run.sh S3` runs all RDS steps with automatic availability waiters, and `--only P1-S02,P2-S00` runs
+  selected IDs in order. Ctrl+C during a waiter prints a resume command. Stages use saved IDs without positional
+  copy/paste, and `P2-S09` checks both targets read-only. Baseline capture prints a primary/replica table;
+  `--only P1-S03 --show` displays the latest
+  capture locally. Restore preview verifies baseline checksums, shows snapshot
+  metadata/tag differences in red, and compares all current primary parameter API records to capture. Restore lets
+  the operator choose captured-primary vs snapshot values for each differing non-reserved tag; non-tag metadata
+  drift requires `ACCEPT-DIFF`, and parameter drift requires explicit `USE-CURRENT-PARAMETERS` or cancel. The restored
+  primary is checked against captured primary parameters, and the created replica against captured replica
+  parameters (or primary template when no replica existed). Historical parameter-group values cannot be recreated
+  automatically. RDS mutations default to No; GO and owner attestations require explicit input. Live UAT preview
+  submitted no mutation.
 - **Restore input compatibility (2026-10-19):** host Homebrew AWS CLI upgraded from 2.33.12 to 2.38.1.
   Current snapshot/PITR APIs and the new local input models accept `BackupRetentionPeriod` and
   `PreferredBackupWindow`. Shared restore requests now retain the baseline values, including captured writer
