@@ -22,6 +22,30 @@ security-group rules and subnet metadata, plus an integrity manifest. No credent
 or SQL were collected. Refreshing preserves prior captures; incomplete captures do
 not replace the latest reference.
 
+Before an incident, discover the current UAT-like source and snapshot candidate:
+
+```bash
+bash iac/lab/bb3-db/discover-env.sh uat
+bash iac/lab/bb3-db/discover-env.sh uat --print
+```
+
+Discovery filters by the BB3 sandbox/environment/role tags, requires a unique primary,
+verifies the optional attached replica, and selects the newest available automated
+snapshot. If multiple primaries match, select one explicitly with `--primary` after
+review; `--replica` and `--snapshot` support reviewed overrides. `--write` shows the
+selection and requires typing `WRITE`, then updates only the `BB3_*` variables in the
+existing ignored `iac/sandbox.env`; `--force` is needed to refresh existing BB3 values.
+It does not read secret values or modify AWS. Run capture with no IDs to use the
+reviewed selections:
+
+```bash
+bash iac/lab/bb3-db/discover-env.sh uat --write
+bash iac/lab/bb3-db/capture-baseline.sh
+```
+
+For an incident-time refresh, run discovery summary/print again and explicitly confirm
+the selected primary, optional replica and recovery point before `--write`.
+
 Use the **described values** for this drill: primary backup retention **7 days** and
 replica backup retention **0 days**. Terraform already matches these values. The earlier
 1-day discussion was hypothetical, not the observed UAT setting. Current snapshot

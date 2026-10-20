@@ -15,4 +15,3 @@ zz_bootstrap_override.tf
 sandbox.env
 crash.log
 iac/lab/bb3-db/baselines/
-iac/lab/bb3-db/drill.env

@@ -3,6 +3,8 @@
 Use this procedure for the AWS sandbox BB3 PostgreSQL drill. It is **not** real UAT, the local Moto/LocalStack
 lab, or the legacy EKS runner. `env/uat.env` belongs to that older EKS lab; BB3 commands read the named profile
 and account from the ignored `iac/sandbox.env`. Never fetch or print the mixed secret value.
+For commands that invoke repository scripts, use the absolute checkout base `/Users/pa/dr-framework`; they
+will work from any current directory. AWS CLI commands are location-independent.
 
 ### Scope And Scenario
 
@@ -31,22 +33,46 @@ credential. Never use default credentials or exported keys.
 
 ### 1. Capture Original Baseline
 
-Capture before restore. The helper writes complete read-only AWS API metadata to the ignored
-`iac/lab/bb3-db/baselines/` directory. It does not read Secrets Manager values or SQL. The replica ID is
-optional only when the source primary has no attached replicas.
-
-Primary with replica:
+Before an incident, discover and review the sandbox source inputs. This updates the existing ignored
+`iac/sandbox.env`; it does not create a second env file. The default summary is read-only:
 
 ```bash
-AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
-  bash iac/lab/bb3-db/capture-baseline.sh <source-primary-id> <source-replica-id>
+bash /Users/pa/dr-framework/iac/lab/bb3-db/discover-env.sh uat
 ```
 
-Primary only:
+If the selection is correct, write it by running:
+
+```bash
+bash /Users/pa/dr-framework/iac/lab/bb3-db/discover-env.sh uat --write
+```
+
+Review the printed primary, optional replica and snapshot candidate, then type `WRITE` when prompted. If
+multiple eligible primaries are found, select one with `--primary <id>` after review; use `--replica` or
+`--snapshot` only for reviewed overrides. `--force` is required to refresh existing `BB3_*` selections.
+Discovery verifies account/tags/topology and never reads secret values or SQL.
+
+Capture before restore using the saved selections. The helper writes complete read-only AWS API metadata to
+the ignored `iac/lab/bb3-db/baselines/` directory and does not read Secrets Manager values or SQL:
+
+```bash
+bash /Users/pa/dr-framework/iac/lab/bb3-db/capture-baseline.sh
+```
+
+For a one-off source not saved in the env file, pass the primary and optional replica IDs explicitly. A replica
+ID may be omitted only when the source primary has no attached replicas.
+
+Primary with replica, explicit one-off:
 
 ```bash
 AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
-  bash iac/lab/bb3-db/capture-baseline.sh <source-primary-id>
+  bash /Users/pa/dr-framework/iac/lab/bb3-db/capture-baseline.sh <source-primary-id> <source-replica-id>
+```
+
+Primary only, explicit one-off:
+
+```bash
+AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
+  bash /Users/pa/dr-framework/iac/lab/bb3-db/capture-baseline.sh <source-primary-id>
 ```
 
 Record the capture directory. Keep that baseline unchanged for the whole run. Confirm parameter groups are
@@ -70,7 +96,7 @@ Choose two unique targets: a restore primary and a new replica.
 ### 3. Preview Restore Requests (No Mutation)
 
 ```bash
-bash iac/lab/bb3-db/restore-drill.sh preview \
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh preview \
   <snapshot-id> <restore-primary-id> <restore-replica-id>
 ```
 
@@ -91,7 +117,7 @@ replica-create request. References:
 ### 4. Restore Primary (Separate Confirmation)
 
 ```bash
-bash iac/lab/bb3-db/restore-drill.sh restore \
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh restore \
   <snapshot-id> <restore-primary-id> <restore-replica-id>
 ```
 
@@ -114,7 +140,7 @@ target and state; never submit the restore again under a new target without reco
 ### 5. Harden And Validate Primary
 
 ```bash
-bash iac/lab/bb3-db/restore-drill.sh harden-primary \
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-primary \
   <snapshot-id> <restore-primary-id> <restore-replica-id>
 ```
 
@@ -126,7 +152,7 @@ class, retention and windows before creating the replica.
 ### 6. Create And Harden Replica (Separate Confirmations)
 
 ```bash
-bash iac/lab/bb3-db/restore-drill.sh replica \
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh replica \
   <snapshot-id> <restore-primary-id> <restore-replica-id>
 ```
 
@@ -137,7 +163,7 @@ replica's subnet and parameter groups from the restored primary. Type `CREATE-RE
 After the replica is available:
 
 ```bash
-bash iac/lab/bb3-db/restore-drill.sh harden-replica \
+bash /Users/pa/dr-framework/iac/lab/bb3-db/restore-drill.sh harden-replica \
   <snapshot-id> <restore-primary-id> <restore-replica-id>
 ```
 
@@ -209,21 +235,21 @@ The following material applies to DEV EKS and the local Moto/LocalStack lab, not
 “Daily backup restore” can mean either of these:
 
 OPTION: First, check whether the local test containers are up:
->>bash iac/local.sh doctor
+>>bash /Users/pa/dr-framework/iac/local.sh doctor
 
 The required drtest-pg-restored container isn’t in the running list. First check whether it’s stopped or missing:
 drtest-pg-restored Exited (0) 6 hours ago
->>bash iac/local.sh db restored start
+>>bash /Users/pa/dr-framework/iac/local.sh db restored start
 Review the displayed plan and type APPLY when prompted. Send me the result before the next step. >>> Verified drtest-pg-restored running=true; data volume preserved.
 
->>>bash iac/local.sh ready
+>>>bash /Users/pa/dr-framework/iac/local.sh ready
 Engine: colima-dr-framework | linux/aarch64 | 28.4.0
 Context: colima-dr-framework
 deployment "app-d" successfully rolled out
 deployment "app-e" successfully rolled out
 deployment "reloader-alert-sink" successfully rolled out
 
->>>bash iac/local.sh dr S3 --dry-run
+>>>bash /Users/pa/dr-framework/iac/local.sh dr S3 --dry-run
 
 
 
@@ -258,7 +284,7 @@ The cluster also needs the `kube-system/dr-cluster-identity` ConfigMap identifyi
 `dr-env-discover.sh` queries AWS and, when it can access the cluster, reads Kubernetes Secret **names and key names only**. It does not read password values. It writes `env/dev.env` with mode `0600`; that real env file is git-ignored. Preview first:
 
 ```bash
-./automation/scripts/dr-env-discover.sh dev \
+bash /Users/pa/dr-framework/automation/scripts/dr-env-discover.sh dev \
   --profile dr-dev --region eu-west-1 \
   --db <current-primary-id> \
   --cluster <DEV-EKS-cluster> --context dr-dev \
@@ -278,16 +304,16 @@ With the current `SECRET_MODE=k8s`, app credentials must be available through th
 Source the generated file and make both checks pass:
 
 ```bash
-source env/dev.env
-./automation/scripts/dr-env-check.sh S4   # use S3 for snapshot restore
-./automation/scripts/dr-preflight.sh restore
+source /Users/pa/dr-framework/env/dev.env
+bash /Users/pa/dr-framework/automation/scripts/dr-env-check.sh S4   # use S3 for snapshot restore
+bash /Users/pa/dr-framework/automation/scripts/dr-preflight.sh restore
 ```
 
 Then inspect the runner’s steps and commands without making changes:
 
 ```bash
-./automation/scripts/dr-run.sh S4 --list
-./automation/scripts/dr-run.sh S4 --dry-run
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S4 --list
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S4 --dry-run
 ```
 
 For this DEV profile, use `SECRET_MODE=k8s`, confirm the Secret host keys are correct, and verify Reloader plus all database consumers. The preflight reports consumers that need a manual restart.
@@ -296,13 +322,13 @@ For this DEV profile, use `SECRET_MODE=k8s`, confirm the Secret host keys are co
 For a time-specific recovery from automated backups:
 
 ```bash
-./automation/scripts/dr-run.sh S4
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S4
 ```
 
 For a snapshot restore:
 
 ```bash
-./automation/scripts/dr-run.sh S3
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S3
 ```
 
 The runner pauses for incident inputs and approval gates. S4 needs the bad-change time, a restore time inside the available PITR window, and a decision between full cutover and side-instance repair. S3 prompts for the snapshot; the newest automated snapshot is the default. Review the restore plan before approving the restore. Both paths then wait for the new instance, harden it against the captured baseline, validate, verify app access, and require cutover approval before changing the endpoint. The cutover updates every configured host key, rolls annotated workloads via Reloader, and checks stale consumers.
@@ -310,7 +336,7 @@ The runner pauses for incident inputs and approval gates. S4 needs the bad-chang
 If you need to step away, note the printed `DR_ID` and resume that run rather than starting another:
 
 ```bash
-./automation/scripts/dr-run.sh S4 --resume <DR_ID>
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S4 --resume <DR_ID>
 ```
 
 After cutover, finish app-session and end-to-end checks, collect evidence, and follow the separate post-restore cleanup runbook. For S4, reconcile writes after the restore point with DBA/app-owner review before any failback or old-instance cleanup. The current local S4 also has a Terraform normalization stage; real DEV env changes follow the cleanup runbook and its reviewed IaC process.
@@ -345,13 +371,13 @@ For **real AWS**, use the same runner and IDs, but source the reviewed real envi
 
 ```bash
 aws sso login --profile YOUR_DEV_PROFILE
-./automation/scripts/dr-env-discover.sh dev --profile YOUR_DEV_PROFILE --region ap-southeast-1
+bash /Users/pa/dr-framework/automation/scripts/dr-env-discover.sh dev --profile YOUR_DEV_PROFILE --region ap-southeast-1
 # Review env/dev.env before sourcing it
-source env/dev.env
-./automation/scripts/dr-env-check.sh S3
-./automation/scripts/dr-run.sh S3 --list
-./automation/scripts/dr-run.sh S3 --dry-run
-./automation/scripts/dr-run.sh S3
+source /Users/pa/dr-framework/env/dev.env
+bash /Users/pa/dr-framework/automation/scripts/dr-env-check.sh S3
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S3 --list
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S3 --dry-run
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S3
 ```
 
 
@@ -360,11 +386,11 @@ Here are the options for the shared **S3/S4 step runner** in `dr-run.sh`.
 **Run it**
 ```bash
 # Local Moto/LocalStack
-bash iac/local.sh dr S3 [options]
+bash /Users/pa/dr-framework/iac/local.sh dr S3 [options]
 
 # Real AWS, after sourcing the reviewed environment file
-source env/dev.env
-./automation/scripts/dr-run.sh S3 [options]
+source /Users/pa/dr-framework/env/dev.env
+bash /Users/pa/dr-framework/automation/scripts/dr-run.sh S3 [options]
 ```
 
 Use `S4` instead of `S3` for PITR. The local wrapper currently accepts only `S3` and `S4`.
@@ -389,11 +415,11 @@ For S3, the runner may ask for `SNAPSHOT_ID`, `RESTORED_DB`, `OLD_DB`, `T0_AT`, 
 
 Examples:
 ```bash
-bash iac/local.sh dr S3 --list
-bash iac/local.sh dr S3 --dry-run
-bash iac/local.sh dr S3 --only P0-S01
-bash iac/local.sh dr S3 --to P2-S05
-bash iac/local.sh dr S3 --resume DR-20261014-0607-local-S3
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --list
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --dry-run
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --only P0-S01
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --to P2-S05
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --resume DR-20261014-0607-local-S3
 ```
 
 `DR_RUN_GATES=auto` and `DR_RUN_AUTO_NO=...` are **local test-only** controls, not real-AWS run options.
@@ -436,10 +462,10 @@ The local lab is already running. The normal entry point is `bash `local.sh` dr 
 Before a run, inspect without changing anything:
 
 ```bash
-bash iac/local.sh doctor
-bash iac/local.sh ready
-bash iac/local.sh dr S3 --list
-bash iac/local.sh dr S3 --dry-run
+bash /Users/pa/dr-framework/iac/local.sh doctor
+bash /Users/pa/dr-framework/iac/local.sh ready
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --list
+bash /Users/pa/dr-framework/iac/local.sh dr S3 --dry-run
 ```
 
 The local lab is Terraform-managed. Don’t use `up.sh` or `down.sh` to reset it; they are legacy scripts. A clean baseline requires a reviewed reset/rebuild plan, and evidence should be preserved.

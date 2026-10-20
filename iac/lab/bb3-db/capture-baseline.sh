@@ -9,12 +9,13 @@ if [[ $# -gt 2 ]]; then
   exit 2
 fi
 if [[ $# == 0 ]]; then
-  DRILL_ENV_FILE="${BB3_DRILL_ENV_FILE:-$HERE/drill.env}"
+  DRILL_ENV_FILE="${BB3_DRILL_ENV_FILE:-$ROOT/iac/sandbox.env}"
   git -C "$ROOT" check-ignore -q "$DRILL_ENV_FILE" \
     || { echo 'REFUSED: BB3 drill env file must be git-ignored.' >&2; exit 2; }
   [[ -f "$DRILL_ENV_FILE" ]] || { echo "Missing $DRILL_ENV_FILE; run discover-env.sh first." >&2; exit 2; }
   # shellcheck source=/dev/null
   source "$DRILL_ENV_FILE"
+  unset TF_VAR_terrakube_token
   PRIMARY="${BB3_SOURCE_PRIMARY_ID:-}"
   REPLICA="${BB3_SOURCE_REPLICA_ID:-}"
 else
