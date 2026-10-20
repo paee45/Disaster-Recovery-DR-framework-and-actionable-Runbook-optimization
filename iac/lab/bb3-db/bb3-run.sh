@@ -23,6 +23,7 @@ BB3 S3 RDS drill steps:
   P2-S07  Compare/harden new replica
   P2-S08  Wait for replica after hardening
   P2-S09  Check both saved targets (read-only)
+  P3-S02  Optional endpoint-only secret preview/update (explicit --only; not in all-RDS run)
 
 Run all RDS steps in order: bb3-run.sh S3
 Run selected steps only:  bb3-run.sh S3 --only P1-S02,P2-S00
@@ -176,12 +177,15 @@ run_step() {
     P2-S09)
       bash "$HERE/restore-drill.sh" status
       ;;
+    P3-S02)
+      bash "$HERE/secret-endpoints.sh" "$@"
+      ;;
     *) echo "Unknown BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; return 2 ;;
   esac
 }
 
 for CURRENT_STEP in "${STEPS[@]}"; do
-  [[ "$CURRENT_STEP" =~ ^P[12]-S[0-9]{2}$ ]] || { echo "Invalid BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; exit 2; }
+  [[ "$CURRENT_STEP" =~ ^P[123]-S[0-9]{2}$ ]] || { echo "Invalid BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; exit 2; }
   if [[ "$ONLY" != '' ]]; then
     run_step "$CURRENT_STEP" "${STEP_ARGS[@]}"
   else

@@ -10,12 +10,12 @@ without knowing the local checkout location. AWS CLI commands are location-indep
 
 - **S3** restores a new primary from an approved RDS snapshot. It does not restore an S3 object.
 - **S4** is point-in-time recovery. BB3 `restore-drill.sh` currently implements S3 only; BB3 S4 needs a
-  separately reviewed PITR implementation. Do not use the EKS `dr-run.sh` for BB3.
+   separately reviewed PITR implementation. Do not use the EKS `dr-run.sh` for BB3.
 - The source may have a primary and replica, or a primary only. A source replica remains attached to the old
-  primary after snapshot restore; it is never silently repointed.
+   primary after snapshot restore; it is never silently repointed.
 - RDS-only completion proves API/configuration/replica topology, not app recovery. App cutover is a separate
-  mode with owner approval. T9 requires app-owner confirmation of both endpoints and a successful business
-  transaction/readback reference.
+   mode with owner approval. T9 requires app-owner confirmation of both endpoints and a successful business
+   transaction/readback reference.
 
 ### 0. Incident And Identity
 
@@ -254,31 +254,27 @@ The following material applies to DEV EKS and the local Moto/LocalStack lab, not
 
 **Choose the restore type**
 
-
-
-
-
 **Choose the restore type**
 “Daily backup restore” can mean either of these:
 
 OPTION: First, check whether the local test containers are up:
->>bash iac/local.sh doctor
+
+> > bash iac/local.sh doctor
 
 The required drtest-pg-restored container isn’t in the running list. First check whether it’s stopped or missing:
 drtest-pg-restored Exited (0) 6 hours ago
->>bash iac/local.sh db restored start
-Review the displayed plan and type APPLY when prompted. Send me the result before the next step. >>> Verified drtest-pg-restored running=true; data volume preserved.
 
->>>bash iac/local.sh ready
-Engine: colima-dr-framework | linux/aarch64 | 28.4.0
-Context: colima-dr-framework
-deployment "app-d" successfully rolled out
-deployment "app-e" successfully rolled out
-deployment "reloader-alert-sink" successfully rolled out
+> > bash iac/local.sh db restored start
+> > Review the displayed plan and type APPLY when prompted. Send me the result before the next step. >>> Verified drtest-pg-restored running=true; data volume preserved.
 
->>>bash iac/local.sh dr S3 --dry-run
+> > > bash iac/local.sh ready
+> > > Engine: colima-dr-framework | linux/aarch64 | 28.4.0
+> > > Context: colima-dr-framework
+> > > deployment "app-d" successfully rolled out
+> > > deployment "app-e" successfully rolled out
+> > > deployment "reloader-alert-sink" successfully rolled out
 
-
+> > > bash iac/local.sh dr S3 --dry-run
 
 - **S3** in this repo means *restore from a snapshot* (not a backup stored in an S3 bucket). Use it when restoring to a daily snapshot point.
 - **S4** means *point-in-time restore from RDS automated backups*. Use it when you know when the bad change happened and need a restore point just before it. The configured retention is seven days.
@@ -325,7 +321,7 @@ Discovery can usually fill the account/profile, primary ID and RDS properties, t
 
 Review and fill missing values such as the app health URLs, tables to verify, incident ticket, and any cluster/Secret selection it could not resolve. Keep `DB_SUBNET_GROUP`, `DB_SG`, `DB_PARAM_GROUP`, and `DB_INSTANCE_CLASS` empty unless an approved override is needed: restore settings are captured from the live source baseline. Don’t put passwords in the env file.
 
-With the current `SECRET_MODE=k8s`, app credentials must be available through the configured Kubernetes Secret for automated login checks. `MASTER_SECRET_ID` is an **identifier** needed by helpers that use master credentials, such as fencing or `fix-password`; if the master password exists only in an external note, the scripts cannot retrieve it. Have the DBA perform those steps through the approved secure process, or provision a secure secret source. Never paste the password into the env file.
+With the current `SECRET_MODE=k8s`, app credentials must be available through the configured Kubernetes Secret for automated login checks. `MASTER_SECRET_ID` is an __identifier__ needed by helpers that use master credentials, such as fencing or `fix-password`; if the master password exists only in an external note, the scripts cannot retrieve it. Have the DBA perform those steps through the approved secure process, or provision a secure secret source. Never paste the password into the env file.
 
 **Check before running**
 Source the generated file and make both checks pass:
@@ -368,7 +364,6 @@ bash automation/scripts/dr-run.sh S4 --resume <DR_ID>
 
 After cutover, finish app-session and end-to-end checks, collect evidence, and follow the separate post-restore cleanup runbook. For S4, reconcile writes after the restore point with DBA/app-owner review before any failback or old-instance cleanup. The current local S4 also has a Terraform normalization stage; real DEV env changes follow the cleanup runbook and its reviewed IaC process.
 
-
 The steps below are for **S3 snapshot restore**. The `P*` IDs are from the automated runner, `dr-run.sh`. The manual runbook uses a different numbering scheme for some steps.
 
 | Runner step | What happens in a real S3 DR |
@@ -407,10 +402,10 @@ bash automation/scripts/dr-run.sh S3 --dry-run
 bash automation/scripts/dr-run.sh S3
 ```
 
-
 Here are the options for the shared **S3/S4 step runner** in `dr-run.sh`.
 
 **Run it**
+
 ```bash
 # Local Moto/LocalStack
 bash iac/local.sh dr S3 [options]
@@ -423,6 +418,7 @@ bash automation/scripts/dr-run.sh S3 [options]
 Use `S4` instead of `S3` for PITR. The local wrapper currently accepts only `S3` and `S4`.
 
 **Runner options**
+
 - `--help` — show usage.
 - `--list` — list step IDs and actions; no DR steps run.
 - `--dry-run` — preview the selected steps; no DR changes run.
@@ -437,10 +433,11 @@ Use `S4` instead of `S3` for PITR. The local wrapper currently accepts only `S3`
 
 There isn’t a `--start` or `--stop` option: use `--from` and `--to`. A gate is separate from step failure handling: type `GO` to pass it or `NO` to stop at that gate.
 
-**Inputs**
+__Inputs__
 For S3, the runner may ask for `SNAPSHOT_ID`, `RESTORED_DB`, `OLD_DB`, `T0_AT`, and the end-to-end test reference. For S4, it may ask for `BAD_TS` or `RESTORE_TS`, `RESTORE_MODE` (`A` or `B`), and the same DB/test-reference inputs. You can export inputs beforehand to skip their prompts; accepted inputs are saved for resume.
 
 Examples:
+
 ```bash
 bash iac/local.sh dr S3 --list
 bash iac/local.sh dr S3 --dry-run
@@ -449,9 +446,7 @@ bash iac/local.sh dr S3 --to P2-S05
 bash iac/local.sh dr S3 --resume DR-20261014-0607-local-S3
 ```
 
-`DR_RUN_GATES=auto` and `DR_RUN_AUTO_NO=...` are **local test-only** controls, not real-AWS run options.
-
-
+`DR_RUN_GATES=auto` and `DR_RUN_AUTO_NO=...` are __local test-only__ controls, not real-AWS run options.
 
 I’ll walk through the local S3 run from lab setup to evidence, including which scripts own each step and what actually mutates state. I’ll ground it in the current runner and call out local-Moto limits plus where S4 differs, rather than treating the simulator as real RDS.
 
@@ -498,7 +493,8 @@ bash iac/local.sh dr S3 --dry-run
 The local lab is Terraform-managed. Don’t use `up.sh` or `down.sh` to reset it; they are legacy scripts. A clean baseline requires a reviewed reset/rebuild plan, and evidence should be preserved.
 
 **What the S3 steps do**
-1. **P0 preflight:** Check required variables, tools, local AWS identity and Kubernetes context; then check the source DB, snapshots, Secret, and Reloader. `OLD_DB` is the current source; `RESTORED_DB` is a new target.
+
+1. __P0 preflight:__ Check required variables, tools, local AWS identity and Kubernetes context; then check the source DB, snapshots, Secret, and Reloader. `OLD_DB` is the current source; `RESTORED_DB` is a new target.
 2. **P1 incident and snapshot:** Record incident timing, list snapshots, and select one. The default is the newest automated snapshot. `P1-G1` asks for explicit approval to restore, acknowledging that writes after that snapshot may be lost.
 3. **P2 plan:** `dr-restore.sh plan snapshot` captures or loads the source baseline (RDS settings, tags, and PostgreSQL settings), builds the request, and makes no restore call.
 4. **P2 restore:** `dr-restore.sh snapshot` submits the restore API request for a new target. The runner inventories consumers and suspends CronJobs, then waits for the target to become available.

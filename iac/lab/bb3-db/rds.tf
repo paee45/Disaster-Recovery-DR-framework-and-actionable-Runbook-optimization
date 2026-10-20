@@ -13,6 +13,16 @@ resource "aws_security_group" "db_app" {
     protocol    = "tcp"
     cidr_blocks = [local.net.vpc_cidr]
   }
+  dynamic "ingress" {
+    for_each = var.bb3_tunnel_enabled ? [data.aws_instance.tunnel[0].private_ip] : []
+    content {
+      description = "Temporary SSM PostgreSQL tunnel host only"
+      from_port   = 5432
+      to_port     = 5432
+      protocol    = "tcp"
+      cidr_blocks = ["${ingress.value}/32"]
+    }
+  }
   tags = { Name = "${local.prefix}-db-app" }
 
   lifecycle {
@@ -34,8 +44,23 @@ resource "aws_subnet" "private" {
 
 resource "aws_route_table" "private" {
   vpc_id = local.net.vpc_id
-  route  = []
-  tags   = { Name = "${local.prefix}-private" }
+  route = var.bb3_tunnel_enabled ? [{
+    cidr_block                 = "${data.aws_instance.tunnel[0].private_ip}/32"
+    ipv6_cidr_block            = null
+    destination_prefix_list_id = null
+    carrier_gateway_id         = null
+    core_network_arn           = null
+    egress_only_gateway_id     = null
+    gateway_id                 = null
+    local_gateway_id           = null
+    nat_gateway_id             = null
+    network_interface_id       = null
+    odb_network_arn            = null
+    transit_gateway_id         = null
+    vpc_endpoint_id            = null
+    vpc_peering_connection_id  = aws_vpc_peering_connection.tunnel[0].id
+  }] : []
+  tags = { Name = "${local.prefix}-private" }
 }
 
 resource "aws_route_table_association" "private" {

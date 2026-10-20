@@ -305,17 +305,19 @@ jq -e --argjson model "$restore_model" --argjson source "$primary" --arg pg "$pr
 replica_restore_tags="$(build_tags "$replica_tags" "$TARGET_REPLICA" read-replica "$TARGET_PRIMARY")"
 replica_model="$(awsx rds create-db-instance-read-replica --generate-cli-skeleton input)"
 replica_request="$(jq -Sc --argjson tags "$replica_restore_tags" --arg id "$TARGET_REPLICA" \
-  --arg source "$TARGET_PRIMARY" --arg az "$REPLICA_AZ" --argjson model "$replica_model" "$JQ_LIBRARY"'
-  common_req($tags) + {DBInstanceIdentifier:$id,SourceDBInstanceIdentifier:$source,AvailabilityZone:$az}
+  --arg source "$TARGET_PRIMARY" --arg az "$REPLICA_AZ" --argjson model "$replica_model" \
+  --argjson primary "$primary" "$JQ_LIBRARY"'
+  common_req($tags) + {VpcSecurityGroupIds:[$primary.VpcSecurityGroups[].VpcSecurityGroupId],
+    DBInstanceIdentifier:$id,SourceDBInstanceIdentifier:$source,AvailabilityZone:$az}
   | del(.BackupRetentionPeriod,.PreferredBackupWindow,.DBSubnetGroupName,.DBParameterGroupName)
   | with_entries(select(.key as $key | $model | has($key))) | nonnull' <<<"$replica")"
-jq -e --argjson model "$replica_model" --argjson source "$replica" \
-  --arg id "$TARGET_REPLICA" --arg primary "$TARGET_PRIMARY" --arg az "$REPLICA_AZ" '
+jq -e --argjson model "$replica_model" --argjson source "$replica" --argjson primary "$primary" \
+  --arg id "$TARGET_REPLICA" --arg primary_id "$TARGET_PRIMARY" --arg az "$REPLICA_AZ" '
   (all(keys[]; . as $key | $model | has($key))) and
-  .DBInstanceIdentifier==$id and .SourceDBInstanceIdentifier==$primary and
+  .DBInstanceIdentifier==$id and .SourceDBInstanceIdentifier==$primary_id and
   .DBInstanceClass==$source.DBInstanceClass and
   (if $az=="" then (has("AvailabilityZone")|not) else .AvailabilityZone==$az end) and
-  ([.VpcSecurityGroupIds[]]|sort)==([$source.VpcSecurityGroups[].VpcSecurityGroupId]|sort) and
+  ([.VpcSecurityGroupIds[]]|sort)==([$primary.VpcSecurityGroups[].VpcSecurityGroupId]|sort) and
   .PubliclyAccessible==false and
   (has("DBSubnetGroupName")|not) and (has("DBParameterGroupName")|not) and
   (has("BackupRetentionPeriod")|not) and (has("PreferredBackupWindow")|not)
@@ -366,13 +368,15 @@ print_request_table() {
     ] end)
     | .[] | select(.[2] != null and .[2] != "" and .[2] != [])
     | [.[0], (.[1]|fmt), (.[2]|fmt),
-       (if $kind=="replica" and .[0]=="SourceDBInstanceIdentifier" then "EXPECTED: NEW RESTORE PRIMARY"
+      (if $kind=="replica" and .[0]=="SourceDBInstanceIdentifier" then "EXPECTED: NEW RESTORE PRIMARY"
+       elif $kind=="replica" and .[0]=="VpcSecurityGroupIds" then "EXPECTED: RESTORED PRIMARY SG SET"
         elif .[1]==null then "NEW" elif (.[1]|tojson)==(.[2]|tojson) then "MATCH"
         else "DIFF - REVIEW" end)] | @tsv
   ' | while IFS=$'\t' read -r field original value check; do
     case "$check" in
       MATCH) check="${GREEN}MATCH${RESET}" ;;
       'EXPECTED: NEW RESTORE PRIMARY') check="${GREEN}EXPECTED: NEW RESTORE PRIMARY${RESET}" ;;
+      'EXPECTED: RESTORED PRIMARY SG SET') check="${GREEN}EXPECTED: RESTORED PRIMARY SG SET${RESET}" ;;
       'DIFF - REVIEW') check="${RED}DIFF - REVIEW${RESET}" ;;
     esac
     printf '%-26s | %-34s | %-34s | %s\n' "$field" "${original:-not set}" "$value" "$check"
@@ -561,9 +565,11 @@ build_replica_harden_request() {
   [[ -n "$SOURCE_REPLICA" ]] || source="$primary"
   jq -cn --arg id "$TARGET_REPLICA" --arg group "$expected_replica_pg" \
     --arg maintenance "$(jq -r '.PreferredMaintenanceWindow // empty' <<<"$source")" \
-    --argjson current "$current" '
+    --argjson current "$current" --argjson primary "$restored_primary" '
       {DBInstanceIdentifier:$id}
       + (if $current.DBParameterGroups[0].DBParameterGroupName==$group then {} else {DBParameterGroupName:$group} end)
+      + (if ([$current.VpcSecurityGroups[].VpcSecurityGroupId]|sort)==([$primary.VpcSecurityGroups[].VpcSecurityGroupId]|sort)
+         then {} else {VpcSecurityGroupIds:[$primary.VpcSecurityGroups[].VpcSecurityGroupId]} end)
       + (if $maintenance=="" or $current.PreferredMaintenanceWindow==$maintenance then {} else {PreferredMaintenanceWindow:$maintenance} end)
       + {ApplyImmediately:true}'
 }
@@ -576,6 +582,7 @@ print_harden_table() {
   jq -nr --argjson b "$baseline" --argjson c "$current" --argjson r "$request" '
     def fmt: if .==null then "" elif type=="array" then join(",") else tostring end;
     [["DBParameterGroupName",$b.DBParameterGroups[0].DBParameterGroupName,$c.DBParameterGroups[0].DBParameterGroupName,$r.DBParameterGroupName],
+      ["VpcSecurityGroupIds",[$b.VpcSecurityGroups[].VpcSecurityGroupId],[$c.VpcSecurityGroups[].VpcSecurityGroupId],$r.VpcSecurityGroupIds],
      ["PreferredBackupWindow",$b.PreferredBackupWindow,$c.PreferredBackupWindow,$r.PreferredBackupWindow],
      ["PreferredMaintenanceWindow",$b.PreferredMaintenanceWindow,$c.PreferredMaintenanceWindow,$r.PreferredMaintenanceWindow],
      ["BackupRetentionPeriod",$b.BackupRetentionPeriod,$c.BackupRetentionPeriod,$r.BackupRetentionPeriod]]
@@ -713,10 +720,21 @@ case "$MODE" in
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-replica-request.XXXXXX")"
     trap cleanup EXIT
     printf '%s\n' "$replica_request" > "$request_file"
+    printf 'AWS command running: aws --profile %s --region %s --no-cli-pager rds create-db-instance-read-replica --cli-input-json file://%s\n' \
+      "$PROFILE" "$REGION" "$request_file"
+    jq -r '
+      "  DBInstanceIdentifier: \(.DBInstanceIdentifier)",
+      "  SourceDBInstanceIdentifier: \(.SourceDBInstanceIdentifier)",
+      "  DBInstanceClass: \(.DBInstanceClass)",
+      "  AvailabilityZone: \(.AvailabilityZone)",
+      "  VpcSecurityGroupIds: \(.VpcSecurityGroupIds|join(","))",
+      "  PubliclyAccessible: \(.PubliclyAccessible)"
+    ' "$request_file"
     awsx rds create-db-instance-read-replica --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,DBSubnetGroup.DBSubnetGroupName]' --output text
-    printf 'After replica availability, compare/apply its maintenance and parameter settings with:\n'
-    printf '%s\n' 'bash iac/lab/bb3-db/restore-drill.sh harden-replica'
+    printf '%s\n' 'In all-in-one mode, P2-S06 waits for availability; P2-S07 validates/hardens the replica.'
+    printf 'Selected-step commands: bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S06\n'
+    printf 'Then: bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S07\n'
     ;;
   harden-replica)
     restored_replica="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_REPLICA" --query 'DBInstances[0]' --output json)"
@@ -727,9 +745,6 @@ case "$MODE" in
       || { echo 'Target replica is not attached to the requested restored primary.' >&2; exit 2; }
     [[ "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$restored_replica")" == "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$restored_primary")" ]] \
       || { echo 'Restored replica subnet group differs from the restored primary.' >&2; exit 2; }
-    [[ "$(jq -r '[.VpcSecurityGroups[].VpcSecurityGroupId]|sort|join(",")' <<<"$restored_replica")" == \
-       "$(jq -r '[.VpcSecurityGroups[].VpcSecurityGroupId]|sort|join(",")' <<<"$restored_primary")" ]] \
-      || { echo 'Restored replica security groups differ from the restored primary.' >&2; exit 2; }
     expected_replica_source="$replica"; [[ -n "$SOURCE_REPLICA" ]] || expected_replica_source="$primary"
     expected_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$expected_replica_source")"
     current_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$restored_replica")"

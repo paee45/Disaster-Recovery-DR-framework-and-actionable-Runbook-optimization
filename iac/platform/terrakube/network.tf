@@ -27,6 +27,13 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.this.id
   }
+  dynamic "route" {
+    for_each = data.aws_subnet.bb3_tunnel
+    content {
+      cidr_block                = route.value.cidr_block
+      vpc_peering_connection_id = data.aws_vpc_peering_connection.bb3_tunnel[0].id
+    }
+  }
   tags = { Name = "${var.name}-public" }
 }
 

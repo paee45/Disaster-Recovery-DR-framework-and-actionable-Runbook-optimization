@@ -21,7 +21,7 @@ jq -n '{source:"primary-no-replica",account:"000000000000",region:"ap-southeast-
     DBInstanceStatus:"available",ReadReplicaDBInstanceIdentifiers:[],
     DBParameterGroups:[{DBParameterGroupName:"pg-original",ParameterApplyStatus:"in-sync"}],
     DBSubnetGroup:{DBSubnetGroupName:"subnets-original",VpcId:"vpc-original"},
-    VpcSecurityGroups:[{VpcSecurityGroupId:"sg-original"}],DBInstanceClass:"db.t4g.micro",
+    VpcSecurityGroups:[{VpcSecurityGroupId:"sg-original"},{VpcSecurityGroupId:"sg-primary-extra"}],DBInstanceClass:"db.t4g.micro",
     AvailabilityZone:"ap-southeast-1a",PubliclyAccessible:false,MultiAZ:false,BackupRetentionPeriod:7,
     PreferredBackupWindow:"18:00-18:30",PreferredMaintenanceWindow:"sun:19:00-sun:19:30",
     Endpoint:{Port:5432},Engine:"postgres",EngineVersion:"17.9",AllocatedStorage:20,StorageEncrypted:false,
@@ -54,7 +54,7 @@ aws() {
       snapshot_vpc=vpc-different; [[ "${TEST_NO_SNAPSHOT_DIFF:-}" != true ]] || snapshot_vpc=vpc-original
       printf '{"DBSnapshots":[{"DBSnapshotIdentifier":"snapshot-no-replica","DBSnapshotArn":"arn:aws:rds:ap-southeast-1:000000000000:snapshot:snapshot-no-replica","DBInstanceIdentifier":"primary-no-replica","Status":"available","Engine":"postgres","EngineVersion":"%s","Port":5432,"AllocatedStorage":20,"Encrypted":false,"VpcId":"%s","AvailabilityZone":"ap-southeast-1a"}]}\n' "$snapshot_version" "$snapshot_vpc" ;;
     'rds describe-db-instances')
-      local instance='{"DBInstanceIdentifier":"primary-no-replica","DBInstanceArn":"arn:aws:rds:ap-southeast-1:000000000000:db:primary-no-replica","DBInstanceStatus":"available","ReadReplicaDBInstanceIdentifiers":[],"DBParameterGroups":[{"DBParameterGroupName":"pg-original","ParameterApplyStatus":"in-sync"}],"DBSubnetGroup":{"DBSubnetGroupName":"subnets-original","VpcId":"vpc-original"},"VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-original"}],"DBInstanceClass":"db.t4g.micro","AvailabilityZone":"ap-southeast-1a","PubliclyAccessible":false,"MultiAZ":false,"BackupRetentionPeriod":7,"PreferredBackupWindow":"18:00-18:30","PreferredMaintenanceWindow":"sun:19:00-sun:19:30","Endpoint":{"Port":5432},"Engine":"postgres","EngineVersion":"17.9","AllocatedStorage":20,"StorageEncrypted":false,"DBName":"app","MasterUsername":"sandbox_admin","DeletionProtection":false,"CopyTagsToSnapshot":true,"AutoMinorVersionUpgrade":true,"IAMDatabaseAuthenticationEnabled":false,"NetworkType":"IPV4","EnabledCloudwatchLogsExports":[]}'
+      local instance='{"DBInstanceIdentifier":"primary-no-replica","DBInstanceArn":"arn:aws:rds:ap-southeast-1:000000000000:db:primary-no-replica","DBInstanceStatus":"available","ReadReplicaDBInstanceIdentifiers":[],"DBParameterGroups":[{"DBParameterGroupName":"pg-original","ParameterApplyStatus":"in-sync"}],"DBSubnetGroup":{"DBSubnetGroupName":"subnets-original","VpcId":"vpc-original"},"VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-original"},{"VpcSecurityGroupId":"sg-primary-extra"}],"DBInstanceClass":"db.t4g.micro","AvailabilityZone":"ap-southeast-1a","PubliclyAccessible":false,"MultiAZ":false,"BackupRetentionPeriod":7,"PreferredBackupWindow":"18:00-18:30","PreferredMaintenanceWindow":"sun:19:00-sun:19:30","Endpoint":{"Port":5432},"Engine":"postgres","EngineVersion":"17.9","AllocatedStorage":20,"StorageEncrypted":false,"DBName":"app","MasterUsername":"sandbox_admin","DeletionProtection":false,"CopyTagsToSnapshot":true,"AutoMinorVersionUpgrade":true,"IAMDatabaseAuthenticationEnabled":false,"NetworkType":"IPV4","EnabledCloudwatchLogsExports":[]}'
       if [[ "$*" == *'--db-instance-identifier replica-target'* ]]; then
         instance='{"DBInstanceIdentifier":"replica-target","DBInstanceArn":"arn:aws:rds:ap-southeast-1:000000000000:db:replica-target","ReadReplicaSourceDBInstanceIdentifier":"restore-primary","DBInstanceStatus":"available","DBParameterGroups":[{"DBParameterGroupName":"pg-original","ParameterApplyStatus":"in-sync"}],"DBSubnetGroup":{"DBSubnetGroupName":"subnets-original","VpcId":"vpc-original"},"VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-original"}],"DBInstanceClass":"db.t4g.micro","AvailabilityZone":"ap-southeast-1b","PubliclyAccessible":false,"BackupRetentionPeriod":0,"PreferredMaintenanceWindow":"sun:19:00-sun:19:30","Endpoint":{"Port":5432},"Engine":"postgres","EngineVersion":"17.9","AllocatedStorage":20,"StorageEncrypted":false,"DeletionProtection":false,"CopyTagsToSnapshot":true,"AutoMinorVersionUpgrade":true,"IAMDatabaseAuthenticationEnabled":false,"NetworkType":"IPV4","EnabledCloudwatchLogsExports":[]}'
       elif [[ "$*" == *'--db-instance-identifier restore-primary'* ]]; then
@@ -65,6 +65,8 @@ aws() {
     'rds describe-db-parameters')
       if [[ "$*" == *'--source user'* ]]; then
         printf '%s\n' '[]'
+      elif [[ "${TEST_PARAMETERS_MATCH:-}" == true ]]; then
+        printf '%s\n' '{"Parameters":[{"ParameterName":"max_connections","ParameterValue":"100","Source":"user"}]}'
       else
         printf '%s\n' '{"Parameters":[{"ParameterName":"max_connections","ParameterValue":"200","Source":"user"}]}'
       fi ;;
@@ -81,6 +83,9 @@ aws() {
     'rds create-db-instance-read-replica')
       [[ "$*" == *'--generate-cli-skeleton input'* ]] || return 98
       jq -nc '{DBInstanceIdentifier:"",SourceDBInstanceIdentifier:"",DBInstanceClass:"",AvailabilityZone:"",VpcSecurityGroupIds:[],PubliclyAccessible:false,DeletionProtection:false,CopyTagsToSnapshot:false,AutoMinorVersionUpgrade:false,EnableIAMDatabaseAuthentication:false,NetworkType:"",Port:0,EnableCloudwatchLogsExports:[],Tags:[]}' ;;
+    'rds modify-db-instance')
+      [[ "$*" == *'--generate-cli-skeleton input'* ]] || return 98
+      jq -nc '{DBInstanceIdentifier:"",VpcSecurityGroupIds:[],DBParameterGroupName:"",PreferredMaintenanceWindow:"",ApplyImmediately:false}' ;;
     *) echo "Unexpected AWS call: $*" >&2; return 98 ;;
   esac
 }
@@ -114,6 +119,7 @@ grep -F '200 [user]' "$TEMP/preview.txt" >/dev/null
 replica_table="$(sed -n '/Replica create request (populated fields only)/,/Expected inherited parameter group/p' "$TEMP/preview.txt")"
 [[ "$replica_table" == *'MATCH'* ]]
 [[ "$replica_table" == *'EXPECTED: NEW RESTORE PRIMARY'* ]]
+[[ "$replica_table" == *'sg-primary-extra'* ]]
 [[ "$replica_table" != *'DBSubnetGroupName'* && "$replica_table" != *'DBParameterGroupName'* ]]
 if grep -F 'rds restore-db-instance-from-db-snapshot --cli-input-json' "$TEMP/calls" >/dev/null \
   || grep -F 'rds create-db-instance-read-replica --cli-input-json' "$TEMP/calls" >/dev/null; then
@@ -155,6 +161,18 @@ fi
 grep -F 'New replica vs captured primary template' "$TEMP/replica-param-check.txt" >/dev/null
 grep -F 'full parameter API differs from the captured primary template' "$TEMP/replica-param-check.txt" >/dev/null
 echo 'PASS post-create replica validation compares all parameter records to the original primary template'
+if TEST_PARAMETERS_MATCH=true bash "$HERE/restore-drill.sh" harden-replica > "$TEMP/replica-sg-check.txt" 2>&1; then
+  echo 'FAIL replica SG mismatch was not gated for review' >&2
+  exit 1
+fi
+grep -F 'VpcSecurityGroupIds' "$TEMP/replica-sg-check.txt" >/dev/null
+grep -F 'sg-primary-extra' "$TEMP/replica-sg-check.txt" >/dev/null
+grep -F 'Confirmation requires an interactive terminal.' "$TEMP/replica-sg-check.txt" >/dev/null
+if grep -F 'rds modify-db-instance --cli-input-json' "$TEMP/calls" >/dev/null; then
+  echo 'FAIL replica SG test submitted a modify request' >&2
+  exit 1
+fi
+echo 'PASS replica SG parity is shown as a reviewed hardening change before mutation'
 bash "$HERE/restore-drill.sh" preview > "$TEMP/default-preview.txt" 2>&1
 grep -F 'Snapshot: snapshot-no-replica (source primary: primary-no-replica)' "$TEMP/default-preview.txt" >/dev/null
 grep -F 'Primary restore request (populated fields only)' "$TEMP/default-preview.txt" >/dev/null
