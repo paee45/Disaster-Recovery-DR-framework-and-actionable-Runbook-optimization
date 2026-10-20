@@ -4,14 +4,29 @@ set +x
 umask 077
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-if [[ $# != 2 ]]; then
-  echo "Usage: bash iac/lab/bb3-db/capture-baseline.sh <primary-db-id> <replica-db-id>" >&2
+if [[ $# -gt 2 ]]; then
+  echo "Usage: bash iac/lab/bb3-db/capture-baseline.sh [primary-db-id [replica-db-id]]" >&2
   exit 2
 fi
-PRIMARY="$1"; REPLICA="$2"
-[[ "$PRIMARY" =~ ^[A-Za-z][A-Za-z0-9-]*$ && "$REPLICA" =~ ^[A-Za-z][A-Za-z0-9-]*$ && "$PRIMARY" != "$REPLICA" ]] \
-  || { echo 'Two distinct RDS instance identifiers are required.' >&2; exit 2; }
-export AWS_PROFILE="${AWS_PROFILE:-beep}" AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+if [[ $# == 0 ]]; then
+  DRILL_ENV_FILE="${BB3_DRILL_ENV_FILE:-$HERE/drill.env}"
+  git -C "$ROOT" check-ignore -q "$DRILL_ENV_FILE" \
+    || { echo 'REFUSED: BB3 drill env file must be git-ignored.' >&2; exit 2; }
+  [[ -f "$DRILL_ENV_FILE" ]] || { echo "Missing $DRILL_ENV_FILE; run discover-env.sh first." >&2; exit 2; }
+  # shellcheck source=/dev/null
+  source "$DRILL_ENV_FILE"
+  PRIMARY="${BB3_SOURCE_PRIMARY_ID:-}"
+  REPLICA="${BB3_SOURCE_REPLICA_ID:-}"
+else
+  PRIMARY="$1"; REPLICA="${2:-}"
+fi
+[[ "$PRIMARY" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]] \
+  || { echo 'A valid primary RDS instance identifier is required.' >&2; exit 2; }
+if [[ -n "$REPLICA" ]]; then
+  [[ "$REPLICA" =~ ^[A-Za-z][A-Za-z0-9-]*$ && "$PRIMARY" != "$REPLICA" ]] \
+    || { echo 'Replica identifier must be valid and distinct from the primary.' >&2; exit 2; }
+fi
+export AWS_PROFILE="${AWS_PROFILE:-${BB3_AWS_PROFILE:-beep}}" AWS_REGION="${AWS_REGION:-${BB3_AWS_REGION:-ap-southeast-1}}"
 [[ -z "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}" ]] \
   || { echo 'REFUSED: unset exported AWS credentials; use the named profile.' >&2; exit 2; }
 unset AWS_DEFAULT_PROFILE
@@ -25,7 +40,12 @@ trap 'if [[ "$complete" != true ]]; then echo "Incomplete capture retained at $C
 aws --profile "$AWS_PROFILE" --region "$AWS_REGION" sts get-caller-identity --output json > "$CAPTURE/identity.json"
 jq -e '.Account | test("^[0-9]{12}$")' "$CAPTURE/identity.json" >/dev/null
 ACCOUNT="$(jq -r .Account "$CAPTURE/identity.json")"
-for role in primary replica; do
+if [[ -n "${BB3_ACCOUNT_ID:-}" && "$ACCOUNT" != "$BB3_ACCOUNT_ID" ]]; then
+  echo 'REFUSED: discovered baseline account does not match the current caller.' >&2
+  exit 2
+fi
+roles=(primary); [[ -n "$REPLICA" ]] && roles+=(replica)
+for role in "${roles[@]}"; do
   db="$PRIMARY"; [[ "$role" != replica ]] || db="$REPLICA"
   directory="$CAPTURE/$role"
   mkdir -p "$directory"
@@ -69,14 +89,20 @@ for role in primary replica; do
       instance:$description[0].DBInstances[0],tags:$tags[0].TagList,pgSettings:{},
       validationScope:"AWS API configuration only; no SQL or credential access"}' > "$directory/baseline.json"
 done
-jq -e --slurpfile source_instance "$CAPTURE/primary/instance.json" --arg primary "$PRIMARY" --arg replica "$REPLICA" '
-  (.DBInstances[0].ReadReplicaSourceDBInstanceIdentifier | split(":") | last) == $primary and
-  ($source_instance[0].DBInstances[0].ReadReplicaDBInstanceIdentifiers | index($replica)) != null' \
-  "$CAPTURE/replica/instance.json" >/dev/null
+if [[ -n "$REPLICA" ]]; then
+  jq -e --slurpfile source_instance "$CAPTURE/primary/instance.json" --arg primary "$PRIMARY" --arg replica "$REPLICA" '
+    (.DBInstances[0].ReadReplicaSourceDBInstanceIdentifier | split(":") | last) == $primary and
+    ($source_instance[0].DBInstances[0].ReadReplicaDBInstanceIdentifiers | index($replica)) != null' \
+    "$CAPTURE/replica/instance.json" >/dev/null
+else
+  jq -e '.DBInstances[0].ReadReplicaDBInstanceIdentifiers // [] | length == 0' \
+    "$CAPTURE/primary/instance.json" >/dev/null \
+    || { echo 'Primary has attached read replicas; supply the intended replica identifier to capture them too.' >&2; exit 2; }
+fi
 jq -n --arg at "$(date -u +%FT%TZ)" --arg profile "$AWS_PROFILE" --arg region "$AWS_REGION" \
-  --arg directory "$(basename "$CAPTURE")" \
+  --arg directory "$(basename "$CAPTURE")" --arg replica "$REPLICA" \
   '{schemaVersion:1,status:"complete",capturedAt:$at,profile:$profile,region:$region,directory:$directory,
-    primary:"primary/baseline.json",replica:"replica/baseline.json",
+    primary:"primary/baseline.json",replica:(if $replica=="" then null else "replica/baseline.json" end),
     parameters:"Each role contains full paginated AWS parameter definitions and values, not SQL pg_settings"}' \
   > "$CAPTURE/capture.json"
 hash_command=(shasum -a 256)

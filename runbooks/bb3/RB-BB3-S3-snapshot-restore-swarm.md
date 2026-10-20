@@ -47,12 +47,25 @@ Before a real drill, resolve these gates:
 
 ## 2. Roles And Execution Choices
 
-### Today's Scope: RDS Only
+### Scope And App Cutover Modes
 
-Provision the isolated sandbox primary and replica, create/select a sandbox snapshot, restore it into a new
-instance, and validate RDS API configuration and replica relationships. Do not connect to BB3 Swarm hosts,
-change the application secret, deploy services, or change real BB3 databases. No local Swarm fixture is required
-for this database-only session. The Terraform stack is [iac/lab/bb3-db](../../iac/lab/bb3-db/README.md).
+The default safe drill is RDS-only: provision/restore the isolated sandbox DBs and validate API configuration,
+parameter groups, network and replica relationships. App cutover is a separate optional phase. Do not connect
+to BB3 real environments or change their databases. No local Swarm fixture is currently provided. The DB stack
+is [iac/lab/bb3-db](../../iac/lab/bb3-db/README.md); the interactive AWS request flow is
+[`restore-drill.sh`](../../iac/lab/bb3-db/restore-drill.sh).
+
+Before app cutover, the incident commander and app owner select exactly one mode and record it. Both modes
+update the same existing mixed secret fields; neither may fetch or print the credential payload:
+
+| Mode | Secret change | Deployment/restart |
+|---|---|---|
+| `manual` | Authorized custodian changes only `DB_HOST` and `DB_REPLICA_HOST`; preserves `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and unrelated keys; records old/new version IDs | App owner connects to the approved EC2 host, verifies the approved `main` SHA, and runs `scripts/deploy.sh <dev|uat|prod>` or the explicitly reviewed restart procedure |
+| `ssh-script` | Allowed only if the reviewed GitHub script is verified to update both endpoint keys server-side; otherwise the custodian must update the secret manually first | App owner approves SSH; script verifies a clean `main`, fast-forward pulls, pins the approved SHA, runs `scripts/deploy.sh <dev|uat|prod>`, and verifies Swarm convergence. Dev/uat only until production approval |
+
+The `bb3-infrastructure` repository is not present in this workspace. Its deployment script must be reviewed at
+the approved SHA before enabling `ssh-script`; do not assume it updates Secrets Manager. Record the selected
+mode, approval, host, secret version IDs, commit SHA and result.
 
 Keep application-owner steps as explicit prompts/gates in the incident worksheet:
 
@@ -60,9 +73,9 @@ Keep application-owner steps as explicit prompts/gates in the incident worksheet
 |---|---|---|
 | P2-S02 | Have all writer/reader services and jobs been identified? Record owner and inventory reference | PENDING; the DB-copy test can continue, but no application cutover |
 | P3-G0 | Do you approve the exact target, fencing procedure, secret update and deployment? Record GO/NO and owner | PENDING/NO blocks all cutover actions |
-| P3-S02 | Has the custodian updated the reviewed secret endpoint fields? Record target, version IDs and reference | DEFERRED; do not run an updater or claim T6 |
-| P3-S03 | Have you deployed the approved commit to the correct Swarm environment? Record SHA and result | DEFERRED; no SSH, deploy script or T7 today |
-| P4-S02 | Did connectivity and a successful business transaction use the displayed target? Record yes/no, owner, evidence and GO | DEFERRED; no T9 or business-recovery claim |
+| P3-S02 | Did the selected mode update both `DB_HOST` and `DB_REPLICA_HOST` to the reviewed primary/replica endpoints? Record target IDs and old/new secret version IDs | PENDING until confirmed; no T6 |
+| P3-S03 | Did the selected manual or SSH mode deploy the approved commit and converge all expected Swarm services/tasks? Record mode, SHA and result | PENDING until verified; no T7 |
+| P4-S02 | Did the app owner confirm both displayed DB targets, run a successful business transaction/readback, record its transaction/reference number and evidence, and approve GO? | PENDING until confirmed; no T9 or business-recovery claim |
 
 The session result is **RDS restore/API validation only**, not end-to-end DR certification. Do not fabricate
 application answers to finish the tracker, and do not report business RTO until an actual T9 exists.
@@ -96,12 +109,14 @@ and [read-replica behavior](https://docs.aws.amazon.com/AmazonRDS/latest/UserGui
 | Data owner / DBA | Snapshot/data-loss acceptance; reconciliation through separately authorized access |
 | Application/platform owner | Mixed-secret custody, deploy script review, Swarm deployment and business E2E |
 
-Record these two choices independently before cutover:
+Choose and record one application cutover mode before P3-G0:
 
-| Choice | Manual | Script-assisted |
+| Mode | Secrets Manager endpoint update | Swarm deploy/restart |
 |---|---|---|
-| Secrets Manager update | Authorized secret custodian updates only reviewed endpoint keys and records old/new version IDs | Approved SSM Automation role updates the mixed JSON server-side; operator receives only endpoint/version metadata |
-| Swarm deployment | Owner SSHs to the environment host, pulls approved `main` and runs deployment | Reviewed SSH-assisted shell below, dev/uat only; explicit GO required |
+| `manual` | Authorized custodian updates only `DB_HOST` and `DB_REPLICA_HOST` in the existing mixed secret, preserving `DB_NAME`, `DB_USER`, `DB_PASSWORD` and unrelated keys; records previous/new version IDs | App owner connects to the approved environment EC2 host, verifies the approved `main` commit, then runs `scripts/deploy.sh <dev|uat|prod>` or the reviewed service restart procedure; records deployed SHA and convergence |
+| `ssh-script` | Only if the reviewed GitHub deployment script is verified to update both endpoint keys server-side. Otherwise the custodian updates the secret manually first. The operator receives version/endpoint metadata only, never the payload | App owner approves SSH; script verifies clean `main`, fast-forward pulls, checks the exact approved SHA, then runs `scripts/deploy.sh <dev|uat|prod>` and checks every Swarm service. Dev/uat only until production is separately approved |
+
+The `bb3-infrastructure` GitHub repository is not present in this workspace. Before enabling `ssh-script`, review its actual implementation at the approved commit and verify whether it updates the mixed secret or only deploys from its current value. Do not claim script-assisted secret updates work until that repository change is reviewed and tested. Record `APP_CUTOVER_MODE=manual|ssh-script`, the approval, host, commit SHA and result.
 
 **Production deployment is manual.** The owner opens SSH and obtains root privileges interactively before
 accessing the `projects` directory. Never pipe a password, automate `sudo su`, disable host-key checks,
@@ -122,6 +137,7 @@ export OLD_DB='{{SOURCE_DB_ID}}'
 export RESTORED_DB='{{NEW_UNIQUE_DB_ID}}'
 export SNAPSHOT_ID='{{APPROVED_RDS_SNAPSHOT_ID}}'
 export SECRET_ID='{{BB3_APP_SECRET_ID}}'
+export APP_CUTOVER_MODE='{{manual|ssh-script}}'
 export SWARM_SSH_HOST='{{ENVIRONMENT_SSH_HOST}}'
 export DEPLOY_COMMIT_SHA='{{APPROVED_FULL_MAIN_COMMIT_SHA}}'
 export DR_ID="DR-$(date -u +%Y%m%d-%H%M)-${DR_ENV}-BB3-S3"
@@ -149,10 +165,10 @@ implemented, the owner records UTC markers and approvals in the incident workshe
 | P2-S04 | Apply approved hardening; compare every required API setting/tag with the baseline, retention at least 7 days | Operator | 4 min | No unexpected drift; record accepted exceptions; no SQL/password fetch |
 | P3-G0 | Confirm validated target, secret/deploy modes, approved deployment commit and fencing plan; approve cutover | IC / app owner | Included below | No secret mutation or deployment before GO |
 | P3-S01 | Fence the original DB against all application writers, with a confirmed stop when eligible | Platform owner | 5 min total cutover | Stop is confirmed before app-owner E2E; an unreachable endpoint alone is not proof |
-| P3-S02 | Update endpoint through the selected manual/SSM method; record previous/new secret version IDs, target endpoint and T6 | Secret custodian / operator | Included in cutover | Credentials/unrelated keys preserved; no credential payload returned to operator |
-| P3-S03 | Deploy approved `main` through the chosen manual/SSH method; verify all expected services/tasks converge; record T7 | App owner | Included in cutover | Correct host/account, approved commit and deploy exit 0; not just any Running task |
+| P3-S02 | Use `APP_CUTOVER_MODE` to set `DB_HOST` to the restored primary and `DB_REPLICA_HOST` to its replica; record old/new secret version IDs, target IDs and T6 | Secret custodian / app owner | Included in cutover | Only endpoint keys change; `DB_NAME`, `DB_USER`, `DB_PASSWORD` and unrelated keys remain unchanged; no payload returned to DR operator |
+| P3-S03 | Use the selected manual or reviewed SSH-script mode to deploy/restart the approved `main` SHA; verify all expected Swarm tasks converge; record T7 | App owner | Included in cutover | Correct host/account, approved commit and deploy exit 0; not just any Running task |
 | P4-S01 | Confirm original remains fenced, target available and deployment no longer uses the prior endpoint; inspect service health/restarts | App owner / operator | 1 min | Old tasks drained, no stale consumers; jobs remain paused until safe |
-| P4-S02 | App owner confirms `yes/no` for the displayed target, records it automatically in evidence, supplies `APP_OWNER` and `E2E_REF`, and approves GO | App owner | 3 min | Connectivity AND successful business transaction on target; blank/no cannot record T9 |
+| P4-S02 | App owner confirms `yes/no` for displayed primary and replica targets, runs the approved business transaction/readback, records transaction number/reference and evidence, supplies `APP_OWNER`/`E2E_REF`, then approves GO | App owner | 3 min | Successful transaction on restored primary plus intended read path on restored replica; blank/no or failed proof cannot record T9 |
 | P4-G4 | Record T9 only after that attestation; declare restored, record T10 and resume approved jobs | IC / app owner | 1 min | Approver matches named app owner; application proof is separate from API status |
 | P5-S01 | Collect sanitized evidence and calculate RTO/RPO; record limitations and outstanding normalization | Operator | 1 min | T9-T0 includes waits; target misses retained, not adjusted away |
 

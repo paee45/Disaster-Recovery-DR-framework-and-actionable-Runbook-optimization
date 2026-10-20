@@ -1,3 +1,210 @@
+## BB3 AWS Sandbox DR Runbook
+
+Use this procedure for the AWS sandbox BB3 PostgreSQL drill. It is **not** real UAT, the local Moto/LocalStack
+lab, or the legacy EKS runner. `env/uat.env` belongs to that older EKS lab; BB3 commands read the named profile
+and account from the ignored `iac/sandbox.env`. Never fetch or print the mixed secret value.
+
+### Scope And Scenario
+
+- **S3** restores a new primary from an approved RDS snapshot. It does not restore an S3 object.
+- **S4** is point-in-time recovery. BB3 `restore-drill.sh` currently implements S3 only; BB3 S4 needs a
+  separately reviewed PITR implementation. Do not use the EKS `dr-run.sh` for BB3.
+- The source may have a primary and replica, or a primary only. A source replica remains attached to the old
+  primary after snapshot restore; it is never silently repointed.
+- RDS-only completion proves API/configuration/replica topology, not app recovery. App cutover is a separate
+  mode with owner approval. T9 requires app-owner confirmation of both endpoints and a successful business
+  transaction/readback reference.
+
+### 0. Incident And Identity
+
+Record the incident ID, IC, data owner, app owner, and UTC timestamps. `T0` is when the incident first affected
+service; `T1` is incident declaration. Do not substitute the operator's start time for T0.
+
+Verify the named sandbox account before any changes:
+
+```bash
+aws --profile pa_iam_aws_sandbox --region ap-southeast-1 sts get-caller-identity
+```
+
+Confirm it is the approved sandbox account. Use the approved named SSO profile instead if that is the selected
+credential. Never use default credentials or exported keys.
+
+### 1. Capture Original Baseline
+
+Capture before restore. The helper writes complete read-only AWS API metadata to the ignored
+`iac/lab/bb3-db/baselines/` directory. It does not read Secrets Manager values or SQL. The replica ID is
+optional only when the source primary has no attached replicas.
+
+Primary with replica:
+
+```bash
+AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
+  bash iac/lab/bb3-db/capture-baseline.sh <source-primary-id> <source-replica-id>
+```
+
+Primary only:
+
+```bash
+AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
+  bash iac/lab/bb3-db/capture-baseline.sh <source-primary-id>
+```
+
+Record the capture directory. Keep that baseline unchanged for the whole run. Confirm parameter groups are
+`in-sync`; the capture helper refuses a primary-only capture if AWS reports attached replicas and none were
+provided.
+
+### 2. Select Snapshot And Approve Data Loss
+
+List snapshots for the source primary and check timestamp, status and encryption:
+
+```bash
+aws --profile pa_iam_aws_sandbox --region ap-southeast-1 rds describe-db-snapshots \
+  --db-instance-identifier <source-primary-id> --snapshot-type automated \
+  --query 'DBSnapshots[].[DBSnapshotIdentifier,SnapshotCreateTime,Status,Encrypted]' --output table
+```
+
+Select an `available`, encrypted snapshot. Record its age and potential lost writes. Obtain data-owner
+acceptance, including the incident-to-snapshot loss window, then IC GO. Do not issue restore before this gate.
+Choose two unique targets: a restore primary and a new replica.
+
+### 3. Preview Restore Requests (No Mutation)
+
+```bash
+bash iac/lab/bb3-db/restore-drill.sh preview \
+  <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+The helper discovers whether the source has a replica and shows the primary and replica baselines separately.
+Tables include only populated API-supported request fields: `MATCH`, `NEW`, or `DIFF - REVIEW`. If no source
+replica exists, the output explicitly says `Original replica: not present` and uses the primary baseline as the
+new replica template.
+
+The snapshot-restore request includes the baseline parameter group, DB subnet group, all VPC security groups,
+class/AZ, private access, retention and backup window. Maintenance window is not accepted by that restore API;
+it is compared and applied later through `ModifyDBInstance`. For a same-Region read replica, AWS inherits its
+subnet and parameter groups from the restored primary, so those fields are intentionally omitted from the
+replica-create request. References:
+[RestoreDBInstanceFromDBSnapshot](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html),
+[CreateDBInstanceReadReplica](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstanceReadReplica.html),
+[ModifyDBInstance](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_ModifyDBInstance.html).
+
+### 4. Restore Primary (Separate Confirmation)
+
+```bash
+bash iac/lab/bb3-db/restore-drill.sh restore \
+  <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+The script rechecks the snapshot and unused target, displays only the primary request table, and waits for
+typed `RESTORE`. Review target, snapshot, parameter group, subnet group, SGs, class/AZ, retention/window,
+and private access. Cancel on an unexplained difference. This creates a billable DB.
+
+Check status without launching a second restore:
+
+```bash
+aws --profile pa_iam_aws_sandbox --region ap-southeast-1 rds describe-db-instances \
+  --db-instance-identifier <restore-primary-id> \
+  --query 'DBInstances[0].[DBInstanceStatus,DBSubnetGroup.DBSubnetGroupName,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus]' \
+  --output table
+```
+
+Continue only when status is `available`. If a request was accepted but a command/session failed, inspect the
+target and state; never submit the restore again under a new target without reconciliation.
+
+### 5. Harden And Validate Primary
+
+```bash
+bash iac/lab/bb3-db/restore-drill.sh harden-primary \
+  <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+This compares original baseline, current restored settings, and populated `ModifyDBInstance` fields. If
+needed, it prompts `APPLY-PARAMETER-GROUP` before changing parameter group, backup retention/window, and
+maintenance window. Recheck `available`, parameter group `in-sync`, subnet group, SG set, private exposure,
+class, retention and windows before creating the replica.
+
+### 6. Create And Harden Replica (Separate Confirmations)
+
+```bash
+bash iac/lab/bb3-db/restore-drill.sh replica \
+  <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+This step requires the restored primary to be available, baseline-matched, private, and parameter-group
+`in-sync`. The table shows only accepted `CreateDBInstanceReadReplica` values. AWS inherits the same-Region
+replica's subnet and parameter groups from the restored primary. Type `CREATE-REPLICA` only after review.
+
+After the replica is available:
+
+```bash
+bash iac/lab/bb3-db/restore-drill.sh harden-replica \
+  <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+This verifies the new replica is attached to the restored primary and has matching SG/subnet topology, then
+compares/hardens supported parameter-group and maintenance-window settings. Replica retention `0` is expected;
+do not apply the primary's 7-day retention to it. Record primary-ready and full-topology-ready timestamps
+separately.
+
+### 7. Optional App Cutover: Choose One Mode
+
+Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain P3-G0 GO. Select and
+record `APP_CUTOVER_MODE=manual` or `ssh-script`. Both modes update only these fields in the existing mixed
+secret:
+
+- `DB_HOST` = restored primary endpoint.
+- `DB_REPLICA_HOST` = new replica endpoint.
+- Preserve `DB_NAME`, `DB_USER`, `DB_PASSWORD` and unrelated keys.
+
+**Manual:** the authorized custodian updates the two endpoints and records old/new secret version IDs. The
+app owner connects to the approved host and runs the approved `scripts/deploy.sh <dev|uat|prod>` or reviewed
+restart procedure at the pinned commit SHA. Verify all expected services/tasks converge.
+
+**SSH script:** use only after reviewing the actual `bb3-infrastructure` GitHub deployment script at the
+approved SHA and verifying it updates both endpoint keys server-side without logging secret values. The
+app owner approves the host; script verifies clean `main`, fast-forward pulls, pins the SHA, updates endpoints
+only if that feature is verified, deploys and checks Swarm convergence. Dev/uat only until production is
+separately approved. The external repo is not in this workspace, so this mode is not yet certified.
+
+Do not stop, delete or promote source DBs ad hoc. An endpoint update alone does not prove existing tasks have
+loaded the new secret version; keep scheduled writers paused until app validation succeeds.
+
+### 8. App Validation And T9
+
+The app owner must confirm `yes/no` for both displayed endpoints, complete the approved business transaction
+on the restored primary and the intended readback through the new replica path, and record the transaction
+number/reference, UTC time, service/task version, owner and sanitized evidence. Do not include credentials or
+business payloads. If either endpoint or the transaction fails, stop: no T9 and no restored-service claim.
+Only app-owner GO after successful proof records T9. `available`, matching configuration, or green deployment
+is not business recovery.
+
+### 9. Failback And Postmortem
+
+Failback is a separate approved change. Account for writes on the restored DB and obtain data-owner
+reconciliation/sign-off first. Then use the selected manual/SSH mode to return both endpoint keys to the
+approved failback primary/replica, redeploy/restart, and repeat endpoint confirmation plus business
+transaction/readback before failback T9. Keep restored DBs and snapshots until reconciliation and retention
+decisions are approved; never auto-delete them.
+
+Record T0/T1/T2/T4/T5/T6/T7/T9/T10, snapshot reference and age, baseline and diff tables, approvals, old/new
+secret version IDs only, deployed SHA, task convergence, transaction reference, and final evidence hashes.
+Calculate business RTO as T9-T0; report replica/topology recovery separately. Postmortem: incident cause,
+data loss/reconciliation, timing by step, parameter/network mismatches, app transaction result, manual work,
+delays/failures, RTO/RPO misses, action owner/due date, and required changes before the next drill.
+
+BB3 S4/PITR is not implemented in this helper. Do not use the EKS runner for BB3 PITR; add and review a
+BB3-specific PITR request/approval flow before running that scenario.
+
+## Legacy DEV/EKS Reference
+
+The following material applies to DEV EKS and the local Moto/LocalStack lab, not the BB3 AWS sandbox Swarm run.
+
+**Choose the restore type**
+
+
+
+
+
 **Choose the restore type**
 “Daily backup restore” can mean either of these:
 

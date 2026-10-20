@@ -42,7 +42,10 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 bash "$HERE/restore-drill.sh" preview snapshot-no-replica restore-primary replica-target > "$TEMP/preview.txt" 2>&1
 grep -F 'Original replica: not present in source baseline.' "$TEMP/preview.txt" >/dev/null
 grep -F 'New replica request uses the primary baseline' "$TEMP/preview.txt" >/dev/null
-grep -F 'DBSubnetGroupName' "$TEMP/preview.txt" | grep -F 'Primary restore request' >/dev/null || true
+grep -F 'PreferredMaintenanceWindow' "$TEMP/preview.txt" >/dev/null
+replica_table="$(sed -n '/Replica create request (populated fields only)/,/Expected inherited parameter group/p' "$TEMP/preview.txt")"
+[[ "$replica_table" == *'MATCH'* ]]
+[[ "$replica_table" != *'DBSubnetGroupName'* && "$replica_table" != *'DBParameterGroupName'* ]]
 if grep -F 'rds restore-db-instance-from-db-snapshot --cli-input-json' "$TEMP/calls" >/dev/null \
   || grep -F 'rds create-db-instance-read-replica --cli-input-json' "$TEMP/calls" >/dev/null; then
   echo 'FAIL preview submitted a mutating RDS request' >&2

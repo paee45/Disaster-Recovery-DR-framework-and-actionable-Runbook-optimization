@@ -111,6 +111,41 @@ replication, not a Multi-AZ standby. Replica automated backups are disabled.
 
 ## Later Approved Usage
 
+### Interactive Snapshot Drill
+
+Use the BB3-only runner to preview and execute each RDS phase independently. It
+reads a complete sandbox snapshot and detects whether the source primary has a
+read replica. The preview prints only populated API request fields in comparison
+tables; `MATCH`, `NEW`, and `DIFF - REVIEW` are text indicators (color is optional).
+It never prints or retrieves the Secrets Manager payload.
+
+```bash
+# Read-only: compare original primary/replica baselines and the API requests
+bash iac/lab/bb3-db/restore-drill.sh preview <snapshot-id> <restore-primary-id> <restore-replica-id>
+
+# Separately confirm and start the primary restore
+bash iac/lab/bb3-db/restore-drill.sh restore <snapshot-id> <restore-primary-id> <restore-replica-id>
+
+# Once primary is available: compare/harden parameter group, backup window/retention,
+# and maintenance window (maintenance is not accepted by snapshot-restore API)
+bash iac/lab/bb3-db/restore-drill.sh harden-primary <snapshot-id> <restore-primary-id> <restore-replica-id>
+
+# Only after primary baseline validation: confirm and create a new replica
+bash iac/lab/bb3-db/restore-drill.sh replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+
+# Once replica is available: compare/harden inherited parameter group and maintenance window
+bash iac/lab/bb3-db/restore-drill.sh harden-replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+```
+
+The restore request explicitly supplies the captured subnet group, security groups,
+parameter group, class, retention and backup window. `PreferredMaintenanceWindow`
+is applied later through `ModifyDBInstance`. For same-Region read replicas, AWS
+inherits subnet and parameter groups from the restored primary; the replica create
+request intentionally omits these fields. When the source has no replica, preview
+shows `Original replica: not present` and uses the primary baseline to plan a new
+replica in a different subnet-group AZ. Each mutation has its own typed approval.
+The RDS-only process does not change application secrets or deploy Swarm services.
+
 These are future commands for the parent/operator, not commands run during
 implementation. Keep account/bucket values in ignored sandbox config. Set the
 explicit operator CIDR there or in the shell; the wrapper does not discover it.
@@ -167,7 +202,9 @@ separate disposal operation, never part of fencing or an automatic recovery step
 ```bash
 terraform fmt -check iac/lab/bb3-db
 bash -n iac/tf.sh
+bash -n iac/lab/bb3-db/restore-drill.sh
 bash iac/lab/bb3-db/test-wrapper.sh
+bash iac/lab/bb3-db/test-restore-drill.sh
 ```
 
 The wrapper test replaces configuration loading, Git ignore checks, AWS, curl and

@@ -17,17 +17,19 @@ Usage:
   bash iac/lab/bb3-db/restore-drill.sh restore <snapshot-id> <restore-primary-id> <restore-replica-id>
   bash iac/lab/bb3-db/restore-drill.sh harden-primary <snapshot-id> <restore-primary-id> <restore-replica-id>
   bash iac/lab/bb3-db/restore-drill.sh replica <snapshot-id> <restore-primary-id> <restore-replica-id>
+  bash iac/lab/bb3-db/restore-drill.sh harden-replica <snapshot-id> <restore-primary-id> <restore-replica-id>
 
 preview is read-only. restore creates a standalone primary from the snapshot.
 harden-primary attaches the captured parameter group if restore did not apply it.
 replica creates a new read replica after the restored primary is available.
-Both mutating actions display source/target parameter groups and require typed approval.
+harden-replica applies captured parameter/maintenance settings after replica availability.
+Every mutating action displays its comparison table and requires typed approval.
 EOF
   exit 2
 }
 [[ $# == 4 ]] || usage
 MODE="$1"; SNAPSHOT_ID="$2"; TARGET_PRIMARY="$3"; TARGET_REPLICA="$4"
-[[ "$MODE" =~ ^(preview|restore|harden-primary|replica)$ ]] || usage
+[[ "$MODE" =~ ^(preview|restore|harden-primary|replica|harden-replica)$ ]] || usage
 [[ "$SNAPSHOT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9:_-]*$ ]] || { echo 'Invalid snapshot identifier.' >&2; exit 2; }
 for id in "$TARGET_PRIMARY" "$TARGET_REPLICA"; do
   [[ "$id" =~ ^[A-Za-z][A-Za-z0-9-]{0,62}$ ]] || { echo 'Invalid target DB identifier.' >&2; exit 2; }
@@ -219,6 +221,9 @@ print_primary_confirmation() {
   printf 'Primary parameter group: original=%s; restore request=%s\n' \
     "$primary_pg" "$(jq -r '.DBParameterGroupName' <<<"$restore_request")"
   print_request_table 'Primary restore request (populated fields only)' primary "$primary" "$restore_request"
+  printf '\nPost-restore hardening (not sent in snapshot-restore request):\n'
+  printf 'PreferredMaintenanceWindow | baseline=%s | apply after restore with ModifyDBInstance\n' \
+    "$(jq -r '.PreferredMaintenanceWindow // "not set"' <<<"$primary")"
 }
 
 print_replica_confirmation() {
@@ -231,11 +236,67 @@ print_replica_confirmation() {
     print_request_table 'Replica create request (populated fields only)' replica "$primary" "$replica_request"
   fi
   printf 'Expected inherited parameter group: %s\n' "$primary_pg"
+  printf 'Expected post-create maintenance window: %s (apply with harden-replica if different)\n' \
+    "$(jq -r '.PreferredMaintenanceWindow // "not set"' <<<"$replica")"
 }
 
 print_preview() {
   print_primary_confirmation
   print_replica_confirmation
+}
+
+build_primary_harden_request() {
+  local current="$1" expected_retention
+  expected_retention="$(jq -er '[.BackupRetentionPeriod // 0, 7] | max' <<<"$primary")"
+  jq -cn --arg id "$TARGET_PRIMARY" --arg group "$primary_pg" \
+    --arg backup "$(jq -r '.PreferredBackupWindow // empty' <<<"$primary")" \
+    --arg maintenance "$(jq -r '.PreferredMaintenanceWindow // empty' <<<"$primary")" \
+    --argjson retention "$expected_retention" --argjson current "$current" '
+      {DBInstanceIdentifier:$id}
+      + (if $current.DBParameterGroups[0].DBParameterGroupName==$group then {} else {DBParameterGroupName:$group} end)
+      + (if $backup=="" or $current.PreferredBackupWindow==$backup then {} else {PreferredBackupWindow:$backup} end)
+      + (if $maintenance=="" or $current.PreferredMaintenanceWindow==$maintenance then {} else {PreferredMaintenanceWindow:$maintenance} end)
+      + (if $current.BackupRetentionPeriod==$retention then {} else {BackupRetentionPeriod:$retention} end)
+      + {ApplyImmediately:true}'
+}
+
+build_replica_harden_request() {
+  local current="$1" source="$replica"
+  [[ -n "$SOURCE_REPLICA" ]] || source="$primary"
+  jq -cn --arg id "$TARGET_REPLICA" --arg group "$primary_pg" \
+    --arg maintenance "$(jq -r '.PreferredMaintenanceWindow // empty' <<<"$source")" \
+    --argjson current "$current" '
+      {DBInstanceIdentifier:$id}
+      + (if $current.DBParameterGroups[0].DBParameterGroupName==$group then {} else {DBParameterGroupName:$group} end)
+      + (if $maintenance=="" or $current.PreferredMaintenanceWindow==$maintenance then {} else {PreferredMaintenanceWindow:$maintenance} end)
+      + {ApplyImmediately:true}'
+}
+
+print_harden_table() {
+  local title="$1" baseline="$2" current="$3" request="$4"
+  printf '\n%s\n' "$title"
+  printf '%-30s | %-34s | %-34s | %-34s | %s\n' 'Setting' 'Baseline' 'Current' 'Modify request' 'Check'
+  printf '%s\n' '-------------------------------+------------------------------------+------------------------------------+------------------------------------+-----------------'
+  jq -nr --argjson b "$baseline" --argjson c "$current" --argjson r "$request" '
+    def fmt: if .==null then "" elif type=="array" then join(",") else tostring end;
+    [["DBParameterGroupName",$b.DBParameterGroups[0].DBParameterGroupName,$c.DBParameterGroups[0].DBParameterGroupName,$r.DBParameterGroupName],
+     ["PreferredBackupWindow",$b.PreferredBackupWindow,$c.PreferredBackupWindow,$r.PreferredBackupWindow],
+     ["PreferredMaintenanceWindow",$b.PreferredMaintenanceWindow,$c.PreferredMaintenanceWindow,$r.PreferredMaintenanceWindow],
+     ["BackupRetentionPeriod",$b.BackupRetentionPeriod,$c.BackupRetentionPeriod,$r.BackupRetentionPeriod]]
+    | .[] | select(.[3]!=null)
+    | [.[0],(.[1]|fmt),(.[2]|fmt),(.[3]|fmt),"DIFF - REVIEW"] | @tsv
+  ' | while IFS=$'\t' read -r field baseline_value current_value request_value check; do
+    printf '%-30s | %-34s | %-34s | %-34s | %s%s%s\n' \
+      "$field" "${baseline_value:-not set}" "${current_value:-not set}" "$request_value" "$RED" "$check" "$RESET"
+  done
+}
+
+validate_modify_model() {
+  local request="$1" model="$2"
+  jq -e --argjson model "$model" '
+    all(keys[]; . as $key | $model | has($key)) and
+    ([keys[]|select(.!="DBInstanceIdentifier" and .!="ApplyImmediately")]|length)>0
+  ' <<<"$request" >/dev/null
 }
 
 require_absent() {
@@ -275,18 +336,20 @@ case "$MODE" in
     restored_primary="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_PRIMARY" --query 'DBInstances[0]' --output json)"
     [[ "$(jq -r '.DBInstanceStatus' <<<"$restored_primary")" == available ]] \
       || { echo 'Restored primary must be available before parameter-group hardening.' >&2; exit 2; }
-    current_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$restored_primary")"
-    current_pg_status="$(jq -r '.DBParameterGroups[0].ParameterApplyStatus // "unknown"' <<<"$restored_primary")"
-    if [[ "$current_pg" == "$primary_pg" && "$current_pg_status" == in-sync ]]; then
-      printf 'Restored primary parameter group matches baseline and is in-sync: %s\n' "$primary_pg"
+    harden_request="$(build_primary_harden_request "$restored_primary")"
+    if [[ "$(jq -r 'keys|length' <<<"$harden_request")" == 2 ]]; then
+      printf '%s\n' 'Restored primary backup window, maintenance window, retention and parameter group match the baseline; no modify request needed.'
       exit 0
     fi
-    printf 'Original primary group: %s\nRestored primary group: %s (%s)\nRequested hardening group: %s\n' \
-      "$primary_pg" "$current_pg" "$current_pg_status" "$primary_pg"
+    modify_model="$(awsx rds modify-db-instance --generate-cli-skeleton input)"
+    validate_modify_model "$harden_request" "$modify_model" || { echo 'Primary hardening request contains an unsupported API field.' >&2; exit 2; }
+    print_harden_table 'Primary post-restore hardening (baseline vs current vs ModifyDBInstance)' "$primary" "$restored_primary" "$harden_request"
     confirm APPLY-PARAMETER-GROUP
-    awsx rds modify-db-instance --db-instance-identifier "$TARGET_PRIMARY" \
-      --db-parameter-group-name "$primary_pg" --apply-immediately \
-      --query 'DBInstance.[DBInstanceStatus,DBInstanceIdentifier,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus]' \
+    request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-primary-harden.XXXXXX")"
+    trap 'rm -f "$request_file"' EXIT
+    printf '%s\n' "$harden_request" > "$request_file"
+    awsx rds modify-db-instance --cli-input-json "file://$request_file" \
+      --query 'DBInstance.[DBInstanceStatus,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus,PreferredBackupWindow,PreferredMaintenanceWindow,BackupRetentionPeriod]' \
       --output text
     ;;
   replica)
@@ -299,6 +362,12 @@ case "$MODE" in
     restored_pg_status="$(jq -r '.DBParameterGroups[0].ParameterApplyStatus // "unknown"' <<<"$restored_primary")"
     [[ "$restored_pg" == "$primary_pg" && "$restored_pg_status" == in-sync ]] \
       || { echo 'Restored primary must use the captured parameter group in-sync; run harden-primary first.' >&2; exit 2; }
+    [[ "$(jq -r '.BackupRetentionPeriod' <<<"$restored_primary")" == "$(jq -r '([.BackupRetentionPeriod // 0,7]|max)' <<<"$primary")" ]] \
+      || { echo 'Restored primary backup retention differs from baseline; run harden-primary first.' >&2; exit 2; }
+    [[ "$(jq -r '.PreferredBackupWindow' <<<"$restored_primary")" == "$(jq -r '.PreferredBackupWindow' <<<"$primary")" ]] \
+      || { echo 'Restored primary backup window differs from baseline; run harden-primary first.' >&2; exit 2; }
+    [[ "$(jq -r '.PreferredMaintenanceWindow' <<<"$restored_primary")" == "$(jq -r '.PreferredMaintenanceWindow' <<<"$primary")" ]] \
+      || { echo 'Restored primary maintenance window differs from baseline; run harden-primary first.' >&2; exit 2; }
     [[ "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$restored_primary")" == "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$primary")" ]] \
       || { echo 'Restored primary subnet group does not match the captured baseline.' >&2; exit 2; }
     [[ "$(jq -r '[.VpcSecurityGroups[].VpcSecurityGroupId]|sort|join(",")' <<<"$restored_primary")" == \
@@ -315,5 +384,40 @@ case "$MODE" in
     printf '%s\n' "$replica_request" > "$request_file"
     awsx rds create-db-instance-read-replica --cli-input-json "file://$request_file" \
       --query 'DBInstance.[DBInstanceStatus,DBInstanceClass,PubliclyAccessible,DBSubnetGroup.DBSubnetGroupName]' --output text
+    printf 'After replica availability, compare/apply its maintenance and parameter settings with:\n'
+    printf 'bash iac/lab/bb3-db/restore-drill.sh harden-replica %q %q %q\n' "$SNAPSHOT_ID" "$TARGET_PRIMARY" "$TARGET_REPLICA"
+    ;;
+  harden-replica)
+    restored_replica="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_REPLICA" --query 'DBInstances[0]' --output json)"
+    [[ "$(jq -r '.DBInstanceStatus' <<<"$restored_replica")" == available ]] \
+      || { echo 'Restored replica must be available before hardening.' >&2; exit 2; }
+    restored_primary="$(awsx rds describe-db-instances --db-instance-identifier "$TARGET_PRIMARY" --query 'DBInstances[0]' --output json)"
+    [[ "$(jq -r '.ReadReplicaSourceDBInstanceIdentifier | split(":") | last' <<<"$restored_replica")" == "$TARGET_PRIMARY" ]] \
+      || { echo 'Target replica is not attached to the requested restored primary.' >&2; exit 2; }
+    [[ "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$restored_replica")" == "$(jq -r '.DBSubnetGroup.DBSubnetGroupName' <<<"$restored_primary")" ]] \
+      || { echo 'Restored replica subnet group differs from the restored primary.' >&2; exit 2; }
+    [[ "$(jq -r '[.VpcSecurityGroups[].VpcSecurityGroupId]|sort|join(",")' <<<"$restored_replica")" == \
+       "$(jq -r '[.VpcSecurityGroups[].VpcSecurityGroupId]|sort|join(",")' <<<"$restored_primary")" ]] \
+      || { echo 'Restored replica security groups differ from the restored primary.' >&2; exit 2; }
+    expected_replica_source="$replica"; [[ -n "$SOURCE_REPLICA" ]] || expected_replica_source="$primary"
+    expected_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$expected_replica_source")"
+    current_replica_pg="$(jq -er '.DBParameterGroups[0].DBParameterGroupName' <<<"$restored_replica")"
+    current_replica_pg_status="$(jq -r '.DBParameterGroups[0].ParameterApplyStatus // "unknown"' <<<"$restored_replica")"
+    replica_harden_request="$(build_replica_harden_request "$restored_replica")"
+    if [[ "$(jq -r 'keys|length' <<<"$replica_harden_request")" == 2 && "$current_replica_pg" == "$expected_replica_pg" && "$current_replica_pg_status" == in-sync ]]; then
+      printf 'Replica parameter group and maintenance window match baseline and are in-sync; no modify request needed.\n'
+      exit 0
+    fi
+    modify_model="$(awsx rds modify-db-instance --generate-cli-skeleton input)"
+    validate_modify_model "$replica_harden_request" "$modify_model" || { echo 'Replica hardening request contains an unsupported API field.' >&2; exit 2; }
+    print_harden_table 'Replica post-create hardening (baseline vs current vs ModifyDBInstance)' "$expected_replica_source" "$restored_replica" "$replica_harden_request"
+    printf 'Parameter apply status: %s\n' "$current_replica_pg_status"
+    confirm APPLY-REPLICA-HARDEN
+    request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-replica-harden.XXXXXX")"
+    trap 'rm -f "$request_file"' EXIT
+    printf '%s\n' "$replica_harden_request" > "$request_file"
+    awsx rds modify-db-instance --cli-input-json "file://$request_file" \
+      --query 'DBInstance.[DBInstanceStatus,DBParameterGroups[0].DBParameterGroupName,DBParameterGroups[0].ParameterApplyStatus,PreferredMaintenanceWindow]' \
+      --output text
     ;;
 esac

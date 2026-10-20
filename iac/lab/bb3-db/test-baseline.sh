@@ -17,6 +17,8 @@ aws() {
       if [[ "$db" == offline-replica ]]; then
         link='"ReadReplicaSourceDBInstanceIdentifier":"offline-primary"'
         [[ "${TEST_FAILURE:-}" != topology ]] || link='"ReadReplicaSourceDBInstanceIdentifier":"wrong-primary"'
+      elif [[ "${TEST_REPLICA:-}" == none ]]; then
+        link='"ReadReplicaDBInstanceIdentifiers":[]'
       fi
       printf '{"DBInstances":[{"DBInstanceIdentifier":"%s","DBInstanceArn":"arn:aws:rds:ap-southeast-1:000000000000:db:%s","Engine":"postgres","EngineVersion":"17.9","DBParameterGroups":[{"DBParameterGroupName":"offline-pg"}],"DBSubnetGroup":{"DBSubnetGroupName":"offline-subnets"},"VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-offline"}],%s}]}\n' "$db" "$db" "$link" ;;
     'rds list-tags-for-resource') printf '%s\n' '{"TagList":[]}' ;;
@@ -56,6 +58,16 @@ for failure in parameters topology; do
 done
 [[ "$(wc -l < "$CALLS")" -ge 40 ]]
 echo 'PASS only pinned read-only AWS metadata actions executed'
+TEST_REPLICA=none bash "$SCRIPT" offline-primary >/dev/null
+single="$(jq -r .directory "$STORE/latest.json")"
+jq -e '.status == "complete" and .replica == null' "$STORE/$single/capture.json" >/dev/null
+[[ -f "$STORE/$single/primary/baseline.json" && ! -e "$STORE/$single/replica" ]]
+echo 'PASS primary-only source capture records no replica'
+if TEST_REPLICA=linked bash "$SCRIPT" offline-primary >/dev/null 2>&1; then
+  echo 'FAIL incomplete primary-only topology capture was accepted' >&2
+  exit 1
+fi
+echo 'PASS primary-only capture refuses when attached replicas are omitted'
 
 ROOT="$(cd "$HERE/../../.." && pwd)"
 RESTORE="$ROOT/automation/scripts/dr-restore.sh"
