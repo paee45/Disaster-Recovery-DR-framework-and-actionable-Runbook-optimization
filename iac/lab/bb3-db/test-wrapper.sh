@@ -64,4 +64,7 @@ TEST_AUTH=key check 2 'requires an SSO' lab/bb3-db uat plan
 TEST_PROFILE=pa_aws_sandbox TEST_AUTH=key check 0 '-var=aws_profile=pa_aws_sandbox' lab/bb3-db uat plan -out=bb3.plan
 TEST_PROFILE=pa_aws_sandbox TEST_AUTH=sso check 2 'requires an IAM-key' lab/bb3-db uat plan
 TEST_PROFILE=pa_aws_sandbox TEST_AUTH=key TEST_ACCOUNT=mismatch check 2 'account does not match' lab/bb3-db uat plan
+TEST_PROFILE=pa_iam_aws_sandbox TEST_AUTH=key check 0 '-var=aws_profile=pa_iam_aws_sandbox' lab/bb3-db uat plan -out=bb3.plan
+TEST_PROFILE=pa_iam_aws_sandbox TEST_AUTH=sso check 2 'requires an IAM-key' lab/bb3-db uat plan
+TEST_PROFILE=pa_iam_aws_sandbox TEST_AUTH=key TEST_ACCOUNT=mismatch check 2 'account does not match' lab/bb3-db uat plan
 TEST_ACCOUNT=mismatch check 2 'account does not match' lab/bb3-db uat plan

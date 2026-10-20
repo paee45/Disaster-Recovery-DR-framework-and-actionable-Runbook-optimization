@@ -109,8 +109,18 @@ wanted_tags() { # <restored-from> → JSON tag list: baseline tags (minus aws:*)
 }
 
 # restore request (shared part) — every setting the Restore* APIs accept, from the expected baseline
-restore_request() { # <op-specific-json> <restored-from>
-  jq -S --argjson op "$1" --argjson tags "$(wanted_tags "$2")" "$JQLIB"' restore_req($op; $tags)' <<<"$(expected_json)"
+restore_request() { # <op-specific-json> <restored-from> <api-op>
+  local request model unsupported
+  request="$(jq -S --argjson op "$1" --argjson tags "$(wanted_tags "$2")" "$JQLIB"' restore_req($op; $tags)' <<<"$(expected_json)")" || return 1
+  model="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds "$3" --generate-cli-skeleton input)" || return 1
+  unsupported="$(jq -ce --argjson model "$model" '
+    if ($model | type) != "object" then error("invalid CLI input skeleton") else
+      [keys[] | select(. == "BackupRetentionPeriod" or . == "PreferredBackupWindow")
+       | select(. as $key | $model | has($key) | not)] end' <<<"$request")" || return 1
+  if [[ "$unsupported" != '[]' ]]; then
+    echo "INFO $3: local AWS CLI does not support $(jq -r 'join(", ")' <<<"$unsupported") in the initial restore; post-restore harden will apply the expected baseline values (including the retention floor)." >&2
+  fi
+  jq -S --argjson unsupported "$unsupported" 'delpaths($unsupported | map([.]))' <<<"$request"
 }
 
 run_request() { # <api-op> <request-file> <description>
@@ -263,7 +273,7 @@ cmd_snapshot() { # <snap> <new>
   op="$(jq -n --arg new "$new" --arg snap "$snap" --argjson size "$size" --argjson b "$(jq .instance "$BASE")" \
         '{DBInstanceIdentifier: $new, DBSnapshotIdentifier: $snap}
          + (if ($b.AllocatedStorage // 0) > $size then {AllocatedStorage: $b.AllocatedStorage} else {} end)')"
-  req="$OUT/restore-request-${new}.json"; restore_request "$op" "$src@$snap" > "$req"
+  req="$OUT/restore-request-${new}.json"; restore_request "$op" "$src@$snap" restore-db-instance-from-db-snapshot > "$req"
   run_request restore-db-instance-from-db-snapshot "$req" "restore $snap → $new"
 }
 
@@ -290,7 +300,7 @@ cmd_pitr() { # <src> <new> <ts|latest>
   op="$(jq -n --arg new "$new" --argjson s "$s" --argjson t "$t" --argjson b "$(jq .instance "$BASE")" \
         '{TargetDBInstanceIdentifier: $new} + $s + $t
          + ({AllocatedStorage: $b.AllocatedStorage, MaxAllocatedStorage: $b.MaxAllocatedStorage} | with_entries(select(.value != null)))')"
-  req="$OUT/restore-request-${new}.json"; restore_request "$op" "$src@$ts" > "$req"
+  req="$OUT/restore-request-${new}.json"; restore_request "$op" "$src@$ts" restore-db-instance-to-point-in-time > "$req"
   run_request restore-db-instance-to-point-in-time "$req" "PITR $src → $new at $ts"
 }
 

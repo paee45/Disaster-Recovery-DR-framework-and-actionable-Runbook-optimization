@@ -1,13 +1,43 @@
 # Isolated BB3 Sandbox Database
 
-DB only: one PostgreSQL 16 primary and, by default, one physical RDS read replica
-in a different AZ. Both default to `db.t4g.micro`; the primary may use
-`db.t4g.small`. This stack creates no EKS, Swarm, application, IAM role, or policy.
+DB only: one PostgreSQL 17.9 primary and, by default, one physical RDS read replica
+in a different AZ. Both default to `db.t4g.micro`, the selected size for this drill.
+The custom parameter-group family is `postgres17`, with no user overrides, matching
+the observed UAT engine and absence of user-set parameters. Smaller instance sizing
+is intentional; it does not establish production performance parity.
+This stack creates no EKS, Swarm, application, IAM role, or policy.
 It does not manage existing `lab/db` resources or real BB3 databases.
 
-Identifiers are `dr-sandbox-bb3-<env>-primary` and
-`dr-sandbox-bb3-<env>-replica`. Environment tags describe a sandbox role, even
-when `<env>` is `prod`. Do not replace these identifiers with real BB3 names.
+The [sanitized UAT observation](uat-baseline.sanitized.json) records only prior
+read-only API results from 2026-10-19, supplemented with retention from the saved full capture. It is not a full
+restore baseline or a `dr-restore`-compatible instance capture. Unknown fields and
+full parameter values are omitted, identifiers use placeholders, and `labOverrides`
+are lab choices, not source observations. This remains internal configuration
+metadata: review internal access policies before sharing.
+
+The full raw capture is saved locally under ignored `baselines/<UTC>-<unique>/`, with
+`baselines/latest.json` pointing to the latest complete capture. It includes both full
+instance descriptions, tags, 437 API parameters per DB, parameter-group definitions,
+security-group rules and subnet metadata, plus an integrity manifest. No credentials
+or SQL were collected. Refreshing preserves prior captures; incomplete captures do
+not replace the latest reference.
+
+Use the **described values** for this drill: primary backup retention **7 days** and
+replica backup retention **0 days**. Terraform already matches these values. The earlier
+1-day discussion was hypothetical, not the observed UAT setting. Current snapshot
+and PITR APIs accept retention and the preferred backup window during restore. The
+host AWS CLI was upgraded to 2.38.1 and both fields are submitted from the approved
+baseline. The shared runner detects older CLI input models and explicitly defers
+only unsupported backup inputs to post-restore `ModifyDBInstance`; hardening and
+validation still check the final values. Do not assume the snapshot's data timestamp
+implies the current retention configuration was restored.
+Other differences such as the smaller sandbox class/storage and new sandbox network
+remain explicit lab choices, not claims of exact configuration parity.
+
+Identifiers are `dr-sandbox-bb3-<env>-primary-drill` and
+`dr-sandbox-bb3-<env>-replica-drill`. The older unsuffixed identifiers are not
+managed by this stack. Environment tags describe a sandbox role, even when
+`<env>` is `prod`. Do not replace these identifiers with real BB3 names.
 
 ## Prerequisites and State
 
@@ -23,8 +53,12 @@ State is separate: `lab/<env>/bb3-db/terraform.tfstate` in the existing sandbox
 bucket, with S3 native locking, encryption, and allowed-account checks.
 The existing `lab/shared/network/terraform.tfstate` supplies the VPC and AZ placement.
 Existing shared network resources are not changed. This stack creates two private
-subnets, a dedicated local-only route table and two route-table associations in
-that VPC. At plan time, subnet reads verify the first two shared placement subnets
+DB/app subnets tagged `dr-sandbox-bb3-<env>-db-app1` and
+`dr-sandbox-bb3-<env>-db-app2`, a dedicated local-only route table and two
+route-table associations in that VPC. Both are members of the DB subnet group
+selected by the snapshot restore request; a same-Region replica inherits its
+network placement from the restored primary. RDS subnets cannot be appended after
+the DB instance is restored. At plan time, subnet reads verify the first two shared placement subnets
 belong to this VPC and occupy different AZs.
 Authenticate and inspect the shared network separately before approved planning.
 
@@ -54,8 +88,12 @@ RDS API-only drill. No NAT gateway is required for these managed RDS operations.
 AWS does not support creating a PostgreSQL read replica from a source using
 [RDS-managed master credentials](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html#rds-secrets-manager-limitations).
 Instead, Terraform generates a sensitive 32-character password and writes a
-dedicated Secrets Manager secret. Outputs contain only its reference, never its
-contents. No DB password input, environment variable, secret read data source,
+dedicated Secrets Manager secret using the BB3 drill keys `DB_HOST`,
+`DB_REPLICA_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. `DB_USER` is the RDS
+master user `beepbeep` for this disposable sandbox only; never reuse this pattern
+for production application credentials. `DB_REPLICA_HOST` is empty when the
+optional replica is disabled. Outputs contain only the secret reference, never
+its contents. No DB password input, environment variable, secret read data source,
 or automatic rotation is provided. A custodian must separately approve any
 credential access or rotation. Keep this credential mode when disabling a replica
 so it can later be re-enabled without switching source credential management.

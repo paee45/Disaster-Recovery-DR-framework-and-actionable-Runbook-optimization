@@ -164,6 +164,12 @@ The platform owner prepares `aws/restore-request.json` and `aws/harden-request.j
 do not replace that work with CLI defaults. Existing `dr-restore.sh` is not yet a Kubernetes-free BB3 runner.
 If the original is lost, use a previously reviewed baseline, not guessed settings.
 
+Current snapshot and PITR restore inputs include `BackupRetentionPeriod` and `PreferredBackupWindow`.
+Supply their captured values (this baseline: 7-day writer retention), along with the supported network,
+parameter-group, class, storage and other restore fields. Host AWS CLI 2.38.1 supports both backup inputs.
+The shared request builder checks each operation's local CLI input model; on older CLIs it reports and defers
+only unsupported backup inputs to hardening. Always validate the final configuration after restore.
+
 ```bash
 aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots \
   --db-instance-identifier "$OLD_DB" --query 'DBSnapshots[].{ID:DBSnapshotIdentifier,At:SnapshotCreateTime,Status:Status,Encrypted:Encrypted}'

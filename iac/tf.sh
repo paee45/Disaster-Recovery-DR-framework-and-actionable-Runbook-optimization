@@ -42,7 +42,7 @@ lab_name="dr-lab"; platform_name="dr-platform"      # default resource-name pref
 if [[ "${1%/}" == lab/bb3-db ]]; then
   git -C "$HERE" check-ignore -q "$cfg" || die "BB3 settings must be in ignored sandbox config"
   [[ "$TF_VAR_account_id" =~ ^[0-9]{12}$ ]] || die "BB3 sandbox account must be 12 digits"
-  [[ ( "$profile" == lab_sandbox || "$profile" == pa_aws_sandbox ) && "$region" == ap-southeast-1 ]] || die "BB3 requires lab_sandbox or pa_aws_sandbox in ap-southeast-1"
+  [[ ( "$profile" == lab_sandbox || "$profile" == pa_aws_sandbox || "$profile" == pa_iam_aws_sandbox ) && "$region" == ap-southeast-1 ]] || die "BB3 requires lab_sandbox, pa_aws_sandbox or pa_iam_aws_sandbox in ap-southeast-1"
   [[ "${2:-}" =~ ^(dev|uat|prod)$ ]] || die "lab/bb3-db needs an env: dev | uat | prod"
   [[ "${3:-}" != stop && "${3:-}" != start ]] || die "BB3 primary with a replica cannot be stopped for fencing"
   [[ "${3:-}" != destroy ]] || die "BB3 teardown requires plan -destroy, review, then apply the saved plan"
@@ -77,7 +77,7 @@ if [[ "${1%/}" == lab/bb3-db ]]; then
   if [[ "$profile" == lab_sandbox ]]; then
     [[ "$auth" == sso ]] || die "BB3 requires an SSO lab_sandbox profile"
   else
-    [[ "$auth" == key ]] || die "BB3 requires an IAM-key pa_aws_sandbox profile"
+    [[ "$auth" == key ]] || die "BB3 requires an IAM-key sandbox profile"
   fi
 fi
 [[ "$auth" != none ]] || die "profile '$profile' is not configured in ~/.aws/config or ~/.aws/credentials (see iac/README.md, \"AWS login\")"
@@ -123,7 +123,7 @@ probe() {   # <stack> <env>
       [[ -n "$out" ]] && out="RDS instance $lab_name-$2-pg ($out)" ;;
     lab/bb3-db)
       out="$(awsx rds describe-db-instances \
-        --query "DBInstances[?DBInstanceIdentifier=='dr-sandbox-bb3-$2-primary' || DBInstanceIdentifier=='dr-sandbox-bb3-$2-replica'].DBInstanceStatus" \
+        --query "DBInstances[?DBInstanceIdentifier=='dr-sandbox-bb3-$2-primary' || DBInstanceIdentifier=='dr-sandbox-bb3-$2-replica' || DBInstanceIdentifier=='dr-sandbox-bb3-$2-primary-drill' || DBInstanceIdentifier=='dr-sandbox-bb3-$2-replica-drill'].DBInstanceStatus" \
         --output text 2>/dev/null || true)"
       [[ -n "$out" ]] && out="BB3 sandbox RDS instance(s) ($out)" ;;
     lab/app)

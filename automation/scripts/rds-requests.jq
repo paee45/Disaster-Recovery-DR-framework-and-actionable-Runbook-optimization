@@ -8,8 +8,8 @@
 #                       public access, storage type (+IOPS/throughput only where allowed), IAM auth, log exports, CA,
 #                       network type, dedicated log volume, backup target, license model,
 #                       engine lifecycle support, deletion protection, copy-tags, user tags (never aws:*)
-#                       (backup retention + window: create only; the Restore* APIs reject them, harden sets them)
-#   only via modify   : backup retention + window after a restore, maintenance window, max storage (snapshot), Enhanced Monitoring (interval + role),
+#                       backup retention + window (dr-restore.sh defers unsupported CLI inputs to harden)
+#   via modify        : deferred backup inputs on older CLIs; maintenance window, max storage (snapshot), Enhanced Monitoring (interval + role),
 #                       Performance Insights (+KMS key, retention), Database Insights mode, IAM roles (add-role)
 #   not settable      : UpgradeRolloutOrder (reported, not compared), StorageEncrypted/KmsKeyId (from the snapshot)
 
@@ -50,7 +50,7 @@ def common_req($tags):
   };
 
 # RestoreDBInstanceFromDBSnapshot / RestoreDBInstanceToPointInTime  ($op = identifiers + source + time)
-def restore_req($op; $tags): ((common_req($tags) | del(.BackupRetentionPeriod, .PreferredBackupWindow)) + $op) | nonnull;
+def restore_req($op; $tags): (common_req($tags) + $op) | nonnull;
 
 # CreateDBInstance: an EMPTY instance with the same configuration (test primary for local/dev/uat)
 # Password: RDS-managed in Secrets Manager (ManageMasterUserPassword) unless $ov.MasterUserPassword is given.

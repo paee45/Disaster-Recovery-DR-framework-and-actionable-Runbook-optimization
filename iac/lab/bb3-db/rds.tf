@@ -27,9 +27,9 @@ resource "aws_subnet" "private" {
   count                   = 2
   vpc_id                  = local.net.vpc_id
   availability_zone       = data.aws_subnet.placement[count.index].availability_zone
-  cidr_block              = cidrsubnet(local.net.vpc_cidr, 8, 32 + 2 * index(["dev", "uat", "prod"], var.env) + count.index)
+  cidr_block              = cidrsubnet(local.net.vpc_cidr, 8, 52 + 2 * index(["dev", "uat", "prod"], var.env) + count.index)
   map_public_ip_on_launch = false
-  tags                    = { Name = "${local.prefix}-private-${count.index + 1}" }
+  tags                    = { Name = "${local.prefix}-db-app${count.index + 1}" }
 }
 
 resource "aws_route_table" "private" {
@@ -45,7 +45,7 @@ resource "aws_route_table_association" "private" {
 }
 
 resource "aws_db_subnet_group" "this" {
-  name       = "${local.prefix}-subnets"
+  name       = "${local.prefix}-private-subnets"
   subnet_ids = aws_subnet.private[*].id
   lifecycle {
     precondition {
@@ -56,8 +56,8 @@ resource "aws_db_subnet_group" "this" {
 }
 
 resource "aws_db_parameter_group" "this" {
-  name   = "${local.prefix}-postgres16"
-  family = "postgres16"
+  name   = "${local.prefix}-postgres17"
+  family = "postgres17"
 }
 
 resource "random_password" "master" {
@@ -67,31 +67,29 @@ resource "random_password" "master" {
 
 resource "aws_secretsmanager_secret" "master" {
   name_prefix             = "${local.prefix}-master-"
-  description             = "BB3 sandbox master credentials; Terraform managed, not RDS managed"
+  description             = "Disposable BB3 sandbox drill credentials; master user, do not reuse outside the lab"
   recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "master" {
   secret_id = aws_secretsmanager_secret.master.id
   secret_string = jsonencode({
-    username = aws_db_instance.primary.username
-    password = random_password.master.result
-    engine   = "postgres"
-    host     = aws_db_instance.primary.address
-    port     = aws_db_instance.primary.port
-    dbname   = aws_db_instance.primary.db_name
+    DB_HOST         = aws_db_instance.primary.address
+    DB_REPLICA_HOST = coalesce(one(aws_db_instance.replica[*].address), "")
+    DB_NAME         = aws_db_instance.primary.db_name
+    DB_USER         = aws_db_instance.primary.username
+    DB_PASSWORD     = random_password.master.result
   })
 }
 
 resource "aws_db_instance" "primary" {
-  identifier                  = "${local.prefix}-primary"
-  engine                      = "postgres"
-  engine_version              = "16"
-  instance_class              = var.db_instance_class
-  db_name                     = "bb3sandbox"
-  username                    = "sandbox_admin"
-  password                    = random_password.master.result
-  manage_master_user_password = false
+  identifier     = "${local.prefix}-primary-drill"
+  engine         = "postgres"
+  engine_version = "17.9"
+  instance_class = var.db_instance_class
+  db_name        = "beepbeep3"
+  username       = "beepbeep"
+  password       = random_password.master.result
 
   allocated_storage      = 20
   max_allocated_storage  = 100
@@ -111,12 +109,12 @@ resource "aws_db_instance" "primary" {
   deletion_protection     = false
   skip_final_snapshot     = true
   apply_immediately       = true
-  tags                    = { Name = "${local.prefix}-primary", Role = "primary", backup-plan = "${var.env}-daily" }
+  tags                    = { Name = "${local.prefix}-primary-drill", Role = "primary", backup-plan = "${var.env}-daily" }
 }
 
 resource "aws_db_instance" "replica" {
   count                   = var.replica_enabled ? 1 : 0
-  identifier              = "${local.prefix}-replica"
+  identifier              = "${local.prefix}-replica-drill"
   replicate_source_db     = aws_db_instance.primary.identifier
   instance_class          = var.replica_instance_class
   availability_zone       = data.aws_subnet.placement[1].availability_zone
@@ -132,5 +130,5 @@ resource "aws_db_instance" "replica" {
   deletion_protection     = false
   skip_final_snapshot     = true
   apply_immediately       = true
-  tags                    = { Name = "${local.prefix}-replica", Role = "read-replica" }
+  tags                    = { Name = "${local.prefix}-replica-drill", Role = "read-replica" }
 }

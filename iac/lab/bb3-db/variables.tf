@@ -11,8 +11,8 @@ variable "aws_profile" {
   type    = string
   default = "lab_sandbox"
   validation {
-    condition     = contains(["lab_sandbox", "pa_aws_sandbox"], var.aws_profile)
-    error_message = "Only lab_sandbox (SSO) or pa_aws_sandbox (sandbox IAM user) is allowed."
+    condition     = contains(["lab_sandbox", "pa_aws_sandbox", "pa_iam_aws_sandbox"], var.aws_profile)
+    error_message = "Only lab_sandbox (SSO), pa_aws_sandbox or pa_iam_aws_sandbox (sandbox IAM user) is allowed."
   }
 }
 

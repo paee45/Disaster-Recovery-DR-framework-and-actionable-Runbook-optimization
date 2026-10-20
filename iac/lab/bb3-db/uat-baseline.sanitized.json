@@ -1,0 +1,60 @@
+{
+  "scope": "sanitized API summary supplemented from the saved full baseline; not a full restore request",
+  "fullCapture": false,
+  "observedDate": "2026-10-19",
+  "captureMethod": "prior read-only AWS CLI results and saved full API baseline; profile omitted; no new AWS calls",
+  "region": "ap-southeast-1",
+  "classification": "Sanitized internal configuration metadata; review internal access policies before sharing.",
+  "primary": {
+    "DBInstanceIdentifier": "{{UAT_PRIMARY_DB_ID}}",
+    "Engine": "postgres",
+    "EngineVersion": "17.9",
+    "DBInstanceClass": "db.t4g.small",
+    "DBInstanceStatus": "available",
+    "BackupRetentionPeriod": 7,
+    "DBParameterGroups": [
+      {
+        "DBParameterGroupName": "default.postgres17",
+        "ParameterApplyStatus": "in-sync"
+      }
+    ],
+    "readReplicaCount": 1,
+    "parameters": {
+      "family": "postgres17",
+      "userOverrides": [],
+      "fullParameterValuesCaptured": false
+    }
+  },
+  "replica": {
+    "DBInstanceIdentifier": "{{UAT_REPLICA_DB_ID}}",
+    "Engine": "postgres",
+    "EngineVersion": "17.9",
+    "DBInstanceClass": "db.t4g.micro",
+    "DBInstanceStatus": "available",
+    "BackupRetentionPeriod": 0,
+    "DBParameterGroups": [
+      {
+        "DBParameterGroupName": "{{UAT_REPLICA_PARAMETER_GROUP}}"
+      }
+    ],
+    "parameters": {
+      "family": "postgres17",
+      "userOverrides": [],
+      "fullParameterValuesCaptured": false
+    }
+  },
+  "limitations": [
+    "Both user-override queries returned []; the later full capture contains 437 API parameters per DB, stored separately in ignored baselines/.",
+    "This summary omits full parameter values, availability zones, networking, storage and encryption; consult the saved raw baseline for those fields.",
+    "This observation summary is not a dr-restore-compatible instance capture."
+  ],
+  "labOverrides": {
+    "primaryInstanceClass": "db.t4g.micro",
+    "replicaInstanceClass": "db.t4g.micro",
+    "engineVersion": "17.9",
+    "parameterGroupFamily": "postgres17",
+    "primaryBackupRetentionPeriod": 7,
+    "replicaBackupRetentionPeriod": 0,
+    "userOverrides": []
+  }
+}

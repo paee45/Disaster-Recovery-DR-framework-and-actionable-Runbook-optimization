@@ -1,6 +1,25 @@
 **Choose the restore type**
 “Daily backup restore” can mean either of these:
 
+OPTION: First, check whether the local test containers are up:
+>>bash iac/local.sh doctor
+
+The required drtest-pg-restored container isn’t in the running list. First check whether it’s stopped or missing:
+drtest-pg-restored Exited (0) 6 hours ago
+>>bash iac/local.sh db restored start
+Review the displayed plan and type APPLY when prompted. Send me the result before the next step. >>> Verified drtest-pg-restored running=true; data volume preserved.
+
+>>>bash iac/local.sh ready
+Engine: colima-dr-framework | linux/aarch64 | 28.4.0
+Context: colima-dr-framework
+deployment "app-d" successfully rolled out
+deployment "app-e" successfully rolled out
+deployment "reloader-alert-sink" successfully rolled out
+
+>>>bash iac/local.sh dr S3 --dry-run
+
+
+
 - **S3** in this repo means *restore from a snapshot* (not a backup stored in an S3 bucket). Use it when restoring to a daily snapshot point.
 - **S4** means *point-in-time restore from RDS automated backups*. Use it when you know when the bad change happened and need a restore point just before it. The configured retention is seven days.
 

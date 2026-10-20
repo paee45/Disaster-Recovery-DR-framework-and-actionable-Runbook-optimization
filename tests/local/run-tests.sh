@@ -123,14 +123,18 @@ c01() {
 }
 t  C01 "list-snapshots: two synthetic automated + one manual fixture" c01
 REQ="$DR_EVIDENCE_DIR/aws/restore-request-$RESTORED_DB.json"
-c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" '$fx[0] as $f | (.VpcSecurityGroupIds | length) == 3 and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)
+c01b() { "$S/dr-restore.sh" plan snapshot "$SNAP" "$RESTORED_DB" && jq -e --slurpfile fx "$FX" \
+                                         --argjson model "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds restore-db-instance-from-db-snapshot --generate-cli-skeleton input)" '
+                                         $fx[0] as $f | . as $request | (.VpcSecurityGroupIds | length) == 3
+                                         and all(["BackupRetentionPeriod", "PreferredBackupWindow"][]; . as $key |
+                                                 if $model | has($key) then $request[$key] == $f[$key] else $request | has($key) | not end)
            and .DBSubnetGroupName == $f.DBSubnetGroup.DBSubnetGroupName and .DBParameterGroupName == $f.DBParameterGroups[0].DBParameterGroupName
            and .EnableCloudwatchLogsExports == $f.EnabledCloudwatchLogsExports
            and .CopyTagsToSnapshot == $f.CopyTagsToSnapshot and .DeletionProtection and .CACertificateIdentifier == $f.CACertificateIdentifier
            and ([.Tags[] | select(.Key == "cost-center")][0].Value == "CC 1234 / retail") and ([.Tags[].Key] | index("dr-restore") != null)
            and ([.Tags[].Key | select(startswith("aws:"))] | length) == 0' "$REQ" \
          && ! command aws --profile dr-local rds describe-db-instances --db-instance-identifier "$RESTORED_DB" >/dev/null 2>&1; }
-t  C01b "plan: restore request from baseline (3 SGs, subnet group, PG, logs, CA, user tags; retention/window hardened afterward)" c01b
+t  C01b "plan: restore request from baseline (3 SGs, subnet group, PG, logs, CA, tags; backup inputs when CLI supports them)" c01b
 c02() { "$S/dr-restore.sh" snapshot "$SNAP" "$RESTORED_DB" && has "sgs=\[sg-[0-9a-f]+ sg-[0-9a-f]+ sg-[0-9a-f]+\]" "$LOGS/C02.log"; }
 t  C02 "restore snapshot with the baseline request (--cli-input-json)"  c02
 t  C03 "wait until available (progress + T5)"                          "$S/dr-restore.sh" wait "$RESTORED_DB"
@@ -234,9 +238,13 @@ f01() { dr_set_target "$REPLICA_DB" && aws --profile "$AWS_PROFILE" --region "$A
         && TIMEOUT_SECONDS=120 "$S/dr-verify.sh" wait-promoted; }
 t  F01 "S2 promote replica + wait-promoted (standalone + writable)"     f01
 f02() { "$S/dr-restore.sh" pitr "$PRIMARY_DB" "$PITR_DB" latest \
-                                && jq -e '(.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not)' \
+                                                                                                                                && jq -e --slurpfile fx "$FX" \
+                                                                                                                                                                --argjson model "$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds restore-db-instance-to-point-in-time --generate-cli-skeleton input)" '
+                                                                                                                                                                . as $request | (.VpcSecurityGroupIds | length) == 3 and .UseLatestRestorableTime
+                                                                                                                                                                and all(["BackupRetentionPeriod", "PreferredBackupWindow"][]; . as $key |
+                                                                                                                                                                        if $model | has($key) then $request[$key] == $fx[0][$key] else $request | has($key) | not end)' \
                                         "$DR_EVIDENCE_DIR/aws/restore-request-$PITR_DB.json"; }
-t  F02 "S4 PITR latest → restore request has 3 SGs and omits post-restore settings" f02
+t  F02 "S4 PITR latest → restore request has 3 SGs and CLI-supported backup inputs" f02
 t  F03 "S4 PITR: wait + harden → VALIDATED against the baseline"        bash -c "'$S/dr-restore.sh' wait '$PITR_DB' && '$S/dr-restore.sh' harden '$PITR_DB' | grep -q '→ VALIDATED\$'"
 
 echo "=== G. Evidence, KPIs, SSM documents, tracker"
@@ -303,7 +311,7 @@ ireq() { jq -S --argjson ov '{}' "$JQL"' (.TagList | userTags) as $t | expected(
 i01() { ireq 'restore_req({DBInstanceIdentifier:"x", DBSnapshotIdentifier:"s"}; $t)' | tee /dev/stderr | jq -e '
           (.VpcSecurityGroupIds | length) == 3 and .DBSubnetGroupName == "app-uat-rdssubnetgroup-example" and .DBParameterGroupName == "app-postgres-17"
           and (has("OptionGroupName") | not) and (has("Iops") | not) and (has("StorageThroughput") | not) and .Port == 5432
-          and (has("BackupRetentionPeriod") | not) and (has("PreferredBackupWindow") | not) and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
+          and .BackupRetentionPeriod == 7 and .PreferredBackupWindow == "18:01-18:31" and .CACertificateIdentifier == "rds-ca-rsa2048-g1"
           and .EnableCloudwatchLogsExports == ["postgresql"] and .DeletionProtection and (.CopyTagsToSnapshot == false)
           and .EngineLifecycleSupport == "open-source-rds-extended-support" and .BackupTarget == "region" and .LicenseModel == "postgresql-license"
           and .NetworkType == "IPV4" and ((.Tags // []) | length) == 0'; }

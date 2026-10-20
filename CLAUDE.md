@@ -69,12 +69,26 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **Restore input compatibility (2026-10-19):** host Homebrew AWS CLI upgraded from 2.33.12 to 2.38.1.
+  Current snapshot/PITR APIs and the new local input models accept `BackupRetentionPeriod` and
+  `PreferredBackupWindow`. Shared restore requests now retain the baseline values, including captured writer
+  retention 7 days. Per-operation CLI skeleton checks defer only unsupported backup inputs on older CLIs to
+  hardening with INFO; invalid/failed model discovery fails closed. Final hardening/validation remain required.
+  This is request generation/offline validation, not proof of a live sandbox restore; S3 state access is still blocked.
+- **BB3 full API baseline (2026-10-19):** completed read-only capture is in ignored
+  `iac/lab/bb3-db/baselines/<timestamp>/`; `latest.json` references only a complete capture.
+  Both DBs have 437 API parameters, no user overrides; actual retention is primary 7 days and replica 0 days.
+  Keep those described retention values for the drill, already matched by Terraform; 1 day was only a hypothetical.
+  Raw descriptions, parameter definitions/values, tags, SG rules and subnet metadata stay untracked; no credentials
+  or SQL fetched. The sanitized JSON remains a summary, not the full raw baseline or a restore request.
 - **BB3 RDS sandbox (2026-10-19):** `iac/lab/bb3-db` prepares an isolated PostgreSQL primary plus cross-AZ read replica,
-  both `db.t4g.micro` by default, in dedicated private subnets and a local-only route table. No public DB endpoint,
+  both `db.t4g.micro` by owner choice, PostgreSQL 17.9 with `postgres17` parameter family and no user overrides,
+  in dedicated private subnets and a local-only route table. No public DB endpoint,
   NAT gateway or laptop CIDR is required for AWS CLI API-only restore tests. Terraform schema validation and 20
   wrapper tests passed, including SSO/IAM-user authentication and wrong-account rejection. Nothing provisioned yet:
-  owner repaired SSO cache ownership/login, then requested `pa_aws_sandbox` IAM-user profile setup; enter keys locally
-  and verify the account before switching ignored config, generating and approving `bb3-private-uat.plan`. Today is RDS-only: Swarm secret,
+  `pa_aws_sandbox` IAM-user identity/account were verified and ignored config switched. Planning is blocked by S3
+  state-key access (403); IAM user also cannot inspect attached policies. Use owner-approved SSO or administrator-granted
+  permissions before generating and approving `bb3-private-uat.plan`. Today is RDS-only: Swarm secret,
   deployment and business E2E remain app-owner prompts/gates, not tested or certified. Read replicas and primaries
   with replicas cannot be stopped; a snapshot-restored DB does not inherit/repoint the existing replica.
 - **BB3 Swarm S3 (2026-10-19):** separate draft runbook `runbooks/bb3/RB-BB3-S3-snapshot-restore-swarm.md`
