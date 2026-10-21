@@ -23,7 +23,13 @@ BB3 S3 RDS drill steps:
   P2-S07  Compare/harden new replica
   P2-S08  Wait for replica after hardening
   P2-S09  Check both saved targets (read-only)
-  P3-S02  Optional endpoint-only secret preview/update (explicit --only; not in all-RDS run)
+  P3-S01  Stop standalone or attach run-scoped no-ingress SG; confirm existing sessions closed
+  P3-S02  Secret update: automatic CLI or verify manual update (explicit --only)
+  P3-S03  App deploy: automatic unavailable; confirm manual deployment (explicit --only)
+  P4-S01  Confirm app health check connects to restored DB; record T8 and stop Service RTO
+  P4-S02  Confirm business transaction/readback; record T9 separately
+
+Manual app-owner gate (not a runner command): P4-G4 declare services restored and record T10.
 
 Run all RDS steps in order: bb3-run.sh S3
 Run selected steps only:  bb3-run.sh S3 --only P1-S02,P2-S00
@@ -120,8 +126,8 @@ load_environment() {
 wait_for_target() {
   local target="$1" description="$2"
   load_environment
-  printf '%s: waiting for %s to become available. Press Ctrl+C to stop; the resume command will be printed.\n' \
-    "$CURRENT_STEP" "$target"
+  printf '%s: waiting for %s (%s) to become available. Press Ctrl+C to stop; the resume command will be printed.\n' \
+    "$CURRENT_STEP" "$target" "$description"
   aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
     --db-instance-identifier "$target"
   printf '%s: %s is available.\n' "$CURRENT_STEP" "$target"
@@ -177,15 +183,27 @@ run_step() {
     P2-S09)
       bash "$HERE/restore-drill.sh" status
       ;;
+    P3-S01)
+      bash "$HERE/fence-confirm.sh" "$@"
+      ;;
     P3-S02)
       bash "$HERE/secret-endpoints.sh" "$@"
+      ;;
+    P3-S03)
+      bash "$HERE/app-deploy-confirm.sh" "$@"
+      ;;
+    P4-S01)
+      bash "$HERE/app-recovery-confirm.sh" connectivity "$@"
+      ;;
+    P4-S02)
+      bash "$HERE/app-recovery-confirm.sh" e2e "$@"
       ;;
     *) echo "Unknown BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; return 2 ;;
   esac
 }
 
 for CURRENT_STEP in "${STEPS[@]}"; do
-  [[ "$CURRENT_STEP" =~ ^P[123]-S[0-9]{2}$ ]] || { echo "Invalid BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; exit 2; }
+  [[ "$CURRENT_STEP" =~ ^P[1234]-S[0-9]{2}$ ]] || { echo "Invalid BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; exit 2; }
   if [[ "$ONLY" != '' ]]; then
     run_step "$CURRENT_STEP" "${STEP_ARGS[@]}"
   else

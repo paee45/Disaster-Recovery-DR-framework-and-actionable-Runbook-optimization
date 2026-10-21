@@ -198,6 +198,66 @@ stop for review; the helper cannot recreate historical group contents. Replica r
 do not apply the primary's 7-day retention to it. Record primary-ready and full-topology-ready timestamps
 separately.
 
+### Script-Only Endpoint Update: Sandbox Test
+
+This isolated AWS CLI step updates only the BB3 sandbox secret endpoints. It does not change the BB3 application repository, deploy/restart services, or prove business recovery. The one-time SSM tunnel test passed read-only logins on the old primary, restored primary, old replica, and new replica; tunnels are closed. The existing EC2 host, peering, routes, and host-only PostgreSQL ingress remain active until separately approved cleanup.
+
+#### Prerequisites
+
+- Bash, Python 3, AWS CLI v2, and jq. The Python helper and tests use only the standard library.
+- Interactive terminal; approved named sandbox profile/account; ignored iac/sandbox.env with ENV=uat and all four DB IDs.
+- AWS permissions: STS identity; RDS DescribeDBInstances/ListTagsForResource; Secrets Manager ListSecrets/DescribeSecret/GetSecretValue/PutSecretValue/UpdateSecretVersionStage; and KMS access if required.
+- Exported AWS credentials are refused. AWS CLI history must not be enabled. Secret JSON stays in memory; SecretString is passed through stdin, not process arguments or payload files.
+- Metadata-only records are stored under Git-ignored evidence/bb3-secret-endpoints/<DR-ID>/ with restrictive permissions. Records contain endpoint/version metadata, never secret values.
+
+Focused checks:
+
+```bash
+python3 iac/lab/bb3-db/test-secret-endpoints.py
+bash -n iac/lab/bb3-db/secret-endpoints.sh
+shellcheck -S warning -x -P automation/scripts iac/lab/bb3-db/secret-endpoints.sh
+```
+
+#### Old DB Fence And Failback Constraint
+
+AWS permits temporary stop only for a standalone primary with no attached replicas and which is not itself a replica. It prohibits stopping a primary with a read replica and prohibits stopping a replica. P3-S01 checks live topology; only an eligible standalone primary offers a typed STOP-OLD-PRIMARY/STOP-RESTORED-PRIMARY action and waits for RDS stopped status. The current old pair has a replica, so no stop action was or will be attempted for this run. On failback, if the saved return primary is stopped and standalone, P3-S01 fences the active endpoint first, then requires START-RETURN-PRIMARY and waits for available. If the active standalone DB is already stopped, failback confirms its stopped state instead of sending another stop request. Reference: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html#USER_StopInstance.Limitations.
+
+P3-S01 checks live RDS topology. For a standalone primary it can stop and verify RDS status after typed approval; for a primary with replicas or a replica itself, stop is prohibited and only the separately reviewed manual network-fence attestation path is available. Pause/drain every application writer, reader, worker and scheduled job, then apply a separately reviewed security-group fence that blocks application sources from both active DB endpoints. Confirm with an evidence/ticket reference. For replica-backed pairs, P3-S01 can only record the manual network-fence owner attestation; it does not change or independently verify security-group rules. That path is not machine-verified and does not unlock P3-S02. A later read-only AWS security-group check found PostgreSQL ingress still permits the VPC CIDR and SSM tunnel host. No security-group fence was applied or verified, so the old pair is not confirmed isolated and app deployment/cutover must not proceed. A future network-fence implementation is required for safe automated continuation with replicas.
+
+Commands for a future run:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --apply
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03
+```
+
+P3-S02 offers automatic AWS CLI update or manual-update verification. Both show the primary/replica host pair; manual mode asks for confirmation that both values were updated, verifies them read-only, and does not write AWS. Any secret-changing apply requires the matching P3-S01 owner-fence record. For failback, run P3-S01 with --failback latest to attest the restored pair is fenced before returning the secret to the original hosts. Since RDS was never stopped, no instance start command is needed; remove the temporary network fence only under the approved failback plan.
+
+P3-S03 offers automatic app deploy (not implemented/tested; selecting it stops without action) or manual deploy confirmation. Manual confirmation records app owner, full deployed commit SHA, and evidence reference, and requires confirmation that all expected services/tasks converged. It is an owner attestation, not an independently verified deploy. P4-S02 business transaction/readback and P4-G4 T9 approval remain manual gates. Transaction ref 12345 was supplied, but app-owner name and UTC time are still missing, so T9 remains pending.
+#### Current Result
+
+Run DR-20261020-0756-uat-BB3-S3 completed. Preview verified the current DB_HOST/DB_REPLICA_HOST matched the old primary/replica and showed the restored primary/new replica hosts. After exact secret and DR-run confirmation plus UPDATE-ENDPOINTS, version 14bd1175-cb4c-4ba2-9ed6-de521641e891 became AWSCURRENT. Only endpoint keys changed; the password and unrelated fields were verified unchanged. The local journal is evidence/bb3-secret-endpoints/DR-20261020-0756-uat-BB3-S3/cutover.json. No application deployment, fencing, or business E2E was performed.
+
+#### Next: App Owner E2E
+
+Application testing is pending and requires the app owner/operator; do not claim T9 yet. The app owner must review the endpoint pair, deploy/restart using the separately approved application procedure, verify all expected services/tasks converge, then run a successful business transaction/readback against the restored primary and intended replica path. Ask the owner to confirm both displayed endpoints, provide the transaction/reference ID and UTC time, and state pass/fail. Do not request credentials or business payloads. Record sanitized evidence and owner approval; failure, missing reference, or no approval keeps E2E/T9 pending. The BB3 application repository remains untouched by this DR workflow.
+
+#### App E2E Attestation Status
+
+User supplied transaction reference 12345 and selected that both restored endpoints were verified. App-owner name and UTC completion time have not been supplied. Evidence is incomplete; do not record T9 or declare application recovery until the owner and timestamp are recorded. No credentials or business payloads were provided.
+
+#### Secret-Only Failback
+
+Failback uses the completed saved run, displays CURRENT and RETURN TO host values, and requires typed FAILBACK-ENDPOINTS. It merges the saved endpoint pair into the latest secret version so any subsequently rotated password is preserved:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --failback latest --preview
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --failback latest --apply
+```
+
+This does not reconcile database writes or deploy/restart apps. No SSM Automation or new Terraform was deployed for the endpoint update.
+
 ### 7. Optional App Cutover: Choose One Mode
 
 Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain P3-G0 GO. GO must be

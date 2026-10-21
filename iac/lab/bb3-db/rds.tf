@@ -135,6 +135,10 @@ resource "aws_db_instance" "primary" {
   skip_final_snapshot     = true
   apply_immediately       = true
   tags                    = { Name = "${local.prefix}-primary-drill", Role = "primary", backup-plan = "${var.env}-daily" }
+
+  lifecycle {
+    ignore_changes = [vpc_security_group_ids]
+  }
 }
 
 resource "aws_db_instance" "replica" {
@@ -156,4 +160,8 @@ resource "aws_db_instance" "replica" {
   skip_final_snapshot     = true
   apply_immediately       = true
   tags                    = { Name = "${local.prefix}-replica-drill", Role = "read-replica" }
+
+  lifecycle {
+    ignore_changes = [vpc_security_group_ids]
+  }
 }

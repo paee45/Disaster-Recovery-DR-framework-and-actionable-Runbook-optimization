@@ -78,7 +78,7 @@ if [[ "$SC" == S3 ]]; then
     "P3-G0|gate|GO for the cutover (restored DB VALIDATED and verified)|dr_mark DECISION …"
     "${CUTOVER_STEPS[0]/FENCE/P3-S01}" "${CUTOVER_STEPS[1]/APPLY/P3-S02}" "${CUTOVER_STEPS[2]/AFTER/P3-S03}"
     "P4-S01|check|confirm old DB stopped if requested, then inspect app sessions|dr-fence-instance.sh wait-stopped (FENCE=stop); dr-verify.sh connections"
-    "P4-S02|input|E2E: dashboard + one test transaction (playbook) → T9|dr_mark T9 \"e2e ref=…\""
+    "P4-S02|input|confirm app connectivity → T8; record business E2E transaction/readback → T9|dr_mark_once T8; dr_mark T9 \"e2e ref=…\""
     "P4-G4|gate|declare services restored → T10 + phase summary|dr_mark T10; dr_summary"
     "P5-S01|change|evidence bundle: KPIs, CloudTrail, RDS events, SHA-256 manifest → WORM bucket|dr-collect-evidence.sh")
   declare -A NEEDS=([P1-G1]="P0-S03 P1-S02" [P2-S00]=P1-S02 [P2-S01]="P1-G1 P2-S00" [P2-S03]=P2-S01 [P2-S04]=P2-S03 [P2-S05]=P2-S04
@@ -124,8 +124,8 @@ if [[ "${DR_DB_ACCESS:-none}" == none ]]; then
     CMD[P2-S05]='dr-restore.sh validate $RESTORED_DB (no SQL or credential access)'
     TITLE[P4-S01]='confirm original stop, endpoint destination and consumer rollouts'
     CMD[P4-S01]='wait-stopped; verify-routing; consumer check'
-    TITLE[P4-S02]='app owner attests restored-DB connectivity and business E2E -> T9'
-    CMD[P4-S02]='APP_OWNER + APP_DB_DESTINATION + E2E_REF; app-owner GO gate'
+    TITLE[P4-S02]='confirm app connectivity -> T8; attest business transaction/readback -> T9'
+    CMD[P4-S02]='APP_OWNER + APP_DB_DESTINATION health check -> T8; E2E_REF + app-owner GO -> T9'
   else
     TITLE[P2-S03]='app/data-owner PITR-point review evidence; no operator SQL'
     CMD[P2-S03]='record RESTORE_POINT_REF'
@@ -135,8 +135,8 @@ if [[ "${DR_DB_ACCESS:-none}" == none ]]; then
     CMD[P3A-G0]='inventory/suspend CronJobs; API validation; GO'
     TITLE[P3A-S04]='confirm original stop, endpoint destination and consumer rollouts'
     CMD[P3A-S04]='wait-stopped; verify-routing; consumer check'
-    TITLE[P3A-S05]='app owner attests restored-DB connectivity and business E2E -> T9'
-    CMD[P3A-S05]='APP_OWNER + APP_DB_DESTINATION + E2E_REF; app-owner GO gate'
+    TITLE[P3A-S05]='confirm app connectivity -> T8; attest business transaction/readback -> T9'
+    CMD[P3A-S05]='APP_OWNER + APP_DB_DESTINATION health check -> T8; E2E_REF + app-owner GO -> T9'
   fi
 fi
 for _i in "$FROM" "$TO"; do [[ -z "$_i" || -n "${POS[$_i]:-}" ]] || { echo "unknown step id: $_i (see --list)"; exit 2; }; done
@@ -452,20 +452,21 @@ e2e() {
   fi
   if [[ "${DR_DB_ACCESS:-readonly}" == none ]]; then
     connections || return 1
-    ask APP_OWNER 'Application owner who verified DB connectivity and a business transaction' || return 1
+    ask APP_OWNER 'Application owner completing restored-DB validation' || return 1
     [[ -z "${APP_DB_DESTINATION:-}" || "$APP_DB_DESTINATION" == "$RESTORED_DB" ]] || { echo 'App destination does not match RESTORED_DB'; unset APP_DB_DESTINATION; save_vars; return 1; }
     local destination_confirmed=no
-    echo "Did you verify application connectivity and a successful business transaction on $RESTORED_DB?"
+    echo "Did the running application pass its DB health check against $RESTORED_DB?"
     if has_tty; then
-      tty_prompt '   │ Confirm this DB [yes/no]> '; read -r destination_confirmed </dev/tty
+      tty_prompt '   │ Confirm app connectivity [yes/no]> '; read -r destination_confirmed </dev/tty
     elif (( AUTO )); then
-      destination_confirmed=yes; echo 'Destination confirmed automatically (local test bed).'
+      destination_confirmed=yes; echo 'App connectivity confirmed automatically (local test bed).'
     fi
     [[ "${destination_confirmed,,}" == yes || "${destination_confirmed,,}" == y ]] \
-      || { echo 'App destination not confirmed; business recovery remains unverified.' >&2; return 1; }
+      || { echo 'App connectivity not confirmed; T8 and service RTO remain pending.' >&2; return 1; }
     export APP_DB_DESTINATION="$RESTORED_DB"
     save_vars
-    ask E2E_REF 'Evidence proving application DB connectivity AND a successful business transaction on the restored DB' || return 1
+    dr_mark_once T8 "app-owner=$APP_OWNER target=$RESTORED_DB application DB health check passed"
+    ask E2E_REF 'Evidence for the separate successful business transaction and readback on the restored DB' || return 1
     [[ "$APP_OWNER" =~ [^[:space:]] && "$E2E_REF" =~ [^[:space:]] && ! "${APP_OWNER^^}" =~ ^(GO|NO|RECONCILED|ACCEPT_LOCAL_DATA_LOSS)$ ]] \
       || { echo 'A named application owner and meaningful evidence reference are required.' >&2; return 1; }
     gate E2E-APP-OWNER "App owner $APP_OWNER confirms business E2E on $RESTORED_DB; evidence=$E2E_REF; operator ran no SQL" || return $?
@@ -473,7 +474,17 @@ e2e() {
     dr_mark T9 "app-owner=$APP_OWNER target=$RESTORED_DB e2e=$E2E_REF; operator performed no SQL"
     return 0
   fi
-  echo "run the E2E validation playbook: dashboard reachable + ONE successful test transaction"
+  local app_connected=no
+  echo "Did the running application pass its DB health check against $RESTORED_DB?"
+  if has_tty; then
+    tty_prompt '   │ Confirm app connectivity [yes/no]> '; read -r app_connected </dev/tty
+  elif (( AUTO )); then
+    app_connected=yes; echo 'App connectivity confirmed automatically (local test bed).'
+  fi
+  [[ "${app_connected,,}" == yes || "${app_connected,,}" == y ]] \
+    || { echo 'App connectivity not confirmed; T8 and service RTO remain pending.' >&2; return 1; }
+  dr_mark_once T8 "target=$RESTORED_DB application DB health check passed"
+  echo "T8 recorded. Now run the separate E2E validation: dashboard reachable + ONE successful test transaction."
   ask E2E_REF "test transaction ID / reference (proves the E2E check passed)" "$( (( AUTO )) && echo "auto-local-$(date -u +%H%M%S)")" || return 1
   dr_mark T9 "e2e passed ref=$E2E_REF"
 }

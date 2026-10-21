@@ -2,7 +2,7 @@
 """Compute RTO/RPO KPIs from a DR timeline (timeline.jsonl written by dr_mark).
 
 Markers (see docs/04-rpo-rto-measurement.md): T0 impact start, T1 declared, T2 G1 GO, T4 promote start,
-T5 DB writable, T7 rollouts done, T9 service restored, T10 declared stable.
+T5 DB writable, T7 rollouts done, T8 app connectivity restored, T9 business validation passed, T10 declared stable.
 RPO inputs per scenario (markers, note field "value=<iso-ts>"):
   S1  : RPO_ZERO (synchronous Multi-AZ standby)                       -> RPO = 0
   S2  : RPO_LAST_REPLICATED (dr.heartbeat.ts on the promoted DB)
@@ -60,19 +60,19 @@ def human_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
-def operator_wait_min(path: Path, t0, t9):
-    """Overlap of prompt/gate waits with the business RTO interval T0-T9."""
+def operator_wait_min(path: Path, t0, t8):
+    """Overlap of prompt/gate waits with the Service RTO interval T0-T8."""
     secs = 0
     for line in path.read_text().splitlines():
         if not line.strip():
             continue
         ev = json.loads(line)
         m = re.search(r"secs=(\d+)", ev.get("note", ""))
-        if ev["marker"] == "HUMAN_WAIT" and m and t0 and t9:
+        if ev["marker"] == "HUMAN_WAIT" and m and t0 and t8:
             wait_end = parse_ts(ev["ts"])
             wait_start = wait_end - timedelta(seconds=int(m.group(1)))
             overlap_start = max(wait_start, t0)
-            overlap_end = min(wait_end, t9)
+            overlap_end = min(wait_end, t8)
             if overlap_end > overlap_start:
                 secs += (overlap_end - overlap_start).total_seconds()
     return round(round(secs) / 60, 2)
@@ -84,6 +84,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--rto-target-min", type=float, default=30)
     ap.add_argument("--rpo-target-s", type=float, default=86400)
+    ap.add_argument("--summary", action="store_true", help="print the interactive timeline summary only")
     args = ap.parse_args()
 
     mk = load(args.timeline)
@@ -108,34 +109,66 @@ def main() -> int:
         rpo_s, rpo_method = round((max(loss_end_candidates) - restore_point).total_seconds(), 1), "restore point"
 
     report = {
-        "dr_id": next(iter(mk.values()))["dr_id"] if mk else None,
-        "business_rto_min": minutes(t.get("T0"), t.get("T9")),
+        "dr_id": next(iter(mk.values())).get("dr_id") if mk else None,
+        "service_rto_min": minutes(t.get("T0"), t.get("T8")),
+        "business_validation_min": minutes(t.get("T8"), t.get("T9")),
+        "total_to_business_validation_min": minutes(t.get("T0"), t.get("T9")),
         "time_to_declare_min": minutes(t.get("T0"), t.get("T1")),
         "decision_min": minutes(t.get("T1"), t.get("T2")),
         "db_recovery_min": minutes(t.get("T4"), t.get("T5")),
-        "app_recovery_min": minutes(t.get("T5"), t.get("T9")),
+        "app_recovery_min": minutes(t.get("T5"), t.get("T8")),
         "execution_min": minutes(t.get("T2"), t.get("T10")),
-        "operator_wait_min": operator_wait_min(args.timeline, t.get("T0"), t.get("T9")),
+        "operator_wait_min": operator_wait_min(args.timeline, t.get("T0"), t.get("T8")),
         "rpo_actual_s": max(rpo_s, 0.0) if rpo_s is not None else None,
         "rpo_method": rpo_method,
         "scenario": next(iter(mk.values())).get("scenario") if mk else None,
         "rto_target_min": args.rto_target_min,
         "rpo_target_s": args.rpo_target_s,
-        "missing_markers": [m for m in ("T0", "T1", "T2", "T4", "T5", "T9", "T10") if m not in t],
+        "missing_markers": [m for m in ("T0", "T1", "T2", "T4", "T5", "T8", "T9", "T10") if m not in t],
     }
-    rto = report["business_rto_min"]
+    rto = report["service_rto_min"]
     report["rto_met"] = None if rto is None else rto <= args.rto_target_min
     report["rpo_met"] = None if report["rpo_actual_s"] is None else report["rpo_actual_s"] <= args.rpo_target_s
     rpo_actual_display = human_duration(report["rpo_actual_s"]) if report["rpo_actual_s"] is not None else "n/a"
 
+    phase_lines = []
+    for marker, event in mk.items():
+        if not marker.startswith("PHASE_END:"):
+            continue
+        match = re.fullmatch(r"elapsed_s=(\d+)", event.get("note", ""))
+        elapsed = human_duration(int(match.group(1))) if match else event.get("note", "")
+        phase_lines.append(f"{marker.removeprefix('PHASE_END:')}: {elapsed}")
+    t0 = t.get("T0")
+    t8 = t.get("T8")
+    t9 = t.get("T9")
+    summary_lines = ["Phase durations (wall-clock; include prompts and gates):", *phase_lines]
+    summary_lines.append(
+        f"Operator wait within Service RTO (T0-T8): {human_duration(report['operator_wait_min'] * 60)}"
+        if t8 else f"Operator wait since T0 (T8 not recorded): {human_duration(report['operator_wait_min'] * 60)}"
+    )
+    summary_lines.append(
+        f"Service RTO (T0-T8): {human_duration((t8 - t0).total_seconds())} (RTO target: {args.rto_target_min:g} min)"
+        if t0 and t8 else "Service recovery pending; T8 not recorded."
+    )
+    summary_lines.append(
+        f"Business validation after Service RTO (T8-T9): {human_duration((t9 - t8).total_seconds())}"
+        if t8 and t9 else "Business validation (T9) pending; continue validation after Service RTO."
+    )
+
+    if args.summary:
+        print("\n".join(summary_lines))
+        return 0
+
     md = ["| KPI | Value | Target | Met |", "|---|---|---|---|",
-          f"| Business RTO (T9-T0) | {rto} min | {args.rto_target_min} min | {report['rto_met']} |",
+          f"| Service RTO (T8-T0) | {rto} min | {args.rto_target_min} min | {report['rto_met']} |",
                     f"| RPO actual ({report['rpo_method']}) | {rpo_actual_display} | {human_duration(args.rpo_target_s)} | {report['rpo_met']} |",
           f"| Time to declare (T1-T0) | {report['time_to_declare_min']} min | | |",
           f"| Decision (T2-T1) | {report['decision_min']} min | 15 min | |",
           f"| DB recovery: promote/restore (T5-T4) | {report['db_recovery_min']} min | | |",
-          f"| App recovery (T9-T5) | {report['app_recovery_min']} min | | |",
-          f"| Of the RTO: waiting at prompts and gates (manual steps) | {report['operator_wait_min']} min | | |",
+          f"| App recovery (T8-T5) | {report['app_recovery_min']} min | | |",
+          f"| Business validation after RTO (T9-T8) | {report['business_validation_min']} min | | |",
+          f"| Total through business validation (T9-T0) | {report['total_to_business_validation_min']} min | | |",
+          f"| Of the Service RTO: waiting at prompts and gates (manual steps) | {report['operator_wait_min']} min | | |",
           f"| Missing markers | {', '.join(report['missing_markers']) or 'none'} | none | |"]
 
     print(json.dumps(report, indent=2))

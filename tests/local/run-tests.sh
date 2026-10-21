@@ -263,7 +263,8 @@ g01() { local timeline summary phase_output
                                 timeline="$(mktemp)"
                                 printf '%s\n' \
                                         '{"ts":"2026-10-16T00:00:00Z","marker":"T0","note":"start"}' \
-                                        '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"restored"}' \
+                                        '{"ts":"2026-10-16T00:01:00Z","marker":"T8","note":"app connected"}' \
+                                        '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"business validation passed"}' \
                                         '{"ts":"2026-10-16T00:00:30Z","marker":"HUMAN_WAIT","note":"step=before secs=60"}' \
                                         '{"ts":"2026-10-16T00:02:30Z","marker":"HUMAN_WAIT","note":"step=after secs=60"}' \
                                         '{"ts":"2026-10-16T00:02:00Z","marker":"PHASE_END:demo","note":"elapsed_s=195"}' > "$timeline"
@@ -274,12 +275,13 @@ g01() { local timeline summary phase_output
                                 grep -q 'wall-clock (includes prompts/gates)' <<<"$phase_output" \
                                         && grep -q 'Phase durations (wall-clock; include prompts and gates):' <<<"$summary" \
                                         && grep -q '^demo: 3 min 15 s$' <<<"$summary" \
-                                        && grep -q '^Operator wait within business RTO (T0-T9): 1 min 0 s (included in RTO and phase times)$' <<<"$summary" \
-                                        && grep -q '^Business RTO (T0-T9): 2 min 0 s (RTO target: 30 min)$' <<<"$summary"; }
-t  G01 "phase summary states wall-clock includes waits; RTO wait is clipped to T0-T9" g01
+                                        && grep -q '^Operator wait within Service RTO (T0-T8): 30 s (included in RTO and phase times)$' <<<"$summary" \
+                                        && grep -q '^Service RTO (T0-T8): 1 min 0 s (RTO target: 30 min)$' <<<"$summary" \
+                                        && grep -q '^Business validation after Service RTO (T8-T9): 1 min 0 s$' <<<"$summary"; }
+t  G01 "phase summary stops Service RTO at T8 and reports T8-T9 validation separately" g01
 t  G01b "dr_phase end syncs the evidence folder to S3 (timeline already off the machine)" bash -c "command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/timeline.jsonl'"
 t  G02 "collect evidence → manifest uploaded to the evidence bucket"    bash -c "'$S/dr-collect-evidence.sh' && command aws --profile dr-local s3 ls s3://$EVIDENCE_BUCKET/local/ --recursive | grep -q '$DR_ID/manifest.json'"
-t  G03 "KPI report: RPO from snapshot time, RTO ~20 min"                bash -c "grep -q 'restore point' '$DR_EVIDENCE_DIR/rto-rpo-report.md' && grep -Eq 'Business RTO \(T9-T0\) \| 2[01]' '$DR_EVIDENCE_DIR/rto-rpo-report.md'"
+t  G03 "KPI report: RPO from snapshot time, Service RTO ~20 min"          bash -c "grep -q 'restore point' '$DR_EVIDENCE_DIR/rto-rpo-report.md' && grep -Eq 'Service RTO \(T8-T0\) \| 2[01]' '$DR_EVIDENCE_DIR/rto-rpo-report.md'"
 g03b() { local work timeline
                                  work="$(mktemp -d)"; timeline="$work/timeline.jsonl"
                                  printf '%s\n' \
@@ -294,13 +296,14 @@ g03a() { local work timeline
                                  work="$(mktemp -d)"; timeline="$work/timeline.jsonl"
                                  printf '%s\n' \
                                          '{"ts":"2026-10-16T00:00:00Z","marker":"T0","note":"start","dr_id":"TEST","scenario":"S3"}' \
-                                         '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"restored","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-16T00:01:00Z","marker":"T8","note":"app connected","dr_id":"TEST","scenario":"S3"}' \
+                                         '{"ts":"2026-10-16T00:02:00Z","marker":"T9","note":"business validation passed","dr_id":"TEST","scenario":"S3"}' \
                                          '{"ts":"2026-10-16T00:00:30Z","marker":"HUMAN_WAIT","note":"step=before secs=60","dr_id":"TEST","scenario":"S3"}' \
                                          '{"ts":"2026-10-16T00:02:30Z","marker":"HUMAN_WAIT","note":"step=after secs=60","dr_id":"TEST","scenario":"S3"}' > "$timeline"
                                  python3 "$S/dr-rto-rpo-calc.py" "$timeline" --out "$work" >/dev/null || { rm -rf "$work"; return 1; }
-                                 jq -e '.business_rto_min == 2 and .operator_wait_min == 1' "$work/rto-rpo-report.json" >/dev/null
+                                 jq -e '.service_rto_min == 1 and .business_validation_min == 1 and .total_to_business_validation_min == 2 and .operator_wait_min == 0.5' "$work/rto-rpo-report.json" >/dev/null
                                  local rc=$?; rm -rf "$work"; return "$rc"; }
-t  G03a "operator wait KPI clips waits crossing T0/T9 to the RTO interval" g03a
+t  G03a "calculator excludes T8-T9 business validation from Service RTO" g03a
 g04() { for d in DR-UpdateDbSecretEndpoint DR-RdsPromoteReplica DR-RdsRestoreFromSnapshot DR-RdsRestoreToPointInTime; do
           aws --profile "$AWS_PROFILE" --region "$AWS_REGION" ssm create-document --name "$d-$RANDOM" --document-type Automation --document-format YAML --content "file://$ROOT/automation/ssm/$d.yaml" --query DocumentDescription.Status --output text || return 1; done; }
 t  G04 "SSM Automation documents accepted (create-document)"            g04
