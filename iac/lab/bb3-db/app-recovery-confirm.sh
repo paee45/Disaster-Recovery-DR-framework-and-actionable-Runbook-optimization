@@ -52,14 +52,14 @@ if [[ "$MODE" == connectivity ]]; then
     || { echo 'P3-S03 deployment/convergence attestation is required before T8.' >&2; exit 2; }
   OWNER="$(jq -er '.appOwner' "$DEPLOY_RECORD")"
   [[ ! -e "$HEALTH_RECORD" ]] || { echo 'T8 connectivity is already recorded for this run.' >&2; exit 2; }
-  printf 'Deployed commit: %s\n' "$(jq -er '.deployedCommit' "$DEPLOY_RECORD")"
+  printf 'Deployment evidence: %s\n' "$(jq -er '.evidenceRef' "$DEPLOY_RECORD")"
   read -r -p "App owner [${OWNER}]: " OWNER_INPUT
   OWNER="${OWNER_INPUT:-$OWNER}"
   [[ "$OWNER" == "$(jq -er '.appOwner' "$DEPLOY_RECORD")" ]] \
     || { echo 'T8 must be confirmed by the app owner recorded for deployment.' >&2; exit 2; }
   read -r -p 'Did the running app pass its health check against the restored DB endpoint? [y/N]: ' CONNECTED
   [[ "$CONNECTED" =~ ^[Yy]$ ]] || { echo 'T8 not recorded; service RTO continues.' >&2; exit 2; }
-  read -r -p 'Health-check evidence reference: ' EVIDENCE_REF
+  read -r -p 'Health-check evidence/logs reference: ' EVIDENCE_REF
   [[ -n "$EVIDENCE_REF" ]] || { echo 'A health-check evidence reference is required.' >&2; exit 2; }
   T0_AT="${BB3_T0_AT:-}"
   if [[ -z "$T0_AT" ]]; then
@@ -86,7 +86,7 @@ printf 'T8 recorded at: %s\n' "$(jq -er '.t8At' "$HEALTH_RECORD")"
 printf 'App owner: %s\n' "$OWNER"
 read -r -p 'Did the application complete a successful business transaction and readback on the restored DB path? [y/N]: ' PASSED
 [[ "$PASSED" =~ ^[Yy]$ ]] || { echo 'T9 not recorded; business validation remains pending.' >&2; exit 2; }
-read -r -p 'Transaction/reference ID (no business payload): ' TRANSACTION_REF
+read -r -p 'Business Transaction ID/reference ID (do not put business payload): ' TRANSACTION_REF
 [[ -n "$TRANSACTION_REF" ]] || { echo 'A transaction/reference ID is required.' >&2; exit 2; }
 RESULT="$(python3 "$HERE/secret-endpoints.py" --record-app-e2e \
   "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION" "$OWNER" "$TRANSACTION_REF")"

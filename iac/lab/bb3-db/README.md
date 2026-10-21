@@ -21,14 +21,14 @@ instance descriptions, tags, 437 API parameters per DB, parameter-group definiti
 security-group rules and subnet metadata, plus an integrity manifest. No credentials
 or SQL were collected. Refreshing preserves prior captures; incomplete captures do
 not replace the latest reference. Each capture prints a primary/replica summary table;
-`bb3-run.sh S3 --only P1-S03 --show` renders the latest table locally without querying AWS.
+`bb3-run.sh S3 --only P0-S02 --show` renders the latest table locally without querying AWS.
 
 Before an incident, run the guided discovery once. The `uat` argument selects
 `env=uat`; `app=bb3` identifies the application. `local` is not an AWS RDS environment.
 
 ```bash
 bash iac/lab/bb3-db/bb3-run.sh S3 --list
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S02
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S01
 ```
 
 Discovery matches `env=<environment>` plus `app=bb3`; neither tag alone is enough.
@@ -44,12 +44,20 @@ restore target IDs into the existing ignored `iac/sandbox.env`; Enter accepts Ye
 `n` cancels. If values already match, no prompt or write occurs. `--print` is available
 for a noninteractive preview, while
 `--primary`, `--replica`, and `--snapshot` are reviewed overrides. Discovery reads no
-secret values and makes no AWS changes. Run capture with no IDs to use the saved
-selections:
+secret values and makes no AWS changes. Capture the original source baseline after
+discovery and before the controlled outage:
 
 ```bash
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02
 ```
+
+P0-S03 allocates the DR run ID, creates one run-tagged SG with no ingress, and
+replaces the SG attachments on both source DBs. Keep the app health monitor active
+and capture the first app connection failure; pausing writers/jobs is not required
+for this fault injection. P1-S01-1 records T0 from that evidence; Enter defaults to the displayed
+current UTC time. P1-S01-2 records T1 using the same run ID. P3-S01 verifies the
+existing quarantine and records session closure; it does not submit another SG
+change. The pre-quarantine baseline is pinned: do not recapture it during the run.
 
 For an incident-time refresh, rerun guided discovery and review the selected primary,
 optional replica, and recovery point before answering `YES`.
@@ -157,7 +165,7 @@ bash iac/lab/bb3-db/bb3-run.sh S3
 
 # List step IDs, then run only the selected ordered steps
 bash iac/lab/bb3-db/bb3-run.sh S3 --list
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S02,P1-S03,P2-S00
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S01,P0-S02,P0-S03,P1-S01-1,P1-S01-2,P2-S00
 
 # Read-only: compare original primary/replica baselines and the API requests
 bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S00

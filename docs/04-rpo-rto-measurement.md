@@ -16,29 +16,32 @@ Events go to `timeline.jsonl` via `dr_mark` ([`dr-lib.sh`](../automation/scripts
 | **T5** | New primary writable | RDS event (S1), `wait-promoted`, `wait db-instance-available` | ✔ | ✔ | ✔ |
 | **T6** | Secret updated (endpoint cutover) | `dr-secret-cutover.sh apply` (auto) | — | ✔ | ✔ |
 | **T7** | All consumers rolled by Reloader (or manual restart) | `dr-eks-rollout.sh wait` (auto) | (restart only if needed) | ✔ | ✔ |
-| **T9** | **Service restored**: the first of 3 consecutive green synthetic business transactions | Synthetic monitor | ✔ | ✔ | ✔ |
+| **T8** | **Service connectivity restored**: application-level health check confirms the running app connects through the recovered DB path | App health check / app owner | ✔ | ✔ | ✔ |
+| **T9** | **Business validation passed**: first of 3 consecutive green synthetic business transactions or approved scenario-specific E2E evidence | Synthetic monitor / app owner | ✔ | ✔ | ✔ |
 | T10 | Declared restored (G4) | Incident tool | ✔ | ✔ | ✔ |
 
 ## 2. RTO
 
 | Metric | Formula | Typical driver |
 |---|---|---|
-| **Business RTO** (reported vs target) | `T9 − T0` | Everything below |
+| **Service RTO** (reported vs target) | `T8 − T0` | Incident start through recovered application connectivity |
 | Time to declare | `T1 − T0` | Alerting, on-call |
 | Decision time | `T2 − T1` | Clarity of gates/approvers. Often the largest share |
 | DB recovery time | `T5 − T4` | S1 ≈ 1–2 min; S2 promotion ≈ minutes; **S3/S4 ∝ DB size** (+ WAL replay for PITR) |
 | Cutover time | `T7 − T6` | ESO sync + Reloader rollouts (pod start time × waves) |
-| Validation time | `T9 − T7` | Smoke tests, warm-up (S3/S4 lazy loading) |
+| Business validation after RTO | `T9 − T8` | Transaction/readback and evidence; report separately from Service RTO |
+| Total elapsed through business validation | `T9 − T0` | Service RTO plus post-RTO validation; report for transparency |
 
 **Build an RTO model per environment** from real events (no drills are scheduled) and update it after each one:
-`RTO_est(S3/S4) = decision + restore_minutes_per_100GB × size/100 + parity(10) + warm-up + cutover + validation`.
+`RTO_est(S3/S4) = decision + restore_minutes_per_100GB × size/100 + parity(10) + warm-up + cutover + app-connectivity-check`.
 Target: **30 min**. Until measured, S3/S4 are assumed to exceed it (risk R3, [09](09-iso27001-scope.md)). If `RTO_est` > 30 min → backlog item (archiving/smaller DB, faster storage, prefer S2/S4-mode-B where valid).
 
 Automated database verification and local failback probes are read-only: they do not create tables or insert/update
 business or probe rows. Login, recovery/read-only settings, and read access do not prove committed-write capability.
-The application owner performs the separate business E2E transaction and records its evidence before T9; a green SQL
-read check alone must not be reported as business recovery. Restore, password repair and fencing remain explicit
-operational changes, not read-only verification.
+T8 requires an application-level health check showing the running app has loaded the recovered endpoint and can connect
+through its intended DB path; a direct operator login is not sufficient. T9 records the separate business E2E transaction
+and readback. A T9 failure means business validation is incomplete even if Service RTO was met at T8. Restore, password
+repair and fencing remain explicit operational changes, not read-only verification.
 
 ## 3. RPO per scenario
 
@@ -59,7 +62,7 @@ lost **unless reconciled** (`30-reconciliation-hints.sql`). For data-corruption 
 
 With F3, `STOP_REQUESTED` does not change the RPO cutoff. `FENCE` uses the time `stopped` is observed after rollout;
 this is a conservative bound, not an exact last-commit timestamp. Stop time overlaps endpoint update/rollout and remains
-inside business RTO (`T9 - T0`). A failure to confirm stop must not be reported as successful F3 isolation.
+inside Service RTO (`T8 - T0`). A failure to confirm stop must not be reported as successful F3 isolation.
 
 ### Heartbeat (S2, UAT/PROD)
 `automation/k8s/heartbeat-writer.yaml` writes `dr.heartbeat.ts` every second through the app secret and logs every commit.

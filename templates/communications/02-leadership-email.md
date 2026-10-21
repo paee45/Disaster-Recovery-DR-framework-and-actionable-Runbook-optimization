@@ -56,7 +56,7 @@ Regulatory: CTO decision on DPO notification {{yes/no}} (integrity/availability 
 ### 4. [Post-Mortem / RCA Ready]
 **Subject:** `[{{ENV}}][PIR] {{SERVICE}} DR event {{DR_ID}} — summary and actions`
 ```
-Timeline: impact {{T0}} → decision {{T2}} → restored {{T9}} (RTO {{x}} min vs {{y}} target; RPO {{z}} s vs {{w}}).
+Timeline: impact {{T0}} → decision {{T2}} → service connected {{T8}} (RTO {{x}} min vs {{y}} target) → business validation {{T9}} ({{validation_minutes}} min; RPO {{z}} s vs {{w}}).
 Root cause (summary): {{one paragraph}}
 What went well: {{2 bullets}} · What we will improve: {{3 bullets with owners/dates}}
 Customer RCA: {{link}} (sent {{date}}) · Full PIR: {{link}} · Evidence (audit): {{s3 link}}

@@ -17,10 +17,51 @@ without knowing the local checkout location. AWS CLI commands are location-indep
    mode with owner approval. T9 requires app-owner confirmation of both endpoints and a successful business
    transaction/readback reference.
 
+### BB3 S3 Step Reference
+
+This table is for the BB3 AWS sandbox runner only. `S3` means snapshot restore; BB3 S4/PITR is not implemented. `P` is the recovery phase, `S` the step, and `G` an approval gate.
+
+Before each `P*-S*` action, `bb3-run.sh` prints a highlighted **What** preview describing the action and an **Expected** result describing its completion evidence. Review these before continuing. The preview is informational; explicit mutation and owner-approval prompts still control whether an action proceeds.
+
+| Step | Action | Completion evidence |
+|---|---|---|
+| P0-S01 | Discover source DBs, snapshot, and restore targets | Reviewed source/replica selection and deterministic restore targets |
+| P0-S02 | Capture source primary/replica baseline before the outage | Checksum-verified original SG sets and configuration |
+| P0-S03 | Keep the app/monitor active, attach one run-scoped no-ingress SG to both source DBs, and capture the resulting failure evidence | Both attachments active; real evidence reference saved; original SGs retained in baseline |
+| P1-S01-1 | Record impact start T0 from app/monitor evidence | UTC T0 plus evidence reference; Enter defaults to displayed current UTC |
+| P1-S01-2 | Record incident declaration T1 and select S3 | T1 defaults to current UTC; edited T1 requires log evidence; reuses P0 run ID |
+| P2-S00 | Preview restore request and compare metadata/parameters | Read-only review |
+| P2-S01 | Restore primary from selected snapshot | Explicit mutation approval |
+| P2-S02 | Wait for restored primary | RDS `available` |
+| P2-S03 | Harden and validate restored primary | Baseline/configuration checks |
+| P2-S04 | Wait after primary hardening | RDS `available` |
+| P2-S05 | Create restored read replica | Explicit mutation approval |
+| P2-S06 | Wait for restored replica | RDS `available` |
+| P2-S07 | Harden and validate restored replica | Baseline/configuration checks |
+| P2-S08 | Wait after replica hardening | RDS `available` |
+| P2-S09 | Check both restore targets | Read-only topology/status |
+| P3-G0 | Cutover approval | No separate command; approval is collected in the P3-S01/P3-S02 prompts |
+| P3-S01 | Verify the P0 no-ingress SG on the old source pair and attest session closure | Both attachments verified; no source SG change or stop is submitted here |
+| P3-S02 | Update or verify secret endpoint pair | Matching verified P3-S01 record |
+| P3-S03 | Record manual app deployment and service convergence | App owner and one sanitized multiline deployment log; no commit SHA required |
+| P4-S01 | App health check connects to restored DB path | **T8** timestamp/evidence; Service RTO is T8-T0 |
+| P4-S02 | Successful business transaction and readback | **T9** timestamp/reference; validation time is T9-T8 |
+| P4-G4 | Declare service restored | Owner/incident approval; T10 |
+| P5 | No BB3 runner step implemented | Collect/package evidence manually |
+
+P0-S03 submits both source SG changes before waiting so their apply intervals overlap. Keep the app and health monitor active so failed new connections are observable; no writer/job pause is required for this fault injection. It waits for both attachments and requires a real app/monitor failure evidence reference; the SG change blocks new connections but does not prove existing sessions are closed. Restore requests use the pinned, checksum-verified P0-S02 baseline, not the live quarantine SG. P3-S01 verifies that same run-scoped quarantine and separately requires session-closure confirmation; it does not submit another SG change.
+
+T8 ends the Service RTO only after the running app passes its DB health check against the restored endpoint. A failed health check leaves T8 pending. T9 is separate business validation; report it even when it adds 5–10 minutes after T8. A failed transaction leaves business validation incomplete, even if Service RTO was met.
+
 ### 0. Incident And Identity
 
-Record the incident ID, IC, data owner, app owner, and UTC timestamps. `T0` is when the incident first affected
-service; `T1` is incident declaration. Do not substitute the operator's start time for T0.
+Record the incident ID, IC, data owner, app owner, and UTC timestamps. First complete P0-S01 through P0-S03 so the
+original SG baseline is captured before the source pair is quarantined. P0-S03 allocates the run ID, keeps the app
+and monitor active, and requires a real app/monitor failure reference after both source DBs use the no-ingress SG.
+Run P1-S01-1 with the timestamp from that
+evidence; Enter accepts the displayed current UTC time. Run P1-S01-2 to record T1, select S3, and declare the same
+run ID. T1 defaults to declaration time; an edited/backfilled T1 requires log evidence and cannot precede T0.
+Timestamps are UTC ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`). S4/PITR remains backlog.
 
 Verify the named sandbox account before any changes:
 
@@ -38,16 +79,43 @@ existing ignored `iac/sandbox.env`; it does not create a second env file:
 
 ```bash
 bash iac/lab/bb3-db/bb3-run.sh S3 --list
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S02
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S01
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S03
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S01-1
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S01-2
 ```
 
-`P1-S02` is discovery and `P1-S03` captures the source. The full `bash iac/lab/bb3-db/bb3-run.sh S3`
-sequence runs the RDS stages and waits automatically for primary/replica availability. Run selected IDs in order
-with `--only P1-S02,P1-S03,P2-S00`. Ctrl+C during a wait prints a resume command for that wait step.
+The full `bash iac/lab/bb3-db/bb3-run.sh S3` sequence runs P0 discovery, baseline capture,
+and quarantine before recording impact time, then runs the RDS recovery stages and waits for
+primary/replica availability. Run selected IDs in order with
+`--only P0-S01,P0-S02,P0-S03,P1-S01-1,P1-S01-2,P2-S00`. Ctrl+C during a wait prints a
+resume command for that wait step.
 
-Run the complete RDS sequence with `bash iac/lab/bb3-db/bb3-run.sh S3`. To run selected checkpoints only,
-use `--only P1-S02,P2-S00`; see `--list` for all IDs. The full sequence waits automatically for RDS
-availability. Press Ctrl+C during a wait to stop; the runner prints the current step's resume command.
+Run the complete sequence with `bash iac/lab/bb3-db/bb3-run.sh S3`. To run selected checkpoints only,
+use the ordered `--only` list above; see `--list` for all IDs. The full sequence waits automatically
+for RDS availability. Press Ctrl+C during a wait to stop; the runner prints the current step's resume command.
+
+#### BB3 Runner Ranges
+
+`--from STEP` and `--to STEP` select an inclusive range in the step table above.
+Either option may be used alone: `--from` continues through P4-S02, and `--to`
+starts at P0-S01. Without either option or `--only`, the runner stops at P2-S09.
+Do not combine ranges with `--only`; step-specific arguments such as `--apply`
+still require a single `--only` step. All existing approval prompts remain required.
+P3-G0, P4-G4, and P5 are not executable step IDs.
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --from P2-S06 --to P2-S09 --list
+bash iac/lab/bb3-db/bb3-run.sh S3 --from P2-S06 --to P2-S09
+bash iac/lab/bb3-db/bb3-run.sh S3 --from P4-S01
+bash iac/lab/bb3-db/bb3-run.sh S3 --to P0-S02
+```
+
+Use `--list` with a range to review its exact steps without running them. A range
+does not infer completed steps or skip waiters. Resume at the appropriate waiter
+after an accepted mutation, not at the restore/create step. The options in the
+Legacy DEV/EKS Reference below belong to a different runner.
 
 Select a primary and, if present, an attached replica from the numbered lists. A valid saved selection or a
 single eligible match is highlighted green; press Enter to accept it. The snapshot list shows all available
@@ -62,13 +130,13 @@ the ignored `iac/lab/bb3-db/baselines/` directory, prints a primary/replica summ
 Secrets Manager values or SQL:
 
 ```bash
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02
 ```
 
 To redisplay the latest captured table later without AWS access:
 
 ```bash
-bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03 --show
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02 --show
 ```
 
 For a one-off source not saved in the env file, pass the primary and optional replica IDs explicitly. A replica
@@ -78,14 +146,14 @@ Primary with replica, explicit one-off:
 
 ```bash
 AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
-  bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03 <source-primary-id> <source-replica-id>
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02 <source-primary-id> <source-replica-id>
 ```
 
 Primary only, explicit one-off:
 
 ```bash
 AWS_PROFILE=pa_iam_aws_sandbox AWS_REGION=ap-southeast-1 \
-  bash iac/lab/bb3-db/bb3-run.sh S3 --only P1-S03 <source-primary-id>
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02 <source-primary-id>
 ```
 
 Record the capture directory. Keep that baseline unchanged for the whole run. Confirm parameter groups are
@@ -220,9 +288,9 @@ shellcheck -S warning -x -P automation/scripts iac/lab/bb3-db/secret-endpoints.s
 
 #### Old DB Fence And Failback Constraint
 
-AWS permits temporary stop only for a standalone primary with no attached replicas and which is not itself a replica. It prohibits stopping a primary with a read replica and prohibits stopping a replica. P3-S01 checks live topology; only an eligible standalone primary offers a typed STOP-OLD-PRIMARY/STOP-RESTORED-PRIMARY action and waits for RDS stopped status. The current old pair has a replica, so no stop action was or will be attempted for this run. On failback, if the saved return primary is stopped and standalone, P3-S01 fences the active endpoint first, then requires START-RETURN-PRIMARY and waits for available. If the active standalone DB is already stopped, failback confirms its stopped state instead of sending another stop request. Reference: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html#USER_StopInstance.Limitations.
+For this BB3 sandbox runner, P0-S03 is the only source security-group mutation. It checks that live SG attachments still match the pinned P0-S02 baseline, attaches one run-scoped no-ingress SG to both selected source DBs, waits for both attachments, and records the app/monitor failure reference. The SG replacement blocks new connections but does not close existing sessions. P3-S01 verifies the same quarantine and separately requires session-closure confirmation before P3-S02; it does not submit another SG change or stop the source DB.
 
-P3-S01 checks live RDS topology. For a standalone primary it can stop and verify RDS status after typed approval; for a primary with replicas or a replica itself, stop is prohibited and only the separately reviewed manual network-fence attestation path is available. Pause/drain every application writer, reader, worker and scheduled job, then apply a separately reviewed security-group fence that blocks application sources from both active DB endpoints. Confirm with an evidence/ticket reference. For replica-backed pairs, P3-S01 can only record the manual network-fence owner attestation; it does not change or independently verify security-group rules. That path is not machine-verified and does not unlock P3-S02. A later read-only AWS security-group check found PostgreSQL ingress still permits the VPC CIDR and SSM tunnel host. No security-group fence was applied or verified, so the old pair is not confirmed isolated and app deployment/cutover must not proceed. A future network-fence implementation is required for safe automated continuation with replicas.
+The prior run's read-only SG check found PostgreSQL ingress still permitted the VPC CIDR and SSM tunnel host, so that run's old pair was not confirmed isolated. Do not treat the new P0 workflow as retroactive proof: only a completed P0-S03 record and P3-S01 verification establish the fence for a new run. Standalone RDS stop limitations may still apply to separate, explicitly approved failback actions; see https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html#USER_StopInstance.Limitations.
 
 Commands for a future run:
 
@@ -232,9 +300,9 @@ bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --apply
 bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03
 ```
 
-P3-S02 offers automatic AWS CLI update or manual-update verification. Both show the primary/replica host pair; manual mode asks for confirmation that both values were updated, verifies them read-only, and does not write AWS. Any secret-changing apply requires the matching P3-S01 owner-fence record. For failback, run P3-S01 with --failback latest to attest the restored pair is fenced before returning the secret to the original hosts. Since RDS was never stopped, no instance start command is needed; remove the temporary network fence only under the approved failback plan.
+P3-S02 offers automatic AWS CLI update or manual-update verification. Both show the primary/replica host pair; manual mode asks for confirmation that both values were updated, verifies them read-only, and does not write AWS. Any secret-changing apply requires the matching P3-S01 owner-fence record. For failback, run P3-S01 with --failback latest to attest the restored pair is fenced before returning the secret to the original hosts. Release the temporary source quarantine only under the approved failback plan.
 
-P3-S03 offers automatic app deploy (not implemented/tested; selecting it stops without action) or manual deploy confirmation. Manual confirmation records app owner, full deployed commit SHA, and evidence reference, and requires confirmation that all expected services/tasks converged. It is an owner attestation, not an independently verified deploy. P4-S02 business transaction/readback and P4-G4 T9 approval remain manual gates. Transaction ref 12345 was supplied, but app-owner name and UTC time are still missing, so T9 remains pending.
+P3-S03 offers automatic app deploy (not implemented/tested; selecting it stops without action) or manual deploy confirmation. Manual confirmation captures one sanitized multiline deployment/convergence log, asks for the app owner, and requires confirmation that all expected services/tasks converged. The log is the evidence reference; no separate commit SHA is required. This remains an owner attestation, not an independently executed deploy. P4-S01 app health/T8 and P4-S02 business transaction/readback/T9 follow as separate steps.
 #### Current Result
 
 Run DR-20261020-0756-uat-BB3-S3 completed. Preview verified the current DB_HOST/DB_REPLICA_HOST matched the old primary/replica and showed the restored primary/new replica hosts. After exact secret and DR-run confirmation plus UPDATE-ENDPOINTS, version 14bd1175-cb4c-4ba2-9ed6-de521641e891 became AWSCURRENT. Only endpoint keys changed; the password and unrelated fields were verified unchanged. The local journal is evidence/bb3-secret-endpoints/DR-20261020-0756-uat-BB3-S3/cutover.json. No application deployment, fencing, or business E2E was performed.
@@ -260,8 +328,8 @@ This does not reconcile database writes or deploy/restart apps. No SSM Automatio
 
 ### 7. Optional App Cutover: Choose One Mode
 
-Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain P3-G0 GO. GO must be
-typed explicitly and is never defaulted. Select and
+Only after RDS validation, inventory all writers/readers/jobs, review fencing, and obtain explicit owner/IC approval.
+BB3 has no standalone P3-G0 command; approval is collected in the P3-S01/P3-S02 prompts. Select and
 record `APP_CUTOVER_MODE=manual` or `ssh-script`. Both modes update only these fields in the existing mixed
 secret:
 
@@ -282,26 +350,108 @@ separately approved. The external repo is not in this workspace, so this mode is
 Do not stop, delete or promote source DBs ad hoc. An endpoint update alone does not prove existing tasks have
 loaded the new secret version; keep scheduled writers paused until app validation succeeds.
 
-### 8. App Validation And T9
+### 8. App Connectivity T8 And Business Validation T9
 
-The app owner must confirm `yes/no` for both displayed endpoints, complete the approved business transaction
-on the restored primary and the intended readback through the new replica path, and record the transaction
-number/reference, UTC time, service/task version, owner and sanitized evidence. Do not include credentials or
-business payloads. If either endpoint or the transaction fails, stop: no T9 and no restored-service claim.
-Only app-owner GO after successful proof records T9. `available`, matching configuration, or green deployment
-is not business recovery.
+After P3-S03 deployment/convergence, run P4-S01:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P4-S01
+```
+
+The app owner confirms the running application has loaded the restored endpoint and passes its application-level DB health check. A direct operator login, RDS `available`, matching configuration, or green deployment alone is not T8. The helper records the UTC T8 timestamp and health-check evidence reference. Service RTO is `T8-T0` and stops at this verified connectivity milestone; provide the actual UTC impact start T0 when prompted.
+
+After the separate business transaction and readback, run P4-S02:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P4-S02
+```
+
+The app owner confirms success and provides a transaction/reference ID. The helper records T9 in UTC. Report `T9-T8` as business validation duration separately from Service RTO. If the app health check fails, T8 is not recorded and the Service RTO clock continues. If the transaction fails after T8, Service RTO may be met but business validation/T9 remains pending or failed. Do not provide credentials or business payloads.
 
 ### 9. Failback And Postmortem
 
-Failback is a separate approved change. Account for writes on the restored DB and obtain data-owner
-reconciliation/sign-off first. Then use the selected manual/SSH mode to return both endpoint keys to the
-approved failback primary/replica, redeploy/restart, and repeat endpoint confirmation plus business
-transaction/readback before failback T9. Keep restored DBs and snapshots until reconciliation and retention
-decisions are approved; never auto-delete them.
+#### After P4-S02
+
+Do not restart the full S3 runner: it starts at discovery and fault injection, not failback.
+Complete these checkpoints one at a time:
+
+1. **P4-G4, manual:** Review the recorded T8 health check and T9 business transaction/readback.
+  The incident approver declares service restored and records their name, UTC T10, and approval reference.
+  Resume jobs only under app-owner approval. Missing or failed app evidence blocks this declaration.
+2. **P5, manual:** Preserve the current run's journal, baseline/checksums, deployment log, health-check
+  evidence/logs reference, transaction ID, and approvals in the approved evidence location. Report
+  Service RTO `T8-T0`, business validation `T9-T8`, total elapsed `T9-T0`, and RPO with limitations.
+  There is no BB3 `--only P4-G4` or `--only P5` command.
+3. **Failback approval, manual:** Obtain a separate approved change window and data-owner decision.
+  Writes committed on the restored primary are not copied back by endpoint failback. Reconcile and
+  validate those writes, or obtain explicit acceptance of the identified sandbox data loss. Record
+  owner, decision, affected interval, and evidence reference. Do not assume the original pair is current.
+
+Keep the original pair quarantined and retain restored DBs/snapshots while these decisions are pending.
+
+#### Failback Checkpoints
+
+The following FB labels are worksheet checkpoints, not new runner step IDs. Use the explicit completed
+cutover run ID instead of `latest`, which could select another drill. Set it locally before the commands:
+
+```bash
+DR_ID='{{COMPLETED_CUTOVER_DR_ID}}'
+```
+
+1. **FB-01: Review return endpoints, read-only.** Verify the saved run, selected secret, current restored
+  primary/replica hosts, and original return hosts. This does not deploy or reconcile data:
+
+  ```bash
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --failback "$DR_ID" --preview
+  ```
+
+2. **FB-02: Drain clients and fence the restored pair.** App owner pauses/drains writers, readers,
+  workers, and jobs before this separate failback outage. Verify isolation and existing-session closure
+  on the restored pair before changing endpoints. Keep the original pair quarantined meanwhile.
+
+  **Current replica-pair blocker:** `P3-S01 --failback` expects an attached
+  `failback-network-fence.json` for a restored primary with a replica; it does not currently create
+  that pair's failback quarantine. Stop here until this path is implemented/tested or a separately
+  reviewed isolation procedure and matching verified journal are provided. Do not fabricate a journal,
+  stop a replica-backed primary, or bypass the fence gate. The verification command is:
+
+  ```bash
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01 --failback "$DR_ID"
+  ```
+
+3. **FB-03: Switch both endpoint keys, explicit approval.** Only after FB-02 passes, review the plan
+  again and type `FAILBACK-ENDPOINTS` when approved. Credentials and unrelated fields stay unchanged:
+
+  ```bash
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --failback "$DR_ID" --apply
+  ```
+
+4. **FB-04: Release the original source quarantine, explicit approval.** After the endpoint failback
+  journal is complete, recheck that the restored pair remains isolated and its sessions are closed.
+  This command restores the saved original SG sets, verifies them, and deletes the temporary source
+  quarantine SG after typed `RELEASE-SOURCE-QUARANTINE`. The restored pair stays fenced:
+
+  ```bash
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01 --failback "$DR_ID" --release-quarantine
+  ```
+
+5. **FB-05: Redeploy and validate the app, manual.** The app owner deploys/restarts using the approved
+  application procedure so tasks load the original endpoints. Confirm all expected services converge,
+  then record an app DB health check and a successful business transaction/readback on the original
+  primary and intended replica path. Record owner, UTC times, sanitized deployment/health logs, and
+  transaction reference. A complete endpoint journal alone is not completed application failback.
+  Do not rerun P4-S01/P4-S02 to overwrite the recovery T8/T9; these helpers have no failback mode.
+6. **FB-06: Declare failback complete, manual.** Obtain incident/app-owner sign-off, record completion
+  time and evidence, then resume approved jobs. If validation fails, keep jobs paused and use the
+  separately approved contingency plan; do not un-fence both database pairs.
+7. **FB-07: Retain, then clean up under separate approval.** Preserve evidence and restored DBs/snapshots
+  until reconciliation and retention decisions are signed off. Plan billable-resource cleanup through
+  the approved IaC/ownership process, review the saved plan, and obtain approval before applying it.
+  Do not delete the restored pair or remaining quarantine SG merely because endpoint failback succeeded.
 
 Record T0/T1/T2/T4/T5/T6/T7/T9/T10, snapshot reference and age, baseline and diff tables, approvals, old/new
 secret version IDs only, deployed SHA, task convergence, transaction reference, and final evidence hashes.
-Calculate business RTO as T9-T0; report replica/topology recovery separately. Postmortem: incident cause,
+Calculate Service RTO as T8-T0; report business validation T9-T8 and total elapsed T9-T0 separately, along with replica/topology recovery. Postmortem: incident cause,
 data loss/reconciliation, timing by step, parameter/network mismatches, app transaction result, manual work,
 delays/failures, RTO/RPO misses, action owner/due date, and required changes before the next drill.
 

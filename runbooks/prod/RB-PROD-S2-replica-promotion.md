@@ -5,7 +5,7 @@
 | Version / owner | v1.0-draft / `{{SRE_OWNER}}` · Reviewed: SRE · Approved: CTO · Gate approvers: IC + SRE (CTO if data loss is material) |
 | Topology before → after | `app-pg-prod` (Multi-AZ, **lost**) + `app-pg-prod-replica` (same region) → **`app-pg-prod-replica` = standalone primary** (single-AZ until CP03-S03). Not a regional-outage solution (risk R1) |
 | Endpoint | **Changes** → endpoint update ([CP-01](../common/CP-01-secret-endpoint-cutover.md): K8s Secret patched directly in `SECRET_MODE=k8s`, or Secrets Manager + ESO in `eso` mode) → **Reloader** |
-| Targets | RPO target 24 h (expected = replica lag, usually seconds) · RTO target **30 min** (`T9 − T0`) — achievable only with a fast G1 (≤ 10 min) |
+| Targets | RPO target 24 h (expected = replica lag, usually seconds) · Service RTO target **30 min** (`T8 − T0`); report T9 business validation separately — achievable only with a fast G1 (≤ 10 min) |
 | Automation | SSM `DR-RdsPromoteReplica` (pre-check → G2 approval → promote → wait → secret update via `DR-UpdateDbSecretEndpoint` = **`eso` mode**; in `k8s` mode use the scripts: `dr-verify.sh wait-promoted` + `dr-secret-cutover.sh apply`) |
 | Pre-approved change | `{{CHG}}` |
 

@@ -9,7 +9,7 @@
 | **Cutover** | Pointing the applications at the new primary by **updating the endpoint in the Secrets Manager secret**. External Secrets Operator syncs it into Kubernetes and Stakater Reloader rolls the pods. **No DNS change** |
 | **Failback / normalisation** | The planned work after recovery that returns to the standard topology (Multi-AZ + replica), config parity, IaC and monitoring. Always a separate change |
 | **RPO** | The maximum acceptable data loss, measured in time ([04](04-rpo-rto-measurement.md) gives the formula per scenario) |
-| **RTO** | The maximum acceptable time from **impact start (T0)** to **business service restored (T9)**, verified by synthetic business transactions |
+| **RTO** | The maximum acceptable time from **impact start (T0)** to **service connectivity restored (T8)**, verified by an application-level health check against the recovered DB path. Business transaction/readback validation is recorded separately at T9. |
 
 ## 2. Environment topology & recovery options
 
@@ -48,7 +48,7 @@
 
 ## 3. Decision authority
 
-```
+```ini
  Detect (alarm / customer report / RDS event)
           │
  On-call triage (≤ 10 min) ── Multi-AZ failover in progress? ──yes──► RB-PROD-S1 (time box 5 min)

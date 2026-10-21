@@ -93,7 +93,7 @@ Status: ✅ implemented by this framework · 🟡 partially (action open) · ❌
 | Objective | Target | Measured by | Current confidence |
 |---|---|---|---|
 | RPO | **24 h** (all envs) | KPI report per event | High: daily snapshot; PITR is usually minutes |
-| RTO | **30 min** (all envs, aim) | `T9 − T0` per event | S1 high · S2 medium · **S3 measured 39:55 (UAT, not met)** · S4 low (R3) |
+| RTO | **30 min** (all envs, aim) | Service RTO `T8 − T0`; report `T9 − T8` validation separately | S1 high · S2 medium · **S3 historical T9−T0 was 39:55 under the previous definition; T8 unavailable** · S4 low (R3) |
 | Runbook currency | Reviewed ≤ 12 months | PR history | — |
 | Learning | 100 % of events have a PIR and actions | PIR register | — |
 

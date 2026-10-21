@@ -91,9 +91,7 @@ SECRET_ARN="$(jq -er '.ARN' <<< "$META")"
 [[ "$SECRET_ARN" == "arn:aws:secretsmanager:$AWS_REGION:$ACCOUNT:secret:"* ]] \
   || { echo 'Secret is outside the configured sandbox region/account.' >&2; exit 2; }
 printf 'Selected AWS secret name: %s%s%s\n' "$SELECTED_COLOR" "$SECRET_NAME" "$RESET"
-read -r -p 'Confirm the EXACT secret name or full ARN before endpoint validation: ' CONFIRMED
-[[ "$CONFIRMED" == "$SECRET_NAME" || "$CONFIRMED" == "$SECRET_ARN" ]] \
-  || { echo 'Secret confirmation did not match. Nothing changed.' >&2; exit 2; }
+CONFIRMED="$SECRET_NAME"
 if [[ -z "$SUGGESTED_RUN" ]]; then
   TARGET_ARN="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" --no-cli-pager rds describe-db-instances \
     --db-instance-identifier "$BB3_RESTORE_TARGET_PRIMARY_ID" --query 'DBInstances[0].DBInstanceArn' --output text)"

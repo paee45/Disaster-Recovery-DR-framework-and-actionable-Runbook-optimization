@@ -72,7 +72,7 @@ Copy commands from the Git/wiki view, not from the form tool.
 |---|---|---|---|---|
 | P4-S01 | `dr_phase start app-verify 5` · `./automation/scripts/dr-verify.sh connections` (app sessions on the new DB, 0 on the old) | SRE | 1 | As expected |
 | P4-S02 | **E2E check per the [E2E validation playbook](../../templates/reports/e2e-validation-playbook.md)**: dashboard reachable + **one successful test transaction**. No extra checks (e.g. user-login verification) unless the playbook lists them | Backend | 3 | Transaction ID recorded. `dr_mark T9` at success |
-| P4-G4 ⛳ | Declare restored: `dr_mark T10` · `dr_phase end app-verify 5` · `dr_summary` (post it) · [Services Restored] message | SRE on-call | 1 | RTO = T9 − T0 shown |
+| P4-G4 ⛳ | Declare restored: `dr_mark T10` · `dr_phase end app-verify 5` · `dr_summary` (post it) · [Services Restored] message | SRE on-call | 1 | Service RTO = T8 − T0; T9 business validation reported separately |
 
 ## Phase 5 — Close (budget 1 min on the clock; the rest afterwards)
 

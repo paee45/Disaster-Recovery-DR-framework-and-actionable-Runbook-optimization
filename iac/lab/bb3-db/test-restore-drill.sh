@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
 TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
 
@@ -59,6 +58,9 @@ aws() {
         instance='{"DBInstanceIdentifier":"replica-target","DBInstanceArn":"arn:aws:rds:ap-southeast-1:000000000000:db:replica-target","ReadReplicaSourceDBInstanceIdentifier":"restore-primary","DBInstanceStatus":"available","DBParameterGroups":[{"DBParameterGroupName":"pg-original","ParameterApplyStatus":"in-sync"}],"DBSubnetGroup":{"DBSubnetGroupName":"subnets-original","VpcId":"vpc-original"},"VpcSecurityGroups":[{"VpcSecurityGroupId":"sg-original"}],"DBInstanceClass":"db.t4g.micro","AvailabilityZone":"ap-southeast-1b","PubliclyAccessible":false,"BackupRetentionPeriod":0,"PreferredMaintenanceWindow":"sun:19:00-sun:19:30","Endpoint":{"Port":5432},"Engine":"postgres","EngineVersion":"17.9","AllocatedStorage":20,"StorageEncrypted":false,"DeletionProtection":false,"CopyTagsToSnapshot":true,"AutoMinorVersionUpgrade":true,"IAMDatabaseAuthenticationEnabled":false,"NetworkType":"IPV4","EnabledCloudwatchLogsExports":[]}'
       elif [[ "$*" == *'--db-instance-identifier restore-primary'* ]]; then
         instance="${instance/primary-no-replica/restore-primary}"
+      fi
+      if [[ "${TEST_LIVE_QUARANTINE:-}" == true && "$*" == *'--db-instance-identifier primary-no-replica'* ]]; then
+        instance="$(jq '.VpcSecurityGroups=[{VpcSecurityGroupId:"sg-run-quarantine"}]' <<< "$instance")"
       fi
       if [[ "$*" == *'--query DBInstances[0]'* ]]; then printf '%s\n' "$instance"; else printf '{"DBInstances":[%s]}\n' "$instance"; fi ;;
     'rds describe-db-parameter-groups') printf '%s\n' 'postgres17' ;;
@@ -179,14 +181,55 @@ grep -F 'Primary restore request (populated fields only)' "$TEMP/default-preview
 grep -F 'Role=primary' "$TEMP/default-preview.txt" >/dev/null
 grep -F 'dr-restore=' "$TEMP/default-preview.txt" >/dev/null
 echo 'PASS preview loads snapshot and restore targets from sandbox.env without repeated IDs'
+TEST_LIVE_QUARANTINE=true bash "$HERE/restore-drill.sh" preview > "$TEMP/quarantined-source-preview.txt" 2>&1
+grep -F 'VpcSecurityGroupIds        | sg-original,sg-primary-extra' "$TEMP/quarantined-source-preview.txt" >/dev/null
+if grep -F 'sg-run-quarantine' "$TEMP/quarantined-source-preview.txt" >/dev/null; then
+  echo 'FAIL restore preview inherited the early source quarantine SG' >&2
+  exit 1
+fi
+echo 'PASS restore preview uses the captured pre-fence SG baseline while the live source is quarantined'
 bash "$HERE/restore-drill.sh" status > "$TEMP/status.txt" 2>&1
 grep -F 'primary target: available' "$TEMP/status.txt" >/dev/null
 grep -F 'replica target: available' "$TEMP/status.txt" >/dev/null
 echo 'PASS read-only status checks both saved targets without requiring copied IDs'
 
 steps="$(bash "$HERE/bb3-run.sh" --list)"
-[[ "$steps" == *'P1-S02'* && "$steps" == *'P2-S00'* && "$steps" == *'P2-S07'* ]]
+[[ "$steps" == *'P0-S01'* && "$steps" == *'P0-S02'* && "$steps" == *'P0-S03'* \
+  && "$steps" == *'P1-S01-1'* && "$steps" == *'P1-S01-2'* \
+  && "$steps" == *'P2-S00'* && "$steps" == *'P2-S07'* ]]
 bash "$HERE/bb3-run.sh" S3 --only P2-S00,P2-S09 > "$TEMP/dispatcher-preview.txt" 2>&1
 grep -F 'Snapshot: snapshot-no-replica (source primary: primary-no-replica)' "$TEMP/dispatcher-preview.txt" >/dev/null
 grep -F 'primary target: available' "$TEMP/dispatcher-preview.txt" >/dev/null
 echo 'PASS S3 --only comma list runs only the requested ordered step IDs'
+
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --from P2-S06 --to P2-S09 --list)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P2-S06\n  P2-S07\n  P2-S08\n  P2-S09' ]]
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --to P1-S01-2 --from P1-S01-1 --list)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P1-S01-1\n  P1-S01-2' ]]
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --from P4-S01 --list)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P4-S01\n  P4-S02' ]]
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --to P0-S02 --list)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P0-S01\n  P0-S02' ]]
+bash "$HERE/bb3-run.sh" S3 --from P2-S09 --to P2-S09 > "$TEMP/range-status.txt" 2>&1
+grep -F 'primary target: available' "$TEMP/range-status.txt" >/dev/null
+grep -F 'replica target: available' "$TEMP/range-status.txt" >/dev/null
+reject_selection() {
+  if bash "$HERE/bb3-run.sh" S3 "$@" > "$TEMP/invalid-selection.txt" 2>&1; then
+    printf 'FAIL runner accepted invalid selection: %s\n' "$*" >&2
+    exit 1
+  fi
+  if grep -F '== P' "$TEMP/invalid-selection.txt" >/dev/null; then
+    echo 'FAIL runner started a step before rejecting invalid selection' >&2
+    exit 1
+  fi
+}
+reject_selection --from P2-S09 --to P2-S06
+reject_selection --from P3-G0
+reject_selection --to P5
+reject_selection --from
+reject_selection --to ''
+reject_selection --from P2-S09 --from P2-S09
+reject_selection --from P2-S09 --only P2-S09
+reject_selection --only P2-S09 --to P2-S09
+reject_selection --only P0-S03,unknown
+echo 'PASS inclusive ranges, one-sided defaults, split step IDs, and fail-before-action validation'

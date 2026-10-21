@@ -78,7 +78,7 @@ Keep application-owner steps as explicit prompts/gates in the incident worksheet
 | P4-S02 | Did the app owner confirm both displayed DB targets, run a successful business transaction/readback, record its transaction/reference number and evidence, and approve GO? | PENDING until confirmed; no T9 or business-recovery claim |
 
 The session result is **RDS restore/API validation only**, not end-to-end DR certification. Do not fabricate
-application answers to finish the tracker, and do not report business RTO until an actual T9 exists.
+application answers to finish the tracker, and do not report Service RTO until T8 exists or business validation until T9 exists.
 
 ### Primary And Read Replica Behavior
 
@@ -170,7 +170,7 @@ implemented, the owner records UTC markers and approvals in the incident workshe
 | P4-S01 | Confirm original remains fenced, target available and deployment no longer uses the prior endpoint; inspect service health/restarts | App owner / operator | 1 min | Old tasks drained, no stale consumers; jobs remain paused until safe |
 | P4-S02 | App owner confirms `yes/no` for displayed primary and replica targets, runs the approved business transaction/readback, records transaction number/reference and evidence, supplies `APP_OWNER`/`E2E_REF`, then approves GO | App owner | 3 min | Successful transaction on restored primary plus intended read path on restored replica; blank/no or failed proof cannot record T9 |
 | P4-G4 | Record T9 only after that attestation; declare restored, record T10 and resume approved jobs | IC / app owner | 1 min | Approver matches named app owner; application proof is separate from API status |
-| P5-S01 | Collect sanitized evidence and calculate RTO/RPO; record limitations and outstanding normalization | Operator | 1 min | T9-T0 includes waits; target misses retained, not adjusted away |
+| P5-S01 | Collect sanitized evidence and calculate RTO/RPO; record limitations and outstanding normalization | Operator | 1 min | Service RTO is T8-T0; report T9-T8 validation separately; target misses retained, not adjusted away |
 
 ### RDS API Commands
 
@@ -341,10 +341,10 @@ Validate the following for restored primary and new replica, recording every acc
   an approved threshold; missing metrics are not zero lag. Idle PostgreSQL can report lag without new writes,
   so assess engine behavior and metrics together. Only the app/data owner can provide independent data checks.
 
-Record replica-create start/end and **full-topology recovery time** alongside primary availability and business
-RTO (T9-T0). If service recovery depends on read replicas, its T9 must wait for their readiness and app-owner E2E.
-Otherwise report business recovery and redundancy restoration separately; do not silently exclude replica time.
-Today's RDS-only session has no app-owner E2E/T9 and cannot certify business RTO or data correctness.
+Record replica-create start/end and **full-topology recovery time** alongside primary availability. If service recovery
+depends on read replicas, do not record T8 until the required replica is ready and the app-level health check passes.
+Service RTO is T8-T0; record app-owner business transaction/readback separately at T9 and report T9-T8 validation
+duration. Today's RDS-only session has no app-owner T8/T9 and cannot certify Service RTO or business data correctness.
 
 AWS reference: [promotion prerequisites and behavior](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html)
 and [Oracle-only switchover command](https://docs.aws.amazon.com/cli/latest/reference/rds/switchover-read-replica.html).

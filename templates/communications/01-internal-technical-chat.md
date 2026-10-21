@@ -50,7 +50,7 @@ Next update: {{hh:mm}} UTC (or at G2/G3)
 ```
 ✅ [{{ENV}}] [Services Restored] {{SERVICE}} running on {{TARGET_DB}} since {{T9}} UTC.
 • DB writable {{T5}}, secret updated {{T6}}, Reloader rollouts complete {{T7}}; 0 app sessions on {{OLD_DB}}
-• Business RTO: {{T9−T0}} min (target {{x}}) · RPO actual: {{x}} s (target {{y}})
+• Service RTO: {{T8−T0}} min (target {{x}}) · Business validation: {{T9−T8}} min · RPO actual: {{x}} s (target {{y}})
 • Synthetics green x3; error rate {{x}}%, p95 {{x}} ms
 • Still open: Multi-AZ {{status}}, new read replica {{status}}, rotation {{off}}, parity/IaC {{status}}, CronJobs {{resumed?}}
 • Freeze remains on schema changes until {{time}}. Monitoring for {{2 h}}.

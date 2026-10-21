@@ -291,11 +291,17 @@ print_env() {
   printf 'export BB3_RESTORE_TARGET_PRIMARY_ID=%q\n' "$RESTORE_TARGET_PRIMARY"
   printf 'export BB3_RESTORE_TARGET_REPLICA_ID=%q\n' "$RESTORE_TARGET_REPLICA"
   printf 'export BB3_DISCOVERED_AT=%q\n' "$DISCOVERED_AT"
+  [[ -z "${BB3_DR_ID:-}" ]] || printf 'export BB3_DR_ID=%q\n' "$BB3_DR_ID"
+  [[ -z "${BB3_T0_AT:-}" ]] || printf 'export BB3_T0_AT=%q\n' "$BB3_T0_AT"
+  [[ -z "${BB3_T0_EVIDENCE_REF:-}" ]] || printf 'export BB3_T0_EVIDENCE_REF=%q\n' "$BB3_T0_EVIDENCE_REF"
+  [[ -z "${BB3_T1_AT:-}" ]] || printf 'export BB3_T1_AT=%q\n' "$BB3_T1_AT"
+  [[ -z "${BB3_T1_EVIDENCE_REF:-}" ]] || printf 'export BB3_T1_EVIDENCE_REF=%q\n' "$BB3_T1_EVIDENCE_REF"
+  [[ -z "${BB3_SCENARIO:-}" ]] || printf 'export BB3_SCENARIO=%q\n' "$BB3_SCENARIO"
 }
 case "$MODE" in
   print) print_env ;;
   interactive)
-    bb3_keys='AWS_PROFILE|AWS_REGION|ACCOUNT_ID|SOURCE_PRIMARY_ID|SOURCE_REPLICA_ID|SNAPSHOT_ID|SNAPSHOT_TIME|RESTORE_TARGET_PRIMARY_ID|RESTORE_TARGET_REPLICA_ID|DISCOVERED_AT'
+    bb3_keys='AWS_PROFILE|AWS_REGION|ACCOUNT_ID|SOURCE_PRIMARY_ID|SOURCE_REPLICA_ID|SNAPSHOT_ID|SNAPSHOT_TIME|RESTORE_TARGET_PRIMARY_ID|RESTORE_TARGET_REPLICA_ID|DISCOVERED_AT|DR_ID|T0_AT|T0_EVIDENCE_REF|T1_AT|T1_EVIDENCE_REF|SCENARIO'
     if [[ "${ENV:-}" == "$ENVIRONMENT" \
       && "${APP:-}" == bb3 \
       && "${BB3_AWS_PROFILE:-}" == "$PROFILE" \

@@ -141,17 +141,17 @@ def load_cutover(directory, selection, account, region):
     return record
 
 
-def record_app_deployment(directory, run_id, account, region, owner, commit, evidence_ref):
+def record_app_deployment(directory, run_id, account, region, owner, evidence_ref):
     cutover = load_cutover(directory, run_id, account, region)
-    if not owner.strip() or not re.fullmatch(r"[0-9a-fA-F]{40}", commit) or not evidence_ref.strip():
-        raise ValueError("App owner, full 40-character deployment commit, and evidence reference are required.")
+    if not owner.strip() or not evidence_ref.strip():
+        raise ValueError("App owner and deployment log evidence reference are required.")
     path = Path(directory) / run_id / "app-deploy.json"
     if path.exists():
         raise ValueError("App deployment confirmation already exists for this DR run.")
     result = {
         "runId": run_id, "secretName": cutover["secretName"],
         "mode": "manual", "status": "owner-confirmed",
-        "appOwner": owner.strip(), "deployedCommit": commit.lower(),
+        "appOwner": owner.strip(),
         "evidenceRef": evidence_ref.strip(),
         "primaryHost": cutover["newHost"], "replicaHost": cutover["newReplicaHost"],
         "servicesConverged": True,
@@ -354,8 +354,8 @@ def main(arguments):
             print(json.dumps(load_cutover(directory, selection, account, region)))
             return 0
         if arguments[0] == "--record-app-deploy":
-            _, directory, run_id, account, region, owner, commit, evidence_ref = arguments
-            print(json.dumps(record_app_deployment(directory, run_id, account, region, owner, commit, evidence_ref)))
+            _, directory, run_id, account, region, owner, evidence_ref = arguments
+            print(json.dumps(record_app_deployment(directory, run_id, account, region, owner, evidence_ref)))
             return 0
         if arguments[0] == "--record-app-health":
             _, directory, run_id, account, region, owner, evidence_ref, t0_at = arguments

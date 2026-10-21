@@ -329,26 +329,27 @@ class SecretEndpointTests(unittest.TestCase):
         self.assertNotIn("synthetic-test-only", journal.read_text())
         self.sm.put_secret_value.assert_not_called()
 
-    def test_manual_app_deployment_confirmation_records_owner_and_sha(self):
+    def test_manual_app_deployment_confirmation_records_owner_and_log_reference(self):
         self.execute()
         result = HANDLER["record_app_deployment"](
             self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
-            "App Owner", "a" * 40, "ticket-123")
+            "App Owner", "evidence/DR-fixture/app-deploy.log")
         self.assertEqual(result["status"], "owner-confirmed")
-        self.assertEqual(result["deployedCommit"], "a" * 40)
+        self.assertEqual(result["evidenceRef"], "evidence/DR-fixture/app-deploy.log")
+        self.assertNotIn("deployedCommit", result)
         self.assertTrue(result["servicesConverged"])
         self.assertNotIn("synthetic-test-only", json.dumps(result))
         with self.assertRaises(ValueError):
             HANDLER["record_app_deployment"](
                 self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
-                "App Owner", "a" * 40, "ticket-123")
+                "App Owner", "evidence/DR-fixture/app-deploy.log")
 
     def test_app_deploy_attestation_requires_evidence_reference(self):
         self.execute()
         with self.assertRaises(ValueError):
             HANDLER["record_app_deployment"](
                 self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
-                "App Owner", "a" * 40, " ")
+                "App Owner", " ")
 
 
 if __name__ == "__main__":

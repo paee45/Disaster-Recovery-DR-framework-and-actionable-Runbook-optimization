@@ -50,12 +50,44 @@ case "$DEPLOY_MODE" in
   *) echo 'Invalid deployment mode.' >&2; exit 2 ;;
 esac
 read -r -p 'App owner name: ' APP_OWNER
-read -r -p 'Approved deployed commit SHA (40 hex characters): ' COMMIT
-read -r -p 'Deployment/convergence evidence reference: ' EVIDENCE_REF
-[[ -n "$APP_OWNER" && "$COMMIT" =~ ^[0-9a-fA-F]{40}$ && -n "$EVIDENCE_REF" ]] \
-  || { echo 'Owner, full commit SHA, and evidence reference are required.' >&2; exit 2; }
-read -r -p 'Owner confirms both restored endpoints and all expected services/tasks converged? Type DEPLOYED-AND-CONVERGED: ' CONFIRM
-[[ "$CONFIRM" == DEPLOYED-AND-CONVERGED ]] || { echo 'Deployment confirmation not recorded.' >&2; exit 2; }
-RESULT="$(python3 "$HERE/secret-endpoints.py" --record-app-deploy "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION" "$APP_OWNER" "$COMMIT" "$EVIDENCE_REF")"
-jq '{runId,mode,status,appOwner,deployedCommit,evidenceRef,servicesConverged,primaryHost,replicaHost,recordedAt}' <<< "$RESULT"
+[[ -n "$APP_OWNER" ]] || { echo 'App owner is required.' >&2; exit 2; }
+RUN_DIR="$LEDGER/$RUN_ID"
+DEPLOY_LOG="$RUN_DIR/app-deploy.log"
+[[ ! -e "$DEPLOY_LOG" ]] || { echo 'A deployment log capture already exists for this run.' >&2; exit 2; }
+mkdir -p "$RUN_DIR"
+chmod 700 "$LEDGER" "$RUN_DIR"
+git -C "$ROOT" check-ignore -q "$DEPLOY_LOG" \
+  || { echo 'Deployment log capture must be Git-ignored.' >&2; exit 2; }
+TMP_LOG="$(mktemp "$RUN_DIR/.app-deploy-log.XXXXXX")"
+trap 'rm -f "$TMP_LOG"' EXIT
+echo 'Paste sanitized deployment/convergence logs. Redact credentials, tokens, secret values, and customer data.'
+echo 'Paste the full log, then press Enter twice on a blank line to finish.'
+LOG_COMPLETE=false
+BLANK_PENDING=false
+while IFS= read -r LOG_LINE; do
+  if [[ -z "$LOG_LINE" ]]; then
+    if [[ "$BLANK_PENDING" == true ]]; then
+      LOG_COMPLETE=true
+      break
+    fi
+    BLANK_PENDING=true
+    continue
+  fi
+  if [[ "$BLANK_PENDING" == true ]]; then
+    printf '\n' >> "$TMP_LOG"
+    BLANK_PENDING=false
+  fi
+  printf '%s\n' "$LOG_LINE" >> "$TMP_LOG"
+done </dev/tty
+[[ "$LOG_COMPLETE" == true && -s "$TMP_LOG" ]] \
+  || { echo 'Deployment log capture was incomplete or empty.' >&2; exit 2; }
+chmod 600 "$TMP_LOG"
+mv "$TMP_LOG" "$DEPLOY_LOG"
+trap - EXIT
+EVIDENCE_REF="evidence/bb3-secret-endpoints/$RUN_ID/app-deploy.log"
+printf 'Captured sanitized deployment log; evidence=%s\n' "$EVIDENCE_REF"
+read -r -p 'Owner confirms both restored endpoints and all expected services/tasks converged? [y/N]: ' CONFIRM
+[[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo 'Deployment confirmation not recorded; sanitized log retained for review.' >&2; exit 2; }
+RESULT="$(python3 "$HERE/secret-endpoints.py" --record-app-deploy "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION" "$APP_OWNER" "$EVIDENCE_REF")"
+jq '{runId,mode,status,appOwner,evidenceRef,servicesConverged,primaryHost,replicaHost,recordedAt}' <<< "$RESULT"
 echo 'Deployment attestation recorded. Run P4-S01 after the app DB health check to record T8, then P4-S02 after the business transaction/readback to record T9.'

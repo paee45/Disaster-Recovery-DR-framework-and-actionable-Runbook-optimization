@@ -210,7 +210,7 @@ apply_quarantine_group() {
     jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
       --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
       '.runId==$run and .account==$account and .region==$region and .activePrimary==$primary and
-       (.activeReplica // "")==$replica and (.status=="prepared" or .status=="attached")' \
+      (.activeReplica // "")==$replica and (.status=="prepared" or .status=="submitted" or .status=="attached")' \
       "$NETWORK_RECORD" >/dev/null \
       || { echo 'Network fence journal does not match this run or is not resumable.' >&2; return 1; }
     QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' "$NETWORK_RECORD")"
@@ -256,15 +256,18 @@ apply_quarantine_group() {
     || { echo 'Quarantine SG is missing, belongs to another run, or has ingress rules.' >&2; return 1; }
   instance_ids=("$ACTIVE_PRIMARY")
   [[ -z "$ACTIVE_REPLICA" ]] || instance_ids+=("$ACTIVE_REPLICA")
+  # Submit both independent SG modifications before waiting, so their AWS apply times overlap.
   for instance_id in "${instance_ids[@]}"; do
     current_groups="$(group_ids_for_db "$instance_id")"
     if ! jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null; then
       aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds modify-db-instance \
         --db-instance-identifier "$instance_id" --vpc-security-group-ids "$QUARANTINE_SG" \
         --apply-immediately >/dev/null || return 1
-      aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
-        --db-instance-identifier "$instance_id" || return 1
     fi
+  done
+  for instance_id in "${instance_ids[@]}"; do
+    aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+      --db-instance-identifier "$instance_id" || return 1
     wait_for_quarantine_attachment "$instance_id" \
       || { echo "Quarantine SG attachment is not active on $instance_id after retries." >&2; return 1; }
     current_groups="$(group_ids_for_db "$instance_id")"
@@ -445,7 +448,29 @@ fi
 FENCE_METHOD=none
 FENCE_VERIFIED=false
 RDS_STOP_CONFIRMED=false
-if [[ "$ACTIVE_STANDALONE" == true ]]; then
+if [[ "$MODE" != failback ]]; then
+  [[ -f "$NETWORK_RECORD" ]] \
+    || { echo 'P0 quarantine record is required; no source mutation is made in P3-S01.' >&2; exit 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
+    '.runId==$run and .account==$account and .region==$region and .activePrimary==$primary and
+     (.activeReplica // "")==$replica and .status=="attached"' \
+    "$NETWORK_RECORD" >/dev/null \
+    || { echo 'P0 quarantine record is not attached for this source pair.' >&2; exit 2; }
+  QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' "$NETWORK_RECORD")"
+  vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")"
+  verify_quarantine_group "$QUARANTINE_SG" "$vpc_id" \
+    || { echo 'P0 quarantine SG is missing, changed, or has ingress rules.' >&2; exit 2; }
+  for instance_id in "$ACTIVE_PRIMARY" "$ACTIVE_REPLICA"; do
+    [[ -n "$instance_id" ]] || continue
+    current_groups="$(group_ids_for_db "$instance_id")"
+    jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null \
+      || { echo "P0 quarantine SG is not the only attached SG on $instance_id." >&2; exit 2; }
+  done
+  FENCE_METHOD=security-group-no-ingress
+  FENCE_VERIFIED=true
+  printf 'P0 quarantine verified; P3-S01 will not submit another SG change or stop the source DB.\n'
+elif [[ "$ACTIVE_STANDALONE" == true ]]; then
   if [[ "$ACTIVE_ALREADY_STOPPED" == true ]]; then
     printf 'Active standalone primary is already stopped; its fence is confirmed by RDS status.\n'
     FENCE_METHOD=rds-stopped
@@ -480,7 +505,27 @@ if [[ "$ACTIVE_STANDALONE" == true ]]; then
   fi
 else
   printf 'RDS stop is prohibited: this primary has a read replica or is itself a replica. No stop request will be sent.\n'
-  apply_quarantine_group
+  [[ -f "$NETWORK_RECORD" ]] \
+    || { echo 'P0 quarantine record is required; no SG changes are made in P3-S01.' >&2; exit 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
+    '.runId==$run and .account==$account and .region==$region and .activePrimary==$primary and
+     (.activeReplica // "")==$replica and .status=="attached"' \
+    "$NETWORK_RECORD" >/dev/null \
+    || { echo 'P0 quarantine record is not attached for this source pair.' >&2; exit 2; }
+  QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' "$NETWORK_RECORD")"
+  vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")"
+  verify_quarantine_group "$QUARANTINE_SG" "$vpc_id" \
+    || { echo 'P0 quarantine SG is missing, changed, or has ingress rules.' >&2; exit 2; }
+  for instance_id in "$ACTIVE_PRIMARY" "$ACTIVE_REPLICA"; do
+    [[ -n "$instance_id" ]] || continue
+    current_groups="$(group_ids_for_db "$instance_id")"
+    jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null \
+      || { echo "P0 quarantine SG is not the only attached SG on $instance_id." >&2; exit 2; }
+  done
+  FENCE_METHOD=security-group-no-ingress
+  FENCE_VERIFIED=true
+  printf 'P0 quarantine verified; P3-S01 will not submit another SG change.\n'
 fi
 if [[ "$FENCE_METHOD" == security-group-no-ingress ]]; then
   read -r -p 'Are all app clients and existing DB sessions closed? [y/N]: ' SESSION_APPROVAL

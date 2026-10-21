@@ -265,7 +265,8 @@ if [[ "$MODE" == restore && -n "$SNAPSHOT_TAG_DIFFS" ]]; then
     )
   ')"
 fi
-RUN_ID="DR-$(date -u +%Y%m%d-%H%M)-uat-BB3-S3"
+RUN_ID="${BB3_DR_ID:-DR-$(date -u +%Y%m%d-%H%M)-uat-BB3-S3}"
+[[ "$RUN_ID" =~ ^DR-[A-Za-z0-9_-]{1,120}$ ]] || { echo 'Invalid BB3_DR_ID in sandbox config.' >&2; exit 2; }
 PRIMARY_AZ="$(jq -r '.AvailabilityZone // empty' <<<"$primary")"
 REPLICA_AZ=''
 if [[ "$(jq -r '.MultiAZ // false' <<<"$primary")" != true ]]; then

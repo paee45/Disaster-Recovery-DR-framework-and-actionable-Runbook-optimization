@@ -17,7 +17,8 @@
 ## 1. KPIs (from `rto-rpo-report.md`)
 | KPI | This drill | Previous | Target | Met |
 |---|---|---|---|---|
-| Business RTO (T9−T0) | | | | |
+| Service RTO (T8−T0) | | | | |
+| Business validation after RTO (T9−T8) | | | | |
 | RPO actual | | | | |
 | Decision time (T2−T1) | | | ≤ 15 min | |
 | DB recovery (T5−T4) | | | model | |

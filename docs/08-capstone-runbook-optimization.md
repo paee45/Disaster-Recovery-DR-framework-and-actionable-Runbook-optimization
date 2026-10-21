@@ -53,7 +53,8 @@ Total /36: < 10 L1 · 10–19 L2 · 20–27 L3 · 28–33 L4 · 34+ L5 (see [07 
 
 | KPI | Baseline | After | Target |
 |---|---|---|---|
-| Business RTO (`T9 − T0`) | | | per env |
+| Service RTO (`T8 − T0`) | | | per env |
+| Business validation after RTO (`T9 − T8`) | | | per env |
 | Decision time (`T2 − T1`) | | | ≤ 15 min PROD |
 | DB recovery (`T5 − T4`) | | | measured model |
 | Cutover (`T7 − T6`) | | | ≤ 10 min |

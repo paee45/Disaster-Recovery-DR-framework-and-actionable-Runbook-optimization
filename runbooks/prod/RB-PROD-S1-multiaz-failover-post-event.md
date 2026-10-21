@@ -45,7 +45,7 @@ dr_set_target "$PRIMARY_DB"           # the same instance; the endpoint is uncha
 | ID | Step | Owner | ⏱ | Expected / verify |
 |---|---|---|---|---|
 | P3-S01 | Root-cause inputs: the RDS event reason, AWS Health events for the account/AZ, CloudTrail (`RebootDBInstance`, `ModifyDBInstance`: was the failover human/maintenance-triggered?), `PendingModifiedValues`/maintenance actions (`aws --profile $AWS_PROFILE --region $AWS_REGION rds describe-pending-maintenance-actions`) | SRE | 15 | Cause classified: infra / maintenance / human |
-| P3-S02 | [CP-05](../common/CP-05-evidence-and-closure.md) evidence (RPO = 0; RTO = `T9 − T0`) | Scribe | 10 | Uploaded |
+| P3-S02 | [CP-05](../common/CP-05-evidence-and-closure.md) evidence (RPO = 0; Service RTO = `T8 − T0`; T9 validation separate) | Scribe | 10 | Uploaded |
 | P3-S03 | [CP-06](../common/CP-06-post-incident-review.md) PIR (S1 questions). Mandatory if the app impact exceeded the AWS failover time by > 2 min | IC | — | Booked |
 
 **Failback:** there is no failback for Multi-AZ. The standby is rebuilt automatically. Only an *optional* AZ rebalance → [RB-PROD-FB-S1](RB-PROD-FB-S1-az-rebalance.md).

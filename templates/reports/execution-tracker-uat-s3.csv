@@ -26,6 +26,6 @@ P3-S02,"Cutover: ./automation/scripts/dr-secret-cutover.sh apply. It updates $SE
 P3-S03,./automation/scripts/dr-eks-rollout.sh resume-cronjobs · dr_phase end cutover 5,SRE,—,CronJobs resumed,,,Not started,,,,,,
 P4-S01,"dr_phase start app-verify 5 · ./automation/scripts/dr-verify.sh connections (app sessions on the new DB, 0 on the old)",SRE,1,As expected,,,Not started,,,,,,
 P4-S02,E2E check per the E2E validation playbook: dashboard reachable + one successful test transaction. No extra checks (e.g. user-login verification) unless the playbook lists them,Backend,3,Transaction ID recorded. dr_mark T9 at success,,,Not started,,,,,,
-P4-G4,Declare restored: dr_mark T10 · dr_phase end app-verify 5 · dr_summary (post it) · [Services Restored] message,SRE on-call,1,RTO = T9 − T0 shown,,,Not started,,,,,,
+P4-G4,Declare restored: dr_mark T10 · dr_phase end app-verify 5 · dr_summary (post it) · [Services Restored] message,SRE on-call,1,Service RTO = T8 − T0; T9 validation reported separately,,,Not started,,,,,,
 P5-S01,"./automation/scripts/dr-collect-evidence.sh (timeline, phase times, CloudTrail, RDS events, secret version metadata, rollouts, SQL outputs, KPI report, SHA-256 manifest). All outputs carry UTC timestamps",SRE,1,EVIDENCE: … sha256=… posted,,,Not started,,,,,,
 P5-S02,Real event: raise RB-UAT-FB-S3S4. Exercise: run §Exercise failback,SRE,—,Done,,,Not started,,,,,,
