@@ -2,11 +2,13 @@
 
 ## BB3 Docker Swarm
 
-[RB-BB3-S3 - Snapshot restore and Swarm cutover](bb3/RB-BB3-S3-snapshot-restore-swarm.md)
-is the separate dev/uat/prod procedure for BB3: RDS snapshot -> Secrets Manager -> `bb3-infrastructure`
-deployment. It offers manual/SSM secret updates and manual/SSH-assisted deployment (production manual).
-It adapts the local SQL-free S3 gates, not the EKS/Reloader steps. Status: draft; BB3/sandbox Swarm testing pending.
-The existing `dr-run.sh` runner is still EKS-only.
+[RB-BB3-S3 - UAT snapshot recovery, Swarm failback and retirement](bb3/RB-BB3-S3-snapshot-restore-swarm.md)
+is the maintained v1.0 reference for the approved BB3 UAT-role sandbox. It consolidates the BB3 temporary
+development notes: one-command S3 recovery through T10/P5, guarded endpoint updates, external app-owner
+deployment/validation, guided failback and separately approved scoped retirement. Quick commands are at
+the top of that runbook. The BB3 runner is separate from EKS `dr-run.sh` and Reloader.
+Named owner review remains required; actual BB3 UAT/production adoption and independent Swarm/business-data
+validation are not certified by the document or mocked tests. Do not bypass sandbox account guards.
 
 ## 1. Scenarios × environments
 

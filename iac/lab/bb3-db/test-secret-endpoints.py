@@ -111,6 +111,180 @@ class SecretEndpointTests(unittest.TestCase):
         }))
         return run_dir
 
+    def prepare_failback_app_run(self):
+        run_dir = self.prepare_app_run()
+        cutover_path = run_dir / "cutover.json"
+        cutover = json.loads(cutover_path.read_text())
+        cutover.update({
+            "source_db": "old-primary", "source_replica": "old-replica",
+            "db": "new-primary", "replica": "new-replica",
+            "oldHost": "old-primary.example.invalid",
+            "oldReplicaHost": "old-replica.example.invalid",
+        })
+        cutover_path.write_text(json.dumps(cutover))
+        (run_dir / "failback.json").write_text(json.dumps({
+            "runId": "DR-fixture", "operation": "failback", "status": "complete",
+            "account": "000000000000", "region": "ap-southeast-1",
+            "source_db": "new-primary", "source_replica": "new-replica",
+            "db": "old-primary", "replica": "old-replica",
+        }))
+        (run_dir / "network-fence.json").write_text(json.dumps({
+            "runId": "DR-fixture", "account": "000000000000", "region": "ap-southeast-1",
+            "mode": "cutover", "status": "released", "activePrimary": "old-primary",
+            "activeReplica": "old-replica",
+        }))
+        (run_dir / "failback-network-fence.json").write_text(json.dumps({
+            "runId": "DR-fixture", "account": "000000000000", "region": "ap-southeast-1",
+            "mode": "failback", "status": "attached", "activePrimary": "new-primary",
+            "activeReplica": "new-replica",
+        }))
+        (run_dir / "failback-fence.json").write_text(json.dumps({
+            "runId": "DR-fixture", "mode": "failback", "account": "000000000000", "region": "ap-southeast-1",
+            "status": "owner-confirmed", "appOwner": "owner@example.invalid",
+            "activePrimary": "new-primary", "activeReplica": "new-replica",
+            "returnPrimary": "old-primary", "returnReplica": "old-replica",
+            "fenceVerified": True, "existingSessionsClosed": True,
+        }))
+        (run_dir / "app-health.json").write_text(json.dumps({"runId": "DR-fixture", "t8At": "recovery-health"}))
+        (run_dir / "app-e2e.json").write_text(json.dumps({"runId": "DR-fixture", "t9At": "recovery-e2e"}))
+        return run_dir
+
+    def test_failback_deployment_uses_saved_original_endpoints_and_is_exclusive(self):
+        run_dir = self.prepare_failback_app_run()
+        result = HANDLER["record_failback_app_deployment"](
+            self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+            "owner@example.invalid", "evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log")
+        self.assertEqual(result["primaryHost"], "old-primary.example.invalid")
+        self.assertEqual(result["replicaHost"], "old-replica.example.invalid")
+        self.assertEqual(result["mode"], "manual")
+        self.assertTrue(result["servicesConverged"])
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_deployment"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "duplicate.log")
+        self.assertTrue((run_dir / "app-deploy.json").exists())
+
+    def test_failback_app_records_require_matching_deployment_health_and_owner(self):
+        run_dir = self.prepare_failback_app_run()
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_health"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "health-ref", "2026-10-22T12:00:00Z")
+        HANDLER["record_failback_app_deployment"](
+            self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+            "owner@example.invalid", "evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log")
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_health"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "other@example.invalid", "health-ref", "2026-10-22T12:00:00Z")
+        deploy_path = run_dir / "failback-app-deploy.json"
+        deployment = json.loads(deploy_path.read_text())
+        deployment["primaryHost"] = "unexpected.example.invalid"
+        deploy_path.write_text(json.dumps(deployment))
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_health"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "health-ref", "2026-10-22T12:00:00Z")
+        deployment["primaryHost"] = "old-primary.example.invalid"
+        deploy_path.write_text(json.dumps(deployment))
+        health = HANDLER["record_failback_app_health"](
+            self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+            "owner@example.invalid", "health-ref", "2026-10-22T12:00:00Z")
+        self.assertEqual(health["primaryHost"], "old-primary.example.invalid")
+        self.assertEqual(health["healthCheckAt"], "2026-10-22T12:00:00+00:00")
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_e2e"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "other@example.invalid", "txn-ref", "2026-10-22T12:01:00Z")
+        with self.assertRaisesRegex(ValueError, "UTC ISO-8601"):
+            HANDLER["record_failback_app_e2e"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "txn-ref", "2026-10-22T12:01:00+01:00")
+        e2e = HANDLER["record_failback_app_e2e"](
+            self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+            "owner@example.invalid", "txn-ref", "2026-10-22T12:01:00Z")
+        self.assertTrue(e2e["businessTransactionVerified"])
+        self.assertEqual(e2e["transactionRef"], "txn-ref")
+        self.assertNotIn("t8At", json.dumps(health))
+        self.assertNotIn("t9At", json.dumps(e2e))
+        self.assertTrue((run_dir / "app-health.json").exists())
+        self.assertTrue((run_dir / "app-e2e.json").exists())
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_e2e"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "duplicate-ref", "2026-10-22T12:06:00Z")
+
+    def test_failback_signoff_requires_evidence_owner_and_explicit_approval(self):
+        run_dir = self.prepare_failback_app_run()
+        arguments = (self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1")
+        owner = "owner@example.invalid"
+        HANDLER["record_failback_app_deployment"](
+            *arguments, owner, "evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log")
+        (run_dir / "failback-app-deploy.log").write_text("Sanitized deployment convergence output\n")
+        HANDLER["record_failback_app_health"](*arguments, owner, "health-123", "2020-01-01T12:00:00Z")
+        HANDLER["record_failback_app_e2e"](*arguments, owner, "txn-456", "2020-01-01T12:05:00Z")
+        review = HANDLER["failback_signoff_review"](*arguments)
+        self.assertEqual(review["evidence"]["transaction"]["transactionRef"], "txn-456")
+        for bad_owner, deployment, token in ((owner, "ticket-1", ""),
+                                             ("other", "ticket-1", "SIGN-OFF-FAILBACK"),
+                                             (owner, "", "SIGN-OFF-FAILBACK")):
+            with self.assertRaises(ValueError):
+                HANDLER["record_failback_signoff"](
+                    *arguments, bad_owner, deployment, "health-1", "txn-1", token)
+        result = HANDLER["record_failback_signoff"](
+            *arguments, owner, "deploy-ticket-1", "health-log-1", "txn-log-1", "SIGN-OFF-FAILBACK")
+        self.assertEqual(result["status"], "signed-off")
+        self.assertFalse(result["cleanupAuthorized"])
+        self.assertEqual(len(result["evidenceHashes"]), 9)
+        network_path = run_dir / "failback-network-fence.json"
+        with self.assertRaisesRegex(ValueError, "valid run-owned"):
+            HANDLER["retirement_context"](*arguments)
+        with self.assertRaises(FileExistsError):
+            HANDLER["record_failback_signoff"](
+                *arguments, owner, "deploy-ticket-1", "health-log-1", "txn-log-1", "SIGN-OFF-FAILBACK")
+        network = json.loads(network_path.read_text())
+        network["quarantineSecurityGroup"] = "sg-abcdef"
+        network_path.write_text(json.dumps(network))
+        with self.assertRaisesRegex(ValueError, "evidence changed"):
+            HANDLER["retirement_context"](*arguments)
+
+    def test_failback_app_journals_reject_wrong_run_fence_endpoint_and_timestamp(self):
+        run_dir = self.prepare_failback_app_run()
+        operations = (
+            ("cutover.json", ".runId='DR-other'"),
+            ("failback.json", ".status='prepared'"),
+            ("network-fence.json", ".status='attached'"),
+            ("failback-network-fence.json", ".status='deleted'"),
+            ("failback-fence.json", ".existingSessionsClosed=false"),
+            ("failback-fence.json", ".mode='cutover'"),
+            ("failback-fence.json", ".returnPrimary='unexpected-primary'"),
+            ("failback-fence.json", ".runId='DR-other'"),
+        )
+        for filename, field_change in operations:
+            self.prepare_failback_app_run()
+            path = run_dir / filename
+            record = json.loads(path.read_text())
+            key, value = field_change.split("=", 1)
+            if value in ("true", "false"):
+                record[key[1:]] = value == "true"
+            else:
+                record[key[1:]] = value.strip("'")
+            path.write_text(json.dumps(record))
+            with self.subTest(filename=filename, field_change=field_change):
+                with self.assertRaises(ValueError):
+                    HANDLER["record_failback_app_deployment"](
+                        self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                        "owner@example.invalid", "evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log")
+        self.prepare_failback_app_run()
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_deployment"](
+                self.directory.name, "DR-other", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", "evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log")
+        with self.assertRaises(ValueError):
+            HANDLER["record_failback_app_deployment"](
+                self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1",
+                "owner@example.invalid", " ")
+
     def test_t8_requires_completed_deployment_and_records_connectivity(self):
         run_dir = self.prepare_app_run()
         with self.assertRaises(ValueError):

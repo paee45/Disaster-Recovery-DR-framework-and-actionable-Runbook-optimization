@@ -48,17 +48,11 @@ EOF
 }
 
 run_declare() {
-  local scenario="$1" t1="$2" script="$TEMP/declare.exp"
+  local t1="$1" script="$TEMP/declare.exp"
   cat > "$script" <<'EOF'
 set timeout 10
 spawn bash $env(SCRIPT) declare
-  expect "Scenario to recover"
-send "$env(TEST_SCENARIO)\r"
-if {$env(TEST_SCENARIO) == "S4"} {
-  expect "Only S3 is implemented for BB3"
-  expect eof
-  exit 0
-}
+expect "Recovery scenario: S3 snapshot restore."
 expect "Incident declaration T1 UTC ISO-8601"
 send "$env(TEST_T1)\r"
 expect {
@@ -66,7 +60,7 @@ expect {
   "Declared S3 incident" { expect eof; exit 0 }
 }
 EOF
-  TEST_SCENARIO="$scenario" TEST_T1="$t1" expect -f "$script" > "$TEMP/declare.out"
+  TEST_T1="$t1" expect -f "$script" > "$TEMP/declare.out"
 }
 
 run_impact '' synthetic-monitor-current-utc
@@ -76,23 +70,27 @@ source "$CONFIG"
 [[ "$BB3_T0_EVIDENCE_REF" == synthetic-monitor-current-utc ]]
 
 run_impact 2099-01-01T00:00:00Z synthetic-monitor-T0
-run_declare S3 ''
+run_declare ''
 grep -q 'T1 cannot be earlier than T0' "$TEMP/declare.out"
 records=("$LEDGER"/*/incident.json)
 ((${#records[@]} == 0))
 
 run_impact 2026-10-20T00:00:00Z synthetic-monitor-T0
-run_declare S4 ''
-grep -q 'Only S3 is implemented for BB3' "$TEMP/declare.out"
+if bash "$HERE/bb3-run.sh" S4 > "$TEMP/unsupported-scenario.out" 2>&1; then
+  echo 'FAIL BB3 runner accepted unsupported S4' >&2
+  exit 1
+fi
+! grep -F '== P' "$TEMP/unsupported-scenario.out" >/dev/null
 records=("$LEDGER"/*/incident.json)
 ((${#records[@]} == 0))
 
-run_declare S3 ''
+run_declare ''
 grep -q 'Declared S3 incident' "$TEMP/declare.out"
+! grep -F 'Scenario to recover' "$TEMP/declare.out" >/dev/null
 # shellcheck source=/dev/null
 source "$CONFIG"
 [[ "$BB3_SCENARIO" == S3 && "$BB3_T0_AT" == 2026-10-20T00:00:00+00:00 && -n "$BB3_T1_AT" && -n "$BB3_DR_ID" ]]
 jq -e --arg run "$BB3_DR_ID" --arg t0 "$BB3_T0_AT" --arg t1 "$BB3_T1_AT" \
   '.runId==$run and .scenario=="S3" and .t0At==$t0 and .t1At==$t1 and .t1At >= .t0At and .t1Method=="declaration-time"' \
   "$LEDGER/$BB3_DR_ID/incident.json" >/dev/null
-printf '%s\n' 'PASS P1-S01-1 records evidence-based T0 after P0 quarantine; P1-S01-2 reuses the run ID, defaults T1 to UTC now, rejects T1<T0 and S4'
+printf '%s\n' 'PASS P1-S01-1 records evidence-based T0 after P0 quarantine; declaration records S3 without reselection, reuses the run ID and enforces T1>=T0; runner rejects S4'

@@ -9,6 +9,8 @@ else
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
 ENV_FILE="${BB3_DRILL_ENV_FILE:-$CONFIG}"
@@ -120,10 +122,10 @@ else
       done
     fi
     if [[ -n "$primary_default" ]]; then
-      read -r -p "Selection [$primary_default]: " selection </dev/tty
+      bb3_prompt_read selection "Selection [$primary_default]: " </dev/tty
       selection="${selection:-$primary_default}"
     else
-      read -r -p 'Selection (required): ' selection </dev/tty
+      bb3_prompt_read selection 'Selection (required): ' </dev/tty
       [[ -n "$selection" ]] || { echo 'A primary selection is required.' >&2; exit 2; }
     fi
     [[ "$selection" =~ ^[0-9]+$ ]] && ((selection>=1 && selection<=${#candidate_ids[@]})) \
@@ -174,10 +176,10 @@ if ((${#replica_ids[@]} > 0)); then
       fi
     done
     if [[ -n "$replica_default" ]]; then
-      read -r -p "Replica selection [$replica_default]: " selection </dev/tty
+      bb3_prompt_read selection "Replica selection [$replica_default]: " </dev/tty
       selection="${selection:-$replica_default}"
     else
-      read -r -p 'Replica selection (required): ' selection </dev/tty
+      bb3_prompt_read selection 'Replica selection (required): ' </dev/tty
       [[ -n "$selection" ]] || { echo 'A replica selection is required.' >&2; exit 2; }
     fi
     [[ "$selection" =~ ^[0-9]+$ ]] && ((selection>=1 && selection<=${#replica_ids[@]})) \
@@ -221,7 +223,7 @@ else
           printf '  %d) %s (%s)\n' "$((index+1))" "${snapshot_ids[$index]}" "${snapshot_times[$index]}"
         fi
       done
-      read -r -p 'Snapshot selection [1]: ' selection </dev/tty
+      bb3_prompt_read selection 'Snapshot selection [1]: ' </dev/tty
       selection="${selection:-1}"
       [[ "$selection" =~ ^[0-9]+$ ]] && ((selection>=1 && selection<=${#snapshot_ids[@]})) \
         || { echo 'Invalid snapshot selection.' >&2; exit 2; }
@@ -318,7 +320,8 @@ case "$MODE" in
     fi
     [[ -t 0 && -t 1 ]] || { echo 'Interactive discovery requires a terminal; use --print to review non-interactively.' >&2; exit 2; }
     print_summary
-    read -r -p 'Write these selections to iac/sandbox.env? [Y/n]: ' answer </dev/tty
+    answer=''
+    bb3_prompt_read answer 'Write these selections to iac/sandbox.env? [Y/n]: ' </dev/tty
     case "${answer,,}" in
       ''|y|yes) ;;
       n|no) echo 'No changes made to sandbox.env.'; exit 0 ;;

@@ -1,392 +1,414 @@
-# RB-BB3-S3 - RDS Snapshot Restore and Docker Swarm Cutover
+# RB-BB3-S3 - UAT Snapshot Recovery, Swarm Failback And Retirement
 
 | Field | Value |
 |---|---|
-| Runbook ID / version | RB-BB3-S3 / v0.1-draft |
-| Service | BB3 RDS PostgreSQL and the `beepbeep` Docker Swarm stack |
-| Environments | dev, uat, prod; separate approved account, secret and SSH host per environment |
-| Owner / review / approval | `{{SRE_OWNER}}` / SRE and application owner / CTO for production data loss |
-| Recovery | New RDS instance from a snapshot -> AWS Secrets Manager endpoint update -> deployment from `bb3-infrastructure` |
-| Targets | RPO 24 hours; RTO 30 minutes, including approvals, deployment and application verification |
-| Status | Separate BB3 procedure; NOT yet exercised against BB3 or real AWS sandbox |
-| Automation | Existing RDS request builders and SSM document are reusable; the S3/S4 step runner remains EKS-only |
+| Runbook ID / version | RB-BB3-S3 / v1.0 |
+| Service | BB3 RDS PostgreSQL primary/read replica and Docker Swarm application consumers |
+| Execution scope | Approved sandbox account, `ENV=uat`, region `ap-southeast-1`; not real BB3 UAT or production |
+| Owner / review / approval | `{{SRE_OWNER}}` / SRE, application owner and data owner / `{{APPROVER}}` |
+| Recovery | Snapshot -> new primary and replica -> endpoint-only Secrets Manager update -> external app deployment |
+| Targets | RPO 24 hours; Service RTO 30 minutes (`T8-T0`); business validation measured separately |
+| Status | Consolidated UAT-sandbox operational reference; named owner review and real-UAT adoption approval remain required |
+| Application evidence | Owner-attested deployment, health and transaction evidence; not independently verified by the helpers |
 
-## 1. Scope And Readiness
+## 1. Quick Manual
 
-S3 here means scenario S3, **snapshot restore**, not an S3 object-storage restore.
-Use an RDS snapshot or an approved AWS Backup recovery point. The restore commands below are for an
-RDS DB snapshot; an AWS Backup recovery point needs its reviewed AWS Backup restore procedure first.
-Use PITR instead when an approved point-in-time recovery meets the incident needs better.
+Run from the repository root on the operator's Mac after reviewing section 2. Run each phase
+separately and review every approval prompt. External application deployment remains manual.
 
-This runbook replaces the Kubernetes application steps, not the database restore controls. Do not run
-`dr-run.sh S3`, `dr-secret-cutover.sh apply`, ESO, Reloader or Kubernetes rollout commands for BB3.
-Those scripts still require the EKS workflow and are not a Swarm runner.
+### 1.0 Install Workstation Tools (macOS)
 
-The local exercises demonstrated the restore orchestration, endpoint change, owner gates and failback.
-They did **not** test BB3, Docker Swarm, real RDS restore speed, replication, or historical snapshot data.
-The local PostgreSQL fixtures are independent persistent databases, not actual snapshot clones.
-Run `DR-20261018-1801-local-S3` recorded owner-attested recovery using reference `12345`, then failback
-`DR-local-failback-20261019041135-12495` returned the endpoint to the original fixture. RTO was
-569.11 minutes including an overnight pause; synthetic RPO was 98,898.2 seconds. Both targets were missed.
-The referenced business evidence was not independently inspected. Do not use these as sandbox certification.
+On a fresh Mac, first install [Homebrew](https://brew.sh/) using its official instructions, including
+the displayed shell setup command. Its setup may require Xcode Command Line Tools and administrator
+approval; enter any password directly in the local terminal, never in chat. Once `brew` is available,
+install the BB3 recovery/failback/retirement tools together:
 
-Before a real drill, resolve these gates:
+```bash
+brew install bash coreutils python awscli jq git
+eval "$(brew shellenv)"
+```
 
-- Verify the approved AWS account/profile/region, RDS source, snapshot, network and all consumer services.
-- Confirm the exact endpoint keys in the mixed Secrets Manager JSON with the application owner, without
-  giving the DR operator access to its credential payload. Record the secret version ID, not its value.
-- Review the deployment script at an approved commit pushed to `main`. Confirm how it reads Secrets Manager,
-  replaces Docker secrets/configuration and redeploys **all** consumers, workers and scheduled tasks.
-  Updating AWS Secrets Manager alone does not update existing Swarm tasks or immutable Docker secrets.
-- Confirm environment-specific SSH host identity, checked host key, repository path and stack ownership.
-  Real hostnames/account IDs belong in ignored environment configuration, not this runbook.
-- Review deployment output for credential leakage before enabling automated capture. Do not collect secret
-  payloads, rendered credential files or raw application logs containing sensitive data.
-- Have a reviewed RDS baseline and restore/hardening requests, approved fencing, data acceptance, app-owner
-  business test and failback/data-reconciliation plan. Stop if any item is unknown.
+`python` provides `python3`; `coreutils` supplies GNU utilities used by repository scripts. The shell
+setup makes Homebrew tools available in the current terminal; retain Homebrew's recommended shell
+profile setup for future terminals. Existing up-to-date packages are retained by `brew install`.
+Run subsequent DR commands from the cloned repository root. No `pip install`, virtual environment,
+database client, Docker or Kubernetes installation is required for these BB3 script paths.
 
-## 2. Roles And Execution Choices
+For local mocked tests and lint only, also install:
 
-### Scope And App Cutover Modes
+```bash
+brew install shellcheck expect
+```
 
-The default safe drill is RDS-only: provision/restore the isolated sandbox DBs and validate API configuration,
-parameter groups, network and replica relationships. App cutover is a separate optional phase. Do not connect
-to BB3 real environments or change their databases. No local Swarm fixture is currently provided. The DB stack
-is [iac/lab/bb3-db](../../iac/lab/bb3-db/README.md); the interactive AWS request flow is
-[`restore-drill.sh`](../../iac/lab/bb3-db/restore-drill.sh).
+Building/changing the lab infrastructure additionally requires Terraform; follow
+[the Terraform setup guide](../../iac/README.md). These tool-install commands do not configure AWS
+profiles, grant permissions, create the ignored sandbox config or start a DR run. Each operator still
+needs approved account access and reviewed configuration; do not copy another operator's credentials.
+This installation recipe is macOS-specific, not a Windows/Linux bootstrap.
 
-Before app cutover, the incident commander and app owner select exactly one mode and record it. Both modes
-update the same existing mixed secret fields; neither may fetch or print the credential payload:
+Isolated check (2026-10-23): prerequisites installed in a clean Ubuntu 24.04 ARM64 container using
+AWS's official CLI v2 installer. Runner listing, 62 Python tests and mocked recovery/failback/prompt
+checks passed without host mounts, credentials or a real sandbox config. This checks script dependencies,
+not fresh-Mac Homebrew installation, AWS access or a live DR exercise.
 
-| Mode | Secret change | Deployment/restart |
-|---|---|---|
-| `manual` | Authorized custodian changes only `DB_HOST` and `DB_REPLICA_HOST`; preserves `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and unrelated keys; records old/new version IDs | App owner connects to the approved EC2 host, verifies the approved `main` SHA, and runs `scripts/deploy.sh <dev|uat|prod>` or the explicitly reviewed restart procedure |
-| `ssh-script` | Allowed only if the reviewed GitHub script is verified to update both endpoint keys server-side; otherwise the custodian must update the secret manually first | App owner approves SSH; script verifies a clean `main`, fast-forward pulls, pins the approved SHA, runs `scripts/deploy.sh <dev|uat|prod>`, and verifies Swarm convergence. Dev/uat only until production approval |
+### 1.1 Whole DR Run
 
-The `bb3-infrastructure` repository is not present in this workspace. Its deployment script must be reviewed at
-the approved SHA before enabling `ssh-script`; do not assume it updates Secrets Manager. Record the selected
-mode, approval, host, secret version IDs, commit SHA and result.
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3
+```
 
-Keep application-owner steps as explicit prompts/gates in the incident worksheet:
+Runs P0-S01 through P5: discovery, baseline, controlled traffic cutoff, restore/hardening, new replica,
+endpoint cutover, app validation, T10 approval and local packaging. Save the printed run ID. Do not
+restart this command to resume a drill: it begins discovery and fault injection again.
 
-| Gate / step | Prompt to the app owner | If not performed today |
-|---|---|---|
-| P2-S02 | Have all writer/reader services and jobs been identified? Record owner and inventory reference | PENDING; the DB-copy test can continue, but no application cutover |
-| P3-G0 | Do you approve the exact target, fencing procedure, secret update and deployment? Record GO/NO and owner | PENDING/NO blocks all cutover actions |
-| P3-S02 | Did the selected mode update both `DB_HOST` and `DB_REPLICA_HOST` to the reviewed primary/replica endpoints? Record target IDs and old/new secret version IDs | PENDING until confirmed; no T6 |
-| P3-S03 | Did the selected manual or SSH mode deploy the approved commit and converge all expected Swarm services/tasks? Record mode, SHA and result | PENDING until verified; no T7 |
-| P4-S02 | Did the app owner confirm both displayed DB targets, run a successful business transaction/readback, record its transaction/reference number and evidence, and approve GO? | PENDING until confirmed; no T9 or business-recovery claim |
+### 1.2 Failback
 
-The session result is **RDS restore/API validation only**, not end-to-end DR certification. Do not fabricate
-application answers to finish the tracker, and do not report Service RTO until T8 exists or business validation until T9 exists.
+Replace the placeholder with the exact completed recovery run ID, never `latest`:
 
-### Primary And Read Replica Behavior
+```bash
+DR_ID='{{COMPLETED_CUTOVER_DR_ID}}'
+bash iac/lab/bb3-db/bb3-run.sh S3 --failback "$DR_ID"
+```
 
-- Neither the source with attached read replicas nor a read replica can be stopped. Stopping the replica first
-  is not a supported workaround. Do not delete/promote a replica just to make the local `FENCE=stop` path work.
-- A snapshot restore creates a new standalone DB. The existing replica stays attached to the old source;
-  it is not moved, overwritten or made a replica of the restored DB. Verify these relationships by RDS API.
-- If recovery later cuts over to the restored DB, the old replica will still contain old-source data. Review
-  every read endpoint too; otherwise the application can mix new-primary writes with stale old-replica reads.
-- Rebuild a new replica from the recovered primary as separately approved normalization. Do not assume an
-  existing physical replica can be repointed to a different snapshot-restored source.
-- Logical corruption is normally replicated too. Preserve the old source/replica for investigation and data-owner
-  review; do not reuse them as trusted recovery copies or automatically wipe them. Retire them only through a
-  separately approved retention/reconciliation and disposal change.
-- `switchover-read-replica` is an Oracle Data Guard operation, not a PostgreSQL switchover command. PostgreSQL
-  replica promotion is a different scenario requiring writer drain, lag/data-loss review, fencing and new replicas;
-  promotion is not a reversible or unconditional zero-data-loss operation. Keep that separate from S3 restore.
-- For today's copy test, leave source and replica running and unchanged. A later real cutover needs an approved
-  writer-drain/isolation procedure covering existing sessions; security-group metadata alone is not proof.
+No extra `--apply` is needed: preview precedes restored-pair fencing and guarded endpoint return.
+The command then releases originals and collects deployment, health, transaction and sign-off evidence.
+Typed approvals remain mandatory. The app owner drains consumers and performs external deployment.
+Data-owner reconciliation or an identified sandbox data-loss decision must precede failback; endpoint
+return does not copy writes to the original DBs.
 
-AWS references: [stop limitations](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html#USER_StopInstance.Limitations)
-and [read-replica behavior](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html).
+### 1.3 Remove Restored Resources
+
+Only after completed failback sign-off and explicit retirement/data-retention approval:
+
+```bash
+bash iac/lab/bb3-db/retire-restored.sh --failback "$DR_ID"
+```
+
+Review scope and type `RETIRE-RESTORED-PAIR` only when approved. This permanently deletes the restored
+replica/primary, run-owned quarantine SG, restored automated backups and temporary retirement snapshot.
+Original DBs/backups, the source restore snapshot, unrelated resources and evidence remain. Enter cancels.
+There is no minimum waiting period or automatic scheduling. This does not destroy the entire sandbox.
+
+## 2. Scope, Roles And Prerequisites
+
+S3 means **snapshot restore**, not S3 object storage. BB3 S4/PITR remains unsupported by this runner.
+This procedure is for the UAT-role sandbox, not real UAT, DEV/EKS or Moto/LocalStack. Do not use EKS
+`dr-run.sh`, ESO, Reloader or Kubernetes rollout commands for the Swarm application path.
+
+The sandbox is managed by [the BB3 lab stack](../../iac/lab/bb3-db/README.md). Use
+[the Terraform wrapper](../../iac/README.md) for infrastructure changes: save a plan, review it, obtain
+approval, then apply that file. Standalone retirement is the narrow owner-approved AWS CLI exception;
+it does not authorize ad-hoc cleanup of other resources.
 
 | Role | Responsibility |
 |---|---|
-| Incident commander | Scope, approvals, communications, stop/go decisions |
-| DR operator | RDS API restore/configuration, endpoint coordination, evidence; no DB credentials or SQL |
-| Data owner / DBA | Snapshot/data-loss acceptance; reconciliation through separately authorized access |
-| Application/platform owner | Mixed-secret custody, deploy script review, Swarm deployment and business E2E |
+| Incident commander | Scope, change window, communications, restore/cutover approval and T10 |
+| DR operator | Pinned-account API checks, baseline, restore/hardening, journals and guarded endpoint coordination |
+| Data owner / DBA | Snapshot loss acceptance; restored-side write reconciliation or explicit identified sandbox data-loss decision |
+| App/platform owner | Inventory/drain, secret custody, external deployment, session closure, app health/business tests and failback sign-off |
 
-Choose and record one application cutover mode before P3-G0:
+These roles may be held by different people. The app owner does not have to match the DR operator,
+data owner or IC/T10 approver. Deployment, health and transaction attestations must use the same
+app-owner name; failback deployment/sign-off must match its confirmed app-owner fence record.
+Packaging reuses the T10 approver as evidence owner, not as a replacement app owner.
 
-| Mode | Secrets Manager endpoint update | Swarm deploy/restart |
+### 2.1 Operational Prerequisites
+
+- Use Bash, Python 3, AWS CLI v2 and jq from the repository root. Python helpers use the standard library.
+- Review ignored `iac/sandbox.env`: sandbox profile/account, `ENV=uat`, region, source pair, snapshot and
+  unused restore targets. Never use `env/uat.env`, default credentials or a real-account profile for this lab.
+  SSO `lab_sandbox` is preferred; approved sandbox-only key profiles require owner authorization.
+- Unset exported AWS access keys/session tokens. Every AWS call pins its named profile and region;
+  account guards must pass. SSO login, when required, happens in the local terminal/browser.
+- Have approved STS, RDS, EC2 SG, Secrets Manager metadata/endpoint-update and KMS permissions. Retirement
+  also needs snapshot and exact-resource automated-backup describe/delete permissions.
+- Endpoint helpers handle mixed JSON in memory through authorized sandbox custodian access, including
+  `GetSecretValue`/`PutSecretValue`. This is not a metadata-only IAM role. Never display or save credential
+  payloads; keep CLI history disabled, tracing off, and evidence restrictive and Git-ignored.
+- Record the IC, app/data owners, window, consumer inventory, snapshot acceptance, reconciliation plan and
+  traceable evidence locations. Do not invent references or sign prompt-test inputs as actual app proof.
+- The external `bb3-infrastructure` repository is not in this workspace. The app owner verifies the host,
+  clean approved `main` commit, deployment procedure and all consumers. Keep real host/account identifiers
+  in ignored config. Do not automate passwords, privileged interactive login or insecure SSH host-key bypasses.
+
+No SQL, password repair or operator probe writes are part of this workflow. Preserve credentials and unrelated
+secret fields during endpoint changes. Mutation prompts default to No; Enter is not approval. Never stop a
+replica or a primary with replicas to implement fencing.
+
+**Real UAT adoption gate:** helpers/configuration are sandbox-specific. Actual BB3 UAT needs separate
+account/IAM/network, deploy-script, data-loss and execution-procedure approval and validation. Do not bypass
+sandbox guards or substitute real credentials. This document is not production authorization or independent
+Swarm/business-data certification. The legacy SSM updater uses `host`/`port`, not BB3's endpoint key pair;
+it is not a drop-in alternative without reviewed schema/IAM changes and tests.
+
+## 3. Runner Controls And Step Reference
+
+Every step shows What/Expected descriptions; `--verbose` remains accepted.
+
+Do not edit or update runner/helper files during an active drill. Bash can read later parts of a
+script after a long wait; an in-place edit can cause a late syntax error even after packaging.
+If T10/package output was already printed, verify the saved records and package before deciding
+whether anything needs resuming. Never restart plain `S3` to repair a post-package shell error.
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --list
+bash iac/lab/bb3-db/bb3-run.sh S3 --to P2-S09
+bash iac/lab/bb3-db/bb3-run.sh S3 --from P3-S01 --to P5
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P0-S02 --show
+bash iac/lab/bb3-db/bb3-run.sh S3 --from P2-S06 --to P2-S09 --list
+bash iac/lab/bb3-db/bb3-run.sh S3 --failback "$DR_ID" --list
+```
+
+- Plain `S3` selects P0-S01 through P5. `--to P2-S09` explicitly stops at RDS-only readiness.
+- `--from`/`--to` are inclusive; `--from` alone ends at P4-S02. Select P5 explicitly for closeout.
+- `--only` runs comma-separated IDs in supplied order. Step-specific arguments require one ID and are
+  forwarded after `--only STEP`. Do not combine `--only` with ranges.
+- Top-level `--failback DR-ID` selects guided failback only and cannot combine with ranges/`--only`.
+  Single-step failback with `--failback` after `--only STEP` remains available.
+- `--list` is action-free. Invalid selections fail before actions. P3-G0 and FB labels are manual gates;
+  P4-G4 and P5 are executable closeout steps.
+
+| Step | Action | Completion evidence |
 |---|---|---|
-| `manual` | Authorized custodian updates only `DB_HOST` and `DB_REPLICA_HOST` in the existing mixed secret, preserving `DB_NAME`, `DB_USER`, `DB_PASSWORD` and unrelated keys; records previous/new version IDs | App owner connects to the approved environment EC2 host, verifies the approved `main` commit, then runs `scripts/deploy.sh <dev|uat|prod>` or the reviewed service restart procedure; records deployed SHA and convergence |
-| `ssh-script` | Only if the reviewed GitHub deployment script is verified to update both endpoint keys server-side. Otherwise the custodian updates the secret manually first. The operator receives version/endpoint metadata only, never the payload | App owner approves SSH; script verifies clean `main`, fast-forward pulls, checks the exact approved SHA, then runs `scripts/deploy.sh <dev|uat|prod>` and checks every Swarm service. Dev/uat only until production is separately approved |
+| P0-S01 | Discover source pair, snapshot and unused targets | Reviewed saved selections |
+| P0-S02 | Capture pre-quarantine API baseline | Checksums, original SG sets, configuration and parameter records |
+| P0-S03 | Simulate app failure by cutting off new DB traffic with a no-ingress SG | Both source attachments active; actual app/monitor failure reference |
+| P1-S01-1 | Record evidence-based T0 | UTC impact time/reference for the same run ID |
+| P1-S01-2 | Declare T1 for S3 without reselection | T1 >= T0; reference if T1 edited/backfilled |
+| P2-S00 | Preview metadata, tags, parameters and requests | Read-only comparison reviewed |
+| P2-S01 | Restore new primary | Approved loss window/IC GO/mutation; unique target submitted |
+| P2-S02 | Wait for primary | RDS available |
+| P2-S03 | Harden/validate primary | Captured primary settings and parameters checked |
+| P2-S04 | Wait after primary hardening | RDS available |
+| P2-S05 | Create separate restored replica | Approved creation; original replica unchanged |
+| P2-S06 | Wait for new replica | RDS available |
+| P2-S07 | Harden/validate replica | Captured replica settings and restored source association |
+| P2-S08 | Wait after replica hardening | RDS available |
+| P2-S09 | Inspect both targets | Read-only status/configuration/topology |
+| P3-G0 (manual) | Approve cutover | Explicit gates at P3-S01/P3-S02 |
+| P3-S01 | Verify original P0 quarantine and session closure | Matching fence record; no second recovery SG change |
+| P3-S02 | Update or verify both secret endpoints | Matching fence; correct target pair/version metadata |
+| P3-S03 | Attest manual app deployment/convergence | App owner and sanitized deployment log |
+| P4-S01 | Attest app-level DB health | UTC T8 and health evidence |
+| P4-S02 | Attest business transaction/readback | UTC T9 and non-secret reference |
+| P4-G4 | Declare service restored | Approver/role, explicit T10 and immutable closeout |
+| P5 | Automatically package validated journals | Frozen local snapshot/hashes/archive/receipt; no input/upload |
 
-The `bb3-infrastructure` GitHub repository is not present in this workspace. Before enabling `ssh-script`, review its actual implementation at the approved commit and verify whether it updates the mixed secret or only deploys from its current value. Do not claim script-assisted secret updates work until that repository change is reviewed and tested. Record `APP_CUTOVER_MODE=manual|ssh-script`, the approval, host, commit SHA and result.
+## 4. Recovery Procedure
 
-**Production deployment is manual.** The owner opens SSH and obtains root privileges interactively before
-accessing the `projects` directory. Never pipe a password, automate `sudo su`, disable host-key checks,
-or route passwords through an assistant. SSH access and deployment are privileged application-owner
-operations, not an extension of the credential-restricted DR operator role.
+### 4.1 P0/P1: Baseline And Impact
 
-## 3. Session Configuration
+Discovery matches `env=uat` and `app=bb3`. Review source/attached replica, snapshot age/source/encryption
+and unused targets. Saved/sole choices and newest automated snapshots may be Enter defaults; fallback
+without matching tags has no primary default. Saving selections updates ignored config, not AWS.
 
-Keep real values in an ignored environment file. Do not paste credentials into this block or evidence.
-Use a separate sandbox-only configuration during testing; do not point it at BB3 real environments.
+Capture complete API metadata before impact: both DB descriptions, tags, SG/subnet metadata and paginated
+parameter records. Retain checksums and original SG sets. **Do not recapture a quarantined source**:
+restore requests must use the original SG sets, not live quarantine attachments.
 
-```bash
-export DR_ENV=dev
-export AWS_PROFILE='{{APPROVED_PROFILE}}'
-export AWS_REGION='{{APPROVED_REGION}}'
-export ACCOUNT_ID='{{APPROVED_ACCOUNT_ID}}'
-export OLD_DB='{{SOURCE_DB_ID}}'
-export RESTORED_DB='{{NEW_UNIQUE_DB_ID}}'
-export SNAPSHOT_ID='{{APPROVED_RDS_SNAPSHOT_ID}}'
-export SECRET_ID='{{BB3_APP_SECRET_ID}}'
-export APP_CUTOVER_MODE='{{manual|ssh-script}}'
-export SWARM_SSH_HOST='{{ENVIRONMENT_SSH_HOST}}'
-export DEPLOY_COMMIT_SHA='{{APPROVED_FULL_MAIN_COMMIT_SHA}}'
-export DR_ID="DR-$(date -u +%Y%m%d-%H%M)-${DR_ENV}-BB3-S3"
-export DR_EVIDENCE_DIR="evidence/$DR_ID"
-mkdir -p "$DR_EVIDENCE_DIR/aws" "$DR_EVIDENCE_DIR/app" "$DR_EVIDENCE_DIR/approvals"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" sts get-caller-identity
-```
+P0-S03 allocates the run ID and submits both source SG changes before waiting. Keep app/monitor active;
+P0 does not require pausing writers/jobs. Verify no-ingress attachments and actual failed-new-connection
+evidence. Existing sessions may survive an SG change; closure is a separate P3 confirmation.
 
-Check the returned account against `ACCOUNT_ID` and the approved environment before any mutation.
-Production uses approved SSO/assumed-role authentication, not exported long-lived access keys.
-Do not source EKS-specific session setup to bypass a missing Swarm guard. Until a dedicated runner is
-implemented, the owner records UTC markers and approvals in the incident worksheet and evidence files.
+T0 reflects evidenced impact, not merely command time. Accept displayed UTC only when the evidence
+supports it; otherwise enter the actual UTC impact time. T1 defaults to declaration time, must be >= T0,
+and needs evidence when edited/backfilled. S3 is recorded without a second scenario prompt. Preserve the
+same P0 run ID throughout. Use UTC ISO-8601 timestamps.
 
-## 4. Restore And Cutover
+### 4.2 P2: Restore, Harden And Wait
 
-| ID | Step | Owner | Budget | Expected / verify; stop condition |
-|---|---|---|---|---|
-| P1-S01 | Record T0 (first application error), T1 (incident opened), environment, source and new target | IC / operator | 1 min | UTC times, account/profile/region verified; no existing target overwritten |
-| P1-S02 | List available snapshots, inspect snapshot source/time/encryption and record `RPO_SNAPSHOT` | Operator | 1 min | Approved snapshot belongs to the intended source; age and potential lost writes visible |
-| P1-G1 | Data owner accepts the snapshot and loss window, including writes until fencing; record `DATA_OWNER`, `DATA_ACCEPTANCE_REF`, GO and T2 | Data owner / IC | 1 min | Explicit acceptance; production CTO approval; NO blocks restore |
-| P2-S00 | Review the baseline-driven restore request and post-restore hardening plan | Operator / platform owner | Included below | All SGs/subnets/parameter groups, tags, encryption, storage, monitoring, HA and retention accounted for |
-| P2-S01 | Issue the reviewed restore request; record T4 | Operator | 12 min total restore | Fresh target ID; request and response metadata saved |
-| P2-S02 | Inventory all BB3 DB consumers and pause write jobs through the application owner while RDS restores | App owner | Parallel | All relevant services/jobs recorded; no hidden writer left unaccounted for |
-| P2-S03 | Wait for RDS `available`; record T5 | Operator | Included in restore | Available is infrastructure status only, not app recovery |
-| P2-S04 | Apply approved hardening; compare every required API setting/tag with the baseline, retention at least 7 days | Operator | 4 min | No unexpected drift; record accepted exceptions; no SQL/password fetch |
-| P3-G0 | Confirm validated target, secret/deploy modes, approved deployment commit and fencing plan; approve cutover | IC / app owner | Included below | No secret mutation or deployment before GO |
-| P3-S01 | Fence the original DB against all application writers, with a confirmed stop when eligible | Platform owner | 5 min total cutover | Stop is confirmed before app-owner E2E; an unreachable endpoint alone is not proof |
-| P3-S02 | Use `APP_CUTOVER_MODE` to set `DB_HOST` to the restored primary and `DB_REPLICA_HOST` to its replica; record old/new secret version IDs, target IDs and T6 | Secret custodian / app owner | Included in cutover | Only endpoint keys change; `DB_NAME`, `DB_USER`, `DB_PASSWORD` and unrelated keys remain unchanged; no payload returned to DR operator |
-| P3-S03 | Use the selected manual or reviewed SSH-script mode to deploy/restart the approved `main` SHA; verify all expected Swarm tasks converge; record T7 | App owner | Included in cutover | Correct host/account, approved commit and deploy exit 0; not just any Running task |
-| P4-S01 | Confirm original remains fenced, target available and deployment no longer uses the prior endpoint; inspect service health/restarts | App owner / operator | 1 min | Old tasks drained, no stale consumers; jobs remain paused until safe |
-| P4-S02 | App owner confirms `yes/no` for displayed primary and replica targets, runs the approved business transaction/readback, records transaction number/reference and evidence, supplies `APP_OWNER`/`E2E_REF`, then approves GO | App owner | 3 min | Successful transaction on restored primary plus intended read path on restored replica; blank/no or failed proof cannot record T9 |
-| P4-G4 | Record T9 only after that attestation; declare restored, record T10 and resume approved jobs | IC / app owner | 1 min | Approver matches named app owner; application proof is separate from API status |
-| P5-S01 | Collect sanitized evidence and calculate RTO/RPO; record limitations and outstanding normalization | Operator | 1 min | Service RTO is T8-T0; report T9-T8 validation separately; target misses retained, not adjusted away |
+Preview checks baseline integrity and captured-versus-snapshot/current metadata. For differing non-reserved
+tags, choose captured-primary or snapshot values; choices affect new targets only. Non-tag drift requires
+`ACCEPT-DIFF`; parameter drift requires `USE-CURRENT-PARAMETERS` or cancel. Historical parameter-group
+values cannot be reconstructed automatically. Stop when historical values are required but unavailable.
 
-### RDS API Commands
+Review the fresh target, snapshot/loss window, class/AZ, private exposure, subnets/SGs, parameter group,
+storage/encryption, retention/windows and tags before approving billable restore. Use baseline-driven
+[request builders](../../automation/scripts/rds-requests.jq), never guessed CLI defaults. Maintenance windows
+are applied during post-create hardening, not snapshot restore. Older CLI models may defer unsupported
+backup inputs to hardening; final parity checks still apply.
 
-Use the existing [request builders](../../automation/scripts/rds-requests.jq) and
-[configuration-parity procedure](../common/CP-03-restored-instance-config-parity.md) as the database specification.
-The platform owner prepares `aws/restore-request.json` and `aws/harden-request.json` from an approved baseline;
-do not replace that work with CLI defaults. Existing `dr-restore.sh` is not yet a Kubernetes-free BB3 runner.
-If the original is lost, use a previously reviewed baseline, not guessed settings.
+Compare every required setting and parameter record, not only the group name. The prior sandbox capture
+had writer retention 7 days, replica retention 0 days and 437 parameters per DB; use the reviewed current
+baseline, not universal assumptions. See [configuration parity](../common/CP-03-restored-instance-config-parity.md).
 
-Current snapshot and PITR restore inputs include `BackupRetentionPeriod` and `PreferredBackupWindow`.
-Supply their captured values (this baseline: 7-day writer retention), along with the supported network,
-parameter-group, class, storage and other restore fields. Host AWS CLI 2.38.1 supports both backup inputs.
-The shared request builder checks each operation's local CLI input model; on older CLIs it reports and defers
-only unsupported backup inputs to hardening. Always validate the final configuration after restore.
+A snapshot restore does not repoint the original replica. Create a separate replica of the restored
+primary, then validate captured replica settings, or the primary template if no replica existed. Never
+delete/promote/stop original replicas to simplify this workflow. PostgreSQL promotion and Oracle
+`switchover-read-replica` are different scenarios, not snapshot-restore failback.
 
-```bash
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-snapshots \
-  --db-instance-identifier "$OLD_DB" --query 'DBSnapshots[].{ID:DBSnapshotIdentifier,At:SnapshotCreateTime,Status:Status,Encrypted:Encrypted}'
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds restore-db-instance-from-db-snapshot \
-  --cli-input-json "file://$DR_EVIDENCE_DIR/aws/restore-request.json"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds wait db-instance-available \
-  --db-instance-identifier "$RESTORED_DB"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds modify-db-instance \
-  --cli-input-json "file://$DR_EVIDENCE_DIR/aws/harden-request.json"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds wait db-instance-available \
-  --db-instance-identifier "$RESTORED_DB"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances \
-  --db-instance-identifier "$RESTORED_DB" > "$DR_EVIDENCE_DIR/aws/restored-instance.json"
-```
+Wait steps are separate: single-step restore/create needs its P2-S02/P2-S06 waiter afterward. For manual
+selections only, post-hardening waiters may be omitted when no changes occurred and available is verified.
+Default/ranged recovery includes them. Record primary-ready and full-topology-ready times separately.
+RDS waiters display elapsed `HH:MM:SS`, updated once per second on the same terminal line. This also
+covers fencing and retirement RDS waits; it is not a percentage or finish-time estimate. Redirected
+output records only the start and final timer lines. Ctrl+C stops the waiter; review the printed
+same-run resume command rather than resubmitting a restore/create request.
+Available/configuration parity is infrastructure evidence, not app connectivity or business proof.
 
-Fencing stop is supported only for eligible standalone RDS PostgreSQL: no cluster membership, replica source,
-or attached read replicas. Check topology first. If BB3 has replicas/HA constraints that prevent stop, obtain a
-separately reviewed isolation procedure and proof covering existing sessions and every writer. Do not detach or
-delete replicas ad hoc, use SQL with operator credentials, or treat security-group attachment alone as proof.
-Real RDS automatically restarts a stopped instance after seven days; monitor and maintain isolation.
+### 4.3 P3: Fence, Endpoints And Deployment
+
+Inventory and drain all writers/readers/workers/jobs under app-owner control for cutover. P3-S01 verifies
+the same run's P0 quarantine and requires existing-session closure. It neither repeats recovery SG changes
+nor stops a primary with replicas. No endpoint switching before verified isolation and session closure.
+
+P3-S02 offers automatic CLI update or verification of a custodian's manual update. Review both hosts and
+the selected run/secret. Only `DB_HOST`/`DB_REPLICA_HOST` may change; preserve credentials/unrelated JSON
+and record previous/new version IDs. No mixed payload is printed. Both modes require the matching fence
+and explicit confirmation: `UPDATE-ENDPOINTS` for automatic write, `ENDPOINTS-ALREADY-UPDATED` for manual
+verification. Default/ranged execution supplies `--apply`, not approval; single-step remains preview-only:
 
 ```bash
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds stop-db-instance --db-instance-identifier "$OLD_DB"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds wait db-instance-stopped --db-instance-identifier "$OLD_DB"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" rds describe-db-instances \
-  --db-instance-identifier "$OLD_DB" --query 'DBInstances[0].DBInstanceStatus'
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S02 --apply
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03
 ```
 
-### Secrets Manager: Manual Or SSM
+The app owner performs the approved external deploy/restart so all Swarm consumers load the new secret.
+Changing Secrets Manager alone does not reload tasks or immutable Docker secrets. Verify the approved
+commit, successful deployment, expected service replicas/update state and every consumer. Some Running
+tasks or green infrastructure checks are insufficient. Do not collect rendered credentials or raw sensitive logs.
 
-Manual: the authorized custodian updates only the approved endpoint fields in the existing mixed secret,
-preserving credentials and other configuration. Custodian verifies the intended host/port and records old/new
-version IDs and an approval reference. Operator can inspect version metadata with `describe-secret`, not `get-secret-value`.
+P3-S03 does not deploy: option 1 exits automatic-unavailable; option 2 records completed manual deployment,
+app owner, sanitized multiline convergence log and explicit endpoint/convergence confirmation. A retained
+nonempty regular log can be reused when no attestation exists; saved attestations are not overwritten.
+External version approval remains required even though the helper asks for no separate commit SHA.
 
-Script-assisted: use [DR-UpdateDbSecretEndpoint](../../automation/ssm/DR-UpdateDbSecretEndpoint.yaml) only after
-it is registered and reviewed in the selected account. Its current implementation updates JSON `host`, `port`
-and an existing `dbInstanceIdentifier`; it does NOT support arbitrary BB3 key names. If BB3 differs, STOP and
-adapt/review/test the document before use. Do not add unused `host` keys and assume the application changed.
+### 4.4 P4/P5: App Validation, T10 And Packaging
 
-Use an approved pinned document version and a narrowly scoped service role: access only the intended secret,
-RDS metadata and required KMS key. Operator needs execution/status permissions and narrowly scoped `iam:PassRole`,
-not `secretsmanager:GetSecretValue`, document editing, role editing, or the ability to assume that service role.
-The script must never return secret values or include them in exceptions/logs. Account-specific IAM and document
-registration must be reviewed IaC, not an ad hoc real-account installation.
+P4-S01 records T8 after app-owner confirmation of an app-level DB health check with evidence. RDS
+available, direct operator login and deployment convergence alone are not T8. P4-S02 requires a successful
+business transaction/readback through the intended DB paths and a non-secret reference before T9. Do not
+use operator probe writes or fabricate successful attestations. Resume jobs only with app-owner approval.
+
+Report Service RTO as `T8-T0`, business validation as `T9-T8`, and total through business validation as
+`T9-T0`. RPO is separate and not independently measured by packaging. Retain target misses and operator
+pauses; do not adjust them away or equate local/mock timings with AWS performance.
+
+P4-G4 validates matching incident, cutover, fence, deployment, T8/T9 journals and shows timeline/references.
+Supply approver name/role and actual T10 UTC (Enter accepts current UTC). No ticket reference is requested.
+Restrictions default to `none`. Type `DECLARE-RESTORED` to approve reviewed references, or `EDIT` to correct
+them before the same final approval. Immutable `closeout.json` does not overwrite recovery milestones.
+
+P5 is prompt-free: reuse closeout approver and ignored `evidence/bb3-packages`, validate hashes and create
+an allowlisted frozen snapshot, summary, SHA-256 manifest/archive/checksum and receipt. Deployment logs,
+configs/secrets, raw baseline directories and external reference targets are omitted, not automatically
+reviewed. No upload or external-evidence verification is claimed. Legacy ticket-bearing closeouts remain
+compatible; immutable records/packages are not overwritten. Packaging failure is not permission to delete
+old evidence or backdate another T10.
+
+## 5. Failback Procedure
+
+Obtain a separate window, app-owner approval and data-owner decision covering restored-side writes.
+Reconcile or explicitly approve the identified sandbox loss interval and evidence; originals are not
+automatically current/safe. `ACCEPT_LOCAL_DATA_LOSS` belongs to local fixtures, not BB3 business approval.
+
+| Phase | Executed action | Gate / result |
+|---|---|---|
+| FB-01 | P3-S02 `--failback DR-ID --preview` | Read-only restored CURRENT vs original RETURN-TO endpoints; saved secret/run reused |
+| FB-02 | P3-S01 `--failback DR-ID` | App drain; approved restored-pair quarantine and separate session closure |
+| FB-03 | P3-S02 `--failback DR-ID --apply` | Matching restored fence; typed `FAILBACK-ENDPOINTS`; preserve credentials/unrelated keys |
+| FB-04 | P3-S01 `--failback DR-ID --release-quarantine` | Fresh restored isolation; typed `RELEASE-SOURCE-QUARANTINE`; saved original SGs restored and original quarantine removed |
+| FB-05 | P3-S03, P4-S01, P4-S02 with `--failback DR-ID` | External deployment to originals, health and successful transaction/readback |
+| FB-06 | Sign-off offer within P4-S02 | Review saved references; matching owner and typed `SIGN-OFF-FAILBACK` |
+| FB-07 | Standalone retirement | Separate scoped preview/deletion approval; section 6 |
+
+Guided failback runs FB-01 through the FB-06 offer in order. First P3-S02 is preview-only; the later one
+applies after fencing. What/Expected descriptions distinguish repeated step IDs/actions. No P0/P2 recovery
+is repeated. Declining sign-off leaves approval pending even if prior script steps completed successfully.
+
+Restored quarantine uses a separate run-owned no-ingress SG, saves prior attachments and verifies both
+active attachments. Session closure remains separately confirmed. Original release freshly checks restored
+isolation and exact saved original SG IDs/active status; RDS available alone is insufficient. Up to 24
+checks/five-second intervals show progress; timeout retains the source quarantine and unreleased journal.
+Retry verifies already-restored sets without resubmitting modification. Never un-fence both pairs.
+
+### 5.1 Continue After An Interrupted Release
+
+Do not restart guided failback blindly after an uncertain mutation. Inspect journals/live state and retry
+the affected action. For incomplete original release:
 
 ```bash
-export SSM_DOCUMENT_VERSION='{{APPROVED_NUMERIC_DOCUMENT_VERSION}}'
-export SSM_AUTOMATION_ROLE='{{APPROVED_SERVICE_ROLE_ARN}}'
-SSM_PARAMETERS="$(jq -nc --arg role "$SSM_AUTOMATION_ROLE" --arg secret "$SECRET_ID" \
-  --arg db "$RESTORED_DB" --arg id "$DR_ID" \
-  '{AutomationAssumeRole:[$role],SecretId:[$secret],DbInstanceId:[$db],DrId:[$id]}')"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" ssm start-automation-execution \
-  --document-name DR-UpdateDbSecretEndpoint --document-version "$SSM_DOCUMENT_VERSION" \
-  --parameters "$SSM_PARAMETERS" > "$DR_EVIDENCE_DIR/aws/secret-update-execution.json"
-SSM_EXECUTION_ID="$(jq -r .AutomationExecutionId "$DR_EVIDENCE_DIR/aws/secret-update-execution.json")"
-aws --profile "$AWS_PROFILE" --region "$AWS_REGION" ssm get-automation-execution \
-  --automation-execution-id "$SSM_EXECUTION_ID" \
-  --query 'AutomationExecution.{Status:AutomationExecutionStatus,Outputs:Outputs}'
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01 --failback "$DR_ID" --release-quarantine
 ```
 
-Poll status until `Success`, then record version IDs and endpoint metadata. Failed/timed-out/cancelled/unknown
-executions block deployment. Reconcile actual current version before retrying an interrupted update. This is
-not automatic rollback: do not change version stages after restored-side writes without data-owner review.
-
-### Deploy: Manual Or SSH-Assisted
-
-Before either path: deployment configuration is approved and pushed to `main`; deployment must consume the new
-secret version, not a cached value. Record the approved full commit SHA, actual deployed SHA and service inventory.
-
-Manual: use the configured environment host (dev host, uat host, or production host respectively). For production,
-obtain root interactively first as described above. In that authorized shell:
+After release succeeds, complete the app-owner steps one at a time with actual evidence:
 
 ```bash
-ssh -o StrictHostKeyChecking=yes -- "$SWARM_SSH_HOST"
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03 --failback "$DR_ID"
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P4-S01 --failback "$DR_ID"
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P4-S02 --failback "$DR_ID"
 ```
 
-Inside SSH, set `DR_ENV` and `DEPLOY_COMMIT_SHA` to the approved non-secret values from the incident worksheet.
-Then run from the appropriate user's home directory (production: root's projects directory):
+Release alone is not completed failback. Retirement blocks missing/mismatched deployment, health,
+transaction or sign-off records. Separate `failback-app-deploy.*`, `failback-app-health.json` and
+`failback-app-e2e.json` refer to originals; recovery T8/T9 and the frozen P5 package stay unchanged.
 
-```bash
-cd projects/bb3-infrastructure
-test "$(git branch --show-current)" = main
-test -z "$(git status --porcelain)"
-git pull --ff-only origin main
-test "$(git rev-parse HEAD)" = "$DEPLOY_COMMIT_SHA"
-scripts/deploy.sh "$DR_ENV"
-docker stack ps --no-trunc beepbeep
-docker service ls
-```
+P4-S02 reuses saved transaction/time on retry and displays saved deployment, health and transaction
+references without three extra reference prompts. Review actual evidence, confirm matching owner and
+type `SIGN-OFF-FAILBACK` for immutable `failback-signoff.json`, UTC approval time and local hashes. Existing
+supplemental references stay preserved; placeholders are not converted into proof. External evidence is
+owner-attested. Sign-off does not approve disposal; the optional retirement offer defaults to No.
 
-Run each check successfully before the next command; stop on a dirty checkout, wrong branch, different SHA,
-failed pull or nonzero deployment. Do not reset local changes or blindly deploy the latest unapproved commit.
+## 6. Scoped Retirement And Repeat Drills
 
-SSH-assisted shell, **dev/uat only**, after approval. It assumes the reviewed repository path below and a trusted
-SSH host key already installed. It fails rather than prompting for passwords or accepting unknown host keys.
-The repository/deploy script is not included in this workspace, so this path still needs a sandbox test.
+Use section 1.3 only after failback sign-off and retention/disposal approval. Retirement checks sign-off
+hashes, original endpoint values, restored IDs/run tags/topology, deletion protection and quarantine.
+It requires scope review, matching owner, a retirement/data-retention reference and `RETIRE-RESTORED-PAIR`.
+Never fabricate journals, detach retained DBs from quarantine or disable protection to bypass refusal.
 
-```bash
-[[ "$DR_ENV" == dev || "$DR_ENV" == uat ]] || { echo 'Production deployment is manual'; exit 2; }
-[[ "$DEPLOY_COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'Approved full commit SHA required'; exit 2; }
-read -r -p 'Type GO to deploy the approved main commit on the configured Swarm host: ' DEPLOY_GO
-[[ "$DEPLOY_GO" == GO ]] || exit 2
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -- "$SWARM_SSH_HOST" \
-  bash -s -- "$DR_ENV" "$DEPLOY_COMMIT_SHA" <<'REMOTE'
-set -euo pipefail
-environment="$1"; approved_commit="$2"
-[[ "$environment" == dev || "$environment" == uat ]]
-[[ "$approved_commit" =~ ^[0-9a-fA-F]{40}$ ]]
-cd "$HOME/projects/bb3-infrastructure"
-[[ "$(git branch --show-current)" == main ]]
-[[ -z "$(git status --porcelain)" ]]
-git pull --ff-only origin main
-[[ "$(git rev-parse HEAD)" == "$approved_commit" ]]
-scripts/deploy.sh "$environment"
-docker stack ps --no-trunc beepbeep
-docker service ls
-REMOTE
-```
+The script verifies a temporary primary safety snapshot, deletes replica before primary and waits for
+absence. It deletes the run-owned quarantine SG only after DB/ENI detachment. Under the same approval it
+purges automated backups for the exact restored DB resource IDs and the verified retirement-created
+snapshot. Original DBs/backups, source restore snapshot, other snapshots/SGs, shared networking, secrets
+and evidence remain outside scope. Removal of restored recovery data is irreversible.
 
-Compare expected service replicas with actual replicas, inspect update state and failed/restarting tasks, and
-wait for convergence. `docker stack ps ... | grep Running` alone is insufficient: it can hide failed tasks or
-show old tasks during an incomplete deployment. The app owner may inspect a specific service's logs privately:
+Timestamped stages 1-7 show waiter start/completion and resume guidance, not invented percentages.
+Ignored `retirement.json` pins identities and requested operations. Timeout, pending ENIs, changed metadata
+or incomplete backup deletion is **not completion**. Inspect state, then resume the same explicit command.
+Completed deletions are not blindly repeated; snapshots marked for purge are not recreated. Older
+retained-backup journals require fresh scope review/typed approval. Completed retry verifies absence read-only.
 
-```bash
-docker service logs --timestamps --since 1m beepbeep_bb3-promos 2>&1 | sort
-```
+Retirement already includes restored-quarantine deletion. No separate `--cleanup-failback-quarantine` is
+needed afterward. That older helper deletes only a verified detached SG after separately approved DB
+retirement; it never deletes retained DBs/snapshots/backups.
 
-Logs and Running tasks do not prove which DB served a transaction. App owner must confirm the displayed restored
-DB and provide evidence of connectivity and a successful business transaction there. Keep credentials out of that proof.
+After verified retirement completion and app-owner confirmation of the original serving pair, a new
+`S3` drill may start. Review discovery against originals, a valid snapshot and unused targets; save the
+new run ID for its failback/retirement. Never reuse the old incident as a new drill.
 
-## 5. Abort, Failback And Normalization
+## 7. Evidence, Reporting And Approval Limits
 
-### Rebuild And Validate Recovery Replicas
+Retain ignored `evidence/bb3-secret-endpoints/<DR-ID>/` journals, baseline checksums, ready times, endpoint
+version metadata, deployment/health/business references, T0/T1/T8/T9/T10, approvals, failures, reconciliation,
+restrictions and retirement progress. Preserve historical records/frozen hashes. Supplement failback and
+disposal evidence separately, never by rewriting the recovery package.
 
-Include a fresh read replica of the restored DB in this sandbox drill, not just the initial source's replica.
-Begin its reviewed Terraform provisioning once the restored primary is available, hardened and validated.
-Use a new recovery-specific identifier and a separate create-only saved-plan approval. Do not change the
-original replica's `replicate_source_db`, delete the original replica or apply a replacement of that resource.
-Do not count Terraform plan generation as provisioning or replica `available` as business-data proof.
+Owner-entered references and approvals are not independent verification of deployment, transactions,
+reconciliation or RPO. Mock/script tests verify selected control flow/safeguards, not real UAT/production
+recovery or performance. Historical local/sandbox results are not certification. Preserve target misses
+and corrective actions with owners/due dates.
 
-Validate the following for restored primary and new replica, recording every accepted difference:
+Where authorized, collect real CloudTrail/RDS events as supplemental evidence; the EKS collector is not
+a drop-in BB3 collector. Local packaging is not upload or audit coverage. Use the
+[communications templates](../../templates/communications/05-planned-drill-notices.md) and
+[drill report](../../templates/reports/drill-report.md) with actual measurements and limitations.
 
-- Engine version/parameter-group family and approved user parameters, including `wal_keep_size` and
-  `max_connections` when overridden. Inspect values and `ParameterApplyStatus`, not just the group name.
-  Share an approved custom group when appropriate; size-dependent settings must suit each instance class.
-  Do not blindly copy production connection/memory limits onto a smaller sandbox replica or set WAL values
-  without reviewing retained-WAL storage, replication slots and workload needs.
-- Every security group, subnet group and AZ placement, private exposure, port, storage type/size/autoscaling,
-  encryption/KMS, backup policy, maintenance settings, log exports, monitoring and relevant tags. Compare the
-  replica against its approved replica baseline; it need not match every writer-only setting.
-- RDS source association must name the **restored** primary for the new replica and the **old** primary for the
-  original replica. Both must be available and replication status healthy. Inspect `ReplicaLag` over time against
-  an approved threshold; missing metrics are not zero lag. Idle PostgreSQL can report lag without new writes,
-  so assess engine behavior and metrics together. Only the app/data owner can provide independent data checks.
+## 8. References And Change Log
 
-Record replica-create start/end and **full-topology recovery time** alongside primary availability. If service recovery
-depends on read replicas, do not record T8 until the required replica is ready and the app-level health check passes.
-Service RTO is T8-T0; record app-owner business transaction/readback separately at T9 and report T9-T8 validation
-duration. Today's RDS-only session has no app-owner T8/T9 and cannot certify Service RTO or business data correctness.
+- [Runner and sandbox setup](../../iac/lab/bb3-db/README.md)
+- [Configuration parity](../common/CP-03-restored-instance-config-parity.md)
+- [RPO/RTO definitions](../../docs/04-rpo-rto-measurement.md)
+- [Evidence and audit](../../docs/05-evidence-and-audit.md)
+- [Account safety](../../docs/12-account-and-cluster-safety.md)
+- [AWS RDS stop limitations](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html#USER_StopInstance.Limitations)
+- [AWS read replica behavior](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html)
 
-AWS reference: [promotion prerequisites and behavior](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html)
-and [Oracle-only switchover command](https://docs.aws.amazon.com/cli/latest/reference/rds/switchover-read-replica.html).
+This is the maintained BB3 UAT-sandbox execution reference, consolidating the BB3 portion of the temporary
+development notes. Their legacy DEV/EKS walkthrough is not part of this procedure. Consolidation is not a
+new live drill, owner approval or certification of real BB3 UAT.
 
-Failback is a separate approved change, not an automatic consequence of a failed deploy.
-
-| ID | Step | Owner | Expected / stop condition |
+| Version | Date | Change | Approval status |
 |---|---|---|---|
-| FB-G1 | Account for restored-side writes; reconcile and obtain data-owner sign-off before routing back | Data owner / IC | No production waiver. `ACCEPT_LOCAL_DATA_LOSS` was local-fixture-only and is not valid for BB3 or sandbox business data |
-| FB-S01 | Prepare original/replacement DB and reviewed restart/isolation plan | Platform owner | Correct target available and approved; never revive an unsafe original simply to undo an endpoint change |
-| FB-G2 | Approve the exact endpoint/version change and redeployment | IC / app owner | Recorded GO, actor and data policy |
-| FB-S02 | Use the selected manual/SSM update targeting the approved failback DB, then the selected manual/SSH deployment | Custodian / app owner | New version and deployed SHA recorded; same credential and production restrictions |
-| FB-S03 | App owner confirms target with yes/no, records evidence and GO after business verification | App owner | Old/restored tasks drained; business transaction uses the failback DB |
-| FB-S04 | Only then approve stopping/quarantining unused restored DB; retain snapshots/data and rollback evidence | Platform owner | No automated deletion or `--skip-final-snapshot`; preserve writes until retention/reconciliation approved |
-| FB-S05 | Normalize backups, HA/replicas, monitoring, rotation and IaC; restore approved schedules | Platform owner | Tracked follow-up change, no unexpected drift |
-
-## 6. Evidence And Closure
-
-Keep T0/T1/T2/T4/T5/T6/T7/T9/T10 and fencing time, all gates/actors, snapshot reference, baseline/request/diff,
-secret version metadata, SSM status, approved/deployed commit, service/task convergence, data acceptance and app-owner
-E2E reference. Record application attestations separately from independently verified evidence.
-
-Use real CloudTrail/RDS events for sandbox/live AWS where authorized; `cloudtrail:LookupEvents` is needed.
-Only the local emulator skips unsupported CloudTrail collection. Do not run the EKS-specific evidence collector
-unchanged for BB3. Finalize hashes **after** command logs, timeline, reports and uploads stop changing; preserve the
-initial collection manifest and add a separate final manifest if it is stale. Verify local hashes and uploaded copies.
-The local restore's initial manifest had stale entries after runner completion and is not final integrity proof.
-
-Post Investigating at T1, Update after restore/cutover, Services Restored after app-owner GO, and a closure report
-with actual RTO/RPO and target misses. Use the existing [communications templates](../../templates/communications/05-planned-drill-notices.md)
-and [drill report](../../templates/reports/drill-report.md).
-
-## 7. Sandbox Entry Gate
-
-Use only the approved sandbox profile/account and Terraform-managed lab. Plan to a file, review, then apply that file.
-Do not reuse a real BB3 SSH hostname, secret, deployment repository target or AWS profile for sandbox tests.
-Before certifying this runbook, test a sandbox Swarm target and mock mixed secret, SSM least privilege/no value leakage,
-manual and dev/uat SSH deployment paths, failed deployment/NO gates, app-owner verification and reconciled failback.
-Production remains manual. Current sandbox EKS fixtures alone do not exercise this Swarm application path.
-
-## Change Log
-
-| Version | Date | Change | Trigger |
-|---|---|---|---|
-| 0.1-draft | 2026-10-19 | Separate BB3 snapshot/Swarm procedure adapted from the local SQL-free S3 drill; manual/SSM secret and manual/SSH deployment choices | Owner priority: sandbox and BB3 Docker Swarm |
+| 1.0 | 2026-10-23 | Current S3 runner, guarded endpoints, app attestations, prompt-free P5, guided failback, SG convergence and scoped script-only retirement | Pending named owner/reviewer approval; sandbox scope only |
+| 0.1-draft | 2026-10-19 | Initial snapshot/Swarm adaptation from local SQL-free exercises | Superseded execution instructions; not real-UAT certification |

@@ -4,6 +4,8 @@ set +x
 umask 077
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
 LEDGER="${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}"
@@ -174,7 +176,7 @@ else
     printf 'Current source replica %s SGs: %s\n' "$ACTIVE_REPLICA" "$(jq -r 'join(", ")' <<< "$OLD_REPLICA_GROUPS")"
   fi
   printf 'Keep the app and health monitor active to observe the connection failure. Existing sessions may continue.\n'
-  read -r -p 'Create quarantine SG and submit pair changes without waiting? [y/N]: ' APPROVE
+  bb3_prompt_read APPROVE 'Create quarantine SG and submit pair changes without waiting? [y/N]: '
   [[ "$APPROVE" =~ ^[Yy]$ ]] || { echo 'Fence request cancelled; no SG created.' >&2; exit 2; }
   GROUP_NAME="dr-bb3-${ENV}-quarantine-${RUN_ID//_/-}"
   QUARANTINE_SG="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 create-security-group \
@@ -215,13 +217,13 @@ for instance_id in "${INSTANCE_IDS[@]}"; do
   fi
 done
 for instance_id in "${INSTANCE_IDS[@]}"; do
-  aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+  bb3_wait 'Waiting for source quarantine DB availability' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
     --db-instance-identifier "$instance_id"
   current_groups="$(group_ids_for_db "$instance_id")"
   jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null \
     || { echo "Quarantine SG is not active on $instance_id; no T0 may be recorded." >&2; exit 2; }
 done
-read -r -p 'App/monitor/logs evidence reference for observed DB connection failures: ' IMPACT_EVIDENCE_REF
+bb3_prompt_read IMPACT_EVIDENCE_REF 'App/monitor/logs evidence reference for observed DB connection failures: '
 [[ -n "$IMPACT_EVIDENCE_REF" ]] || { echo 'App failure evidence reference is required.' >&2; exit 2; }
 jq --arg ref "$IMPACT_EVIDENCE_REF" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '.status="attached" | .attachedAt=$at | .impactEvidenceRef=$ref' \
@@ -231,7 +233,7 @@ mv "$NETWORK_RECORD.tmp" "$NETWORK_RECORD"
 SAVED_IMPACT_REF="$(jq -r '.impactEvidenceRef // empty' "$NETWORK_RECORD")"
 if [[ "$(jq -r '.status' "$NETWORK_RECORD")" != attached || ${#SAVED_IMPACT_REF} -lt 3 \
   || "$SAVED_IMPACT_REF" =~ ^([Yy]|[Yy][Ee][Ss]|[Nn]|[Nn][Oo])$ ]]; then
-  read -r -p 'App/monitor/logs evidence reference for observed DB connection failures: ' IMPACT_EVIDENCE_REF
+  bb3_prompt_read IMPACT_EVIDENCE_REF 'App/monitor/logs evidence reference for observed DB connection failures: '
   [[ ${#IMPACT_EVIDENCE_REF} -ge 3 && ! "$IMPACT_EVIDENCE_REF" =~ ^([Yy]|[Yy][Ee][Ss]|[Nn]|[Nn][Oo])$ ]] \
     || { echo 'Enter a meaningful app/monitor evidence reference, not a yes/no response.' >&2; exit 2; }
    jq --arg ref "$IMPACT_EVIDENCE_REF" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

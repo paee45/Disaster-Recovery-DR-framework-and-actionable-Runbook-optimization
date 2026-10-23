@@ -4,12 +4,15 @@ set +x
 umask 077
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-CONFIG="$ROOT/iac/sandbox.env"
-LEDGER="$ROOT/evidence/bb3-secret-endpoints"
+CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
+LEDGER="${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}"
 MODE=cutover
 RUN_SELECTION=latest
 RELEASE_QUARANTINE=false
+CLEANUP_FAILBACK_QUARANTINE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --failback)
@@ -18,9 +21,14 @@ while [[ $# -gt 0 ]]; do
       if [[ $# -gt 0 && "$1" != --* ]]; then RUN_SELECTION="$1"; shift; fi
       ;;
     --release-quarantine) RELEASE_QUARANTINE=true; shift ;;
-    *) echo 'Usage: fence-confirm.sh [--failback [DR-ID|latest]] [--release-quarantine]' >&2; exit 2 ;;
+    --cleanup-failback-quarantine) CLEANUP_FAILBACK_QUARANTINE=true; shift ;;
+    *) echo 'Usage: fence-confirm.sh [--failback [DR-ID|latest]] [--release-quarantine | --cleanup-failback-quarantine]' >&2; exit 2 ;;
   esac
 done
+if [[ "$CLEANUP_FAILBACK_QUARANTINE" == true ]]; then
+  [[ "$MODE" == failback && "$RUN_SELECTION" =~ ^DR-[A-Za-z0-9_-]{1,120}$ && "$RELEASE_QUARANTINE" == false ]] \
+    || { echo 'Cleanup requires --failback DR-ID (not latest) and cannot use --release-quarantine.' >&2; exit 2; }
+fi
 [[ -f "$CONFIG" ]] || { echo 'Missing ignored iac/sandbox.env.' >&2; exit 2; }
 # shellcheck source=/dev/null
 source "$CONFIG"
@@ -69,11 +77,178 @@ else
   [[ "$RUN_ID" =~ ^DR-[A-Za-z0-9_-]{1,120}$ ]] || { echo 'Restored primary has no valid dr-restore run tag.' >&2; exit 2; }
   RECORD="$LEDGER/$RUN_ID/fence.json"
 fi
+
+cleanup_failback_quarantine() {
+  local network_record="$LEDGER/$RUN_ID/failback-network-fence.json"
+  local original_record="$LEDGER/$RUN_ID/network-fence.json"
+  local failback_record="$LEDGER/$RUN_ID/failback.json"
+  local app_deploy="$LEDGER/$RUN_ID/failback-app-deploy.json"
+  local app_health="$LEDGER/$RUN_ID/failback-app-health.json"
+  local app_e2e="$LEDGER/$RUN_ID/failback-app-e2e.json"
+  local app_fence="$LEDGER/$RUN_ID/failback-fence.json"
+  local quarantine source_group journal_status group_json expected_vpc saved_groups groups_json
+  local instances interfaces cleanup_owner cleanup_evidence cleanup_approval temporary app_owner
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
+    --arg target "$RETURN_PRIMARY" --arg target_replica "$RETURN_REPLICA" '
+    .runId==$run and .account==$account and .region==$region and
+    .operation=="failback" and .status=="complete" and
+    .source_db==$primary and (.source_replica // "")==$replica and
+    .db==$target and (.replica // "")==$target_replica' "$failback_record" >/dev/null \
+    || { echo 'Complete matching endpoint failback is required for cleanup.' >&2; return 2; }
+  [[ -f "$app_fence" && -f "$app_deploy" && -f "$app_health" && -f "$app_e2e" \
+    && -f "$LEDGER/$RUN_ID/failback-app-deploy.log" ]] \
+    || { echo 'Failback fence, sanitized deployment log, and complete app deployment, health, and transaction journals are required for cleanup.' >&2; return 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
+    --arg target "$RETURN_PRIMARY" --arg target_replica "$RETURN_REPLICA" '
+    .runId==$run and .mode=="failback" and .account==$account and .region==$region and
+    .status=="owner-confirmed" and .activePrimary==$primary and (.activeReplica // "")==$replica and
+    .returnPrimary==$target and (.returnReplica // "")==$target_replica and
+    .fenceVerified==true and .existingSessionsClosed==true and (.appOwner|type=="string" and test("\\S"))' \
+    "$app_fence" >/dev/null \
+    || { echo 'Matching owner-confirmed failback fence and session closure are required for cleanup.' >&2; return 2; }
+  app_owner="$(jq -er '.appOwner' "$app_fence")"
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$(jq -er '.oldHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --arg replica "$(jq -er '.oldReplicaHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --arg owner "$app_owner" --arg evidence "evidence/bb3-secret-endpoints/$RUN_ID/failback-app-deploy.log" \
+    '.runId==$run and .operation=="failback" and .account==$account and .region==$region and
+     .mode=="manual" and .status=="owner-confirmed" and .appOwner==$owner and .evidenceRef==$evidence and
+     (.appOwner|type=="string" and test("\\S")) and
+      .servicesConverged==true and
+     .primaryHost==$primary and .replicaHost==$replica' "$app_deploy" >/dev/null \
+    || { echo 'Matching manual failback deployment/convergence attestation is required for cleanup.' >&2; return 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$(jq -er '.oldHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --arg replica "$(jq -er '.oldReplicaHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --argjson deployment "$(jq -c . "$app_deploy")" \
+    '.runId==$run and .operation=="failback" and .account==$account and .region==$region and
+     .status=="owner-confirmed" and .appOwner==$deployment.appOwner and .healthVerified==true and
+     (.evidenceRef|type=="string" and test("\\S") and
+       (ascii_downcase|test("^\\s*(y|yes|n|no|true|false|ok)\\s*$")|not)) and
+     (.healthCheckAt|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?\\+00:00$")) and
+     .primaryHost==$primary and .replicaHost==$replica' "$app_health" >/dev/null \
+    || { echo 'Matching original-pair failback health attestation is required for cleanup.' >&2; return 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$(jq -er '.oldHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --arg replica "$(jq -er '.oldReplicaHost' "$LEDGER/$RUN_ID/cutover.json")" \
+    --argjson deployment "$(jq -c . "$app_deploy")" \
+    '.runId==$run and .operation=="failback" and .account==$account and .region==$region and
+     .status=="owner-confirmed" and .appOwner==$deployment.appOwner and
+     .businessTransactionVerified==true and
+     (.transactionRef|type=="string" and test("\\S") and
+       (ascii_downcase|test("^\\s*(y|yes|n|no|true|false|ok)\\s*$")|not)) and
+     (.transactionAt|type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?\\+00:00$")) and
+     .primaryHost==$primary and .replicaHost==$replica' "$app_e2e" >/dev/null \
+    || { echo 'Matching original-pair failback transaction/readback attestation is required for cleanup.' >&2; return 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$RETURN_PRIMARY" --arg replica "$RETURN_REPLICA" '
+    .runId==$run and .mode=="cutover" and .account==$account and .region==$region and
+    .status=="released" and .activePrimary==$primary and (.activeReplica // "")==$replica and
+    (.quarantineSecurityGroup|type=="string" and test("^sg-[a-f0-9]+$"))' "$original_record" >/dev/null \
+    || { echo 'Released matching original network fence is required for cleanup.' >&2; return 2; }
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" '
+    .runId==$run and .mode=="failback" and .account==$account and .region==$region and
+    .activePrimary==$primary and (.activeReplica // "")==$replica and
+    (.status=="attached" or .status=="deleted") and
+    (.quarantineSecurityGroup|type=="string" and test("^sg-[a-f0-9]+$")) and
+    (.previousPrimarySecurityGroups|type=="array" and length>0) and
+    (.previousReplicaSecurityGroups|type=="array") and
+    ($replica=="" or (.previousReplicaSecurityGroups|length)>0)' "$network_record" >/dev/null \
+    || { echo 'Matching attached/deleted failback network fence is required for cleanup.' >&2; return 2; }
+  quarantine="$(jq -er '.quarantineSecurityGroup' "$network_record")"
+  source_group="$(jq -er '.quarantineSecurityGroup' "$original_record")"
+  [[ "$quarantine" != "$source_group" && "$ACTIVE_PRIMARY" != "$RETURN_PRIMARY" \
+    && "$ACTIVE_PRIMARY" != "$RETURN_REPLICA" && ( -z "$ACTIVE_REPLICA" \
+    || ( "$ACTIVE_REPLICA" != "$RETURN_PRIMARY" && "$ACTIVE_REPLICA" != "$RETURN_REPLICA" ) ) ]] \
+    || { echo 'Source and restored pair identities/quarantine SGs must be distinct.' >&2; return 2; }
+  journal_status="$(jq -er '.status' "$network_record")"
+  instances="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds describe-db-instances --output json)" || return 2
+  jq -e --arg sg "$quarantine" '.DBInstances | type=="array" and
+    all(.[]; all(.VpcSecurityGroups[]?; .VpcSecurityGroupId!=$sg))' <<< "$instances" >/dev/null \
+    || { echo 'Quarantine SG is still attached to a DB; retire DBs through the separately approved process first.' >&2; return 2; }
+  interfaces="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 describe-network-interfaces \
+    --filters "Name=group-id,Values=$quarantine" --output json)" || return 2
+  jq -e '.NetworkInterfaces | type=="array" and length==0' <<< "$interfaces" >/dev/null \
+    || { echo 'Quarantine SG still has network interfaces; no deletion made.' >&2; return 2; }
+  group_json="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 describe-security-groups \
+    --filters "Name=group-id,Values=$quarantine" --output json)" || return 2
+  if [[ "$journal_status" == deleted ]]; then
+    jq -e '.SecurityGroups | type=="array" and length==0' <<< "$group_json" >/dev/null \
+      && jq -e --arg owner "$app_owner" 'def attestation: type=="string" and test("\\S") and
+        (ascii_downcase|test("^\\s*(y|yes|n|no|true|false|ok)\\s*$")|not);
+        (.cleanupOwner|attestation) and .cleanupOwner==$owner and (.cleanupEvidenceRef|attestation) and
+        .postFailbackAppValidated==true and (.cleanupApprovedAt|type=="string" and length>0) and
+        (.deletedAt|type=="string" and length>0)' "$network_record" >/dev/null \
+      || { echo 'Deleted journal is incomplete or quarantine SG exists again; refusing cleanup.' >&2; return 2; }
+    echo 'Failback quarantine already deleted and absence verified; no changes made.'
+    return 0
+  fi
+  jq -e --arg sg "$quarantine" --arg run "$RUN_ID" '.SecurityGroups | type=="array" and length==1 and
+    .[0].GroupId==$sg and (.[0].VpcId|type=="string" and test("^vpc-[A-Za-z0-9]+$")) and
+    any(.[0].Tags[]?; .Key=="dr-run" and .Value==$run) and
+    any(.[0].Tags[]?; .Key=="dr-role" and .Value=="quarantine") and
+    (.[0].IpPermissions|type=="array" and length==0)' <<< "$group_json" >/dev/null \
+    || { echo 'Quarantine SG absent before recorded deletion, mismatched, or has ingress; state unknown, refusing cleanup.' >&2; return 2; }
+  expected_vpc="$(jq -r '.vpcId // empty' "$network_record")"
+  if [[ -z "$expected_vpc" ]]; then
+    saved_groups="$(jq -ce '[.previousPrimarySecurityGroups[], .previousReplicaSecurityGroups[]] | unique |
+      select(length>0 and all(.[]; type=="string" and test("^sg-[A-Za-z0-9-]+$")))' "$original_record")" || return 2
+    local -a group_ids=()
+    while IFS= read -r group_id; do group_ids+=("$group_id"); done < <(jq -r '.[]' <<< "$saved_groups")
+    groups_json="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 describe-security-groups \
+      --group-ids "${group_ids[@]}" --output json)" || return 2
+    expected_vpc="$(jq -er --argjson groups "$saved_groups" '
+      select(([.SecurityGroups[].GroupId]|sort)==($groups|sort)) |
+      [.SecurityGroups[].VpcId] | unique | select(length==1) | .[0] | select(type=="string" and length>0)' \
+      <<< "$groups_json")" || { echo 'Cannot verify original saved SG VPC; refusing cleanup.' >&2; return 2; }
+  fi
+  jq -e --arg vpc "$expected_vpc" '.SecurityGroups[0].VpcId==$vpc' <<< "$group_json" >/dev/null \
+    || { echo 'Quarantine SG VPC does not match the recorded/original VPC.' >&2; return 2; }
+  printf 'Cleanup only deletes the detached restored-pair quarantine SG %s. It does not retire DBs or restore SG attachments.\n' "$quarantine"
+  bb3_prompt_read cleanup_owner 'Post-failback app validation/signoff owner: ' || return 2
+  bb3_prompt_read cleanup_evidence 'Actual post-failback app validation/signoff evidence reference: ' || return 2
+  jq -en --arg owner "$cleanup_owner" --arg evidence "$cleanup_evidence" '
+    def attestation: test("\\S") and (ascii_downcase|test("^\\s*(y|yes|n|no|true|false|ok)\\s*$")|not);
+    ($owner|attestation) and ($evidence|attestation)' >/dev/null \
+    || { echo 'Nonblank owner and actual evidence reference are required; generic approvals are not evidence.' >&2; return 2; }
+  [[ "$cleanup_owner" == "$(jq -er '.appOwner' "$app_deploy")" ]] \
+    || { echo 'Cleanup owner must match the completed failback app validation owner.' >&2; return 2; }
+  bb3_prompt_token_read cleanup_approval 'Type ' DELETE-FAILBACK-QUARANTINE \
+    ' to confirm post-failback app signoff and delete: ' || return 2
+  [[ "$cleanup_approval" == DELETE-FAILBACK-QUARANTINE ]] \
+    || { echo 'Cleanup not approved; no deletion made.' >&2; return 2; }
+  temporary="$(mktemp "$(dirname "$network_record")/.cleanup.XXXXXX")"
+  jq --arg owner "$cleanup_owner" --arg evidence "$cleanup_evidence" --arg vpc "$expected_vpc" '
+    .cleanupOwner=$owner | .cleanupEvidenceRef=$evidence | .postFailbackAppValidated=true |
+    .cleanupApprovedAt=(now|todateiso8601) | .vpcId=$vpc' "$network_record" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$network_record"
+  aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 delete-security-group --group-id "$quarantine" >/dev/null || return 2
+  group_json="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager ec2 describe-security-groups \
+    --filters "Name=group-id,Values=$quarantine" --output json)" || return 2
+  jq -e '.SecurityGroups | type=="array" and length==0' <<< "$group_json" >/dev/null \
+    || { echo 'Deletion not verified; journal remains attached for investigation.' >&2; return 2; }
+  temporary="$(mktemp "$(dirname "$network_record")/.cleanup.XXXXXX")"
+  jq '.status="deleted" | .deletedAt=(now|todateiso8601)' "$network_record" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$network_record"
+  echo 'Restored-pair failback quarantine deleted; DBs, snapshots and prior SG sets unchanged.'
+}
+
+if [[ "$CLEANUP_FAILBACK_QUARANTINE" == true ]]; then
+  [[ "$RUN_ID" == "$RUN_SELECTION" ]] \
+    || { echo 'Saved cutover run ID does not match the explicit cleanup selection.' >&2; exit 2; }
+  cleanup_failback_quarantine
+  exit 0
+fi
 EXISTING_RECORD=''
 APP_OWNER=''
 if [[ -e "$RECORD" ]]; then
-  EXISTING_RECORD="$(jq -ce --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
-    'select(.runId==$run and .account==$account and .region==$region and .status=="owner-confirmed")' "$RECORD")" \
+  EXISTING_RECORD="$(jq -ce --arg run "$RUN_ID" --arg mode "$MODE" --arg account "$ACCOUNT" --arg region "$REGION" \
+    'select(.runId==$run and .mode==$mode and .account==$account and .region==$region and .status=="owner-confirmed")' "$RECORD")" \
     || { echo 'Existing fence journal is incomplete or belongs to a different run/account.' >&2; exit 2; }
   [[ "$(jq -er '.activePrimary' <<< "$EXISTING_RECORD")" == "$ACTIVE_PRIMARY" \
     && "$(jq -r '.activeReplica // empty' <<< "$EXISTING_RECORD")" == "$ACTIVE_REPLICA" \
@@ -164,10 +339,11 @@ write_network_record() {
   chmod 700 "$LEDGER" "$(dirname "$NETWORK_RECORD")"
   temporary="$(mktemp "$(dirname "$NETWORK_RECORD")/.network-fence.XXXXXX")"
   jq -n --arg run "$RUN_ID" --arg mode "$MODE" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg vpc "$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")" \
     --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" --arg sg "$QUARANTINE_SG" \
     --arg status "$status" --argjson primary_groups "$PREVIOUS_PRIMARY_GROUPS" \
     --argjson replica_groups "$PREVIOUS_REPLICA_GROUPS" \
-    '{runId:$run,mode:$mode,account:$account,region:$region,activePrimary:$primary,
+    '{runId:$run,mode:$mode,account:$account,region:$region,activePrimary:$primary,vpcId:$vpc,
       activeReplica:(if $replica=="" then null else $replica end),quarantineSecurityGroup:$sg,
       previousPrimarySecurityGroups:$primary_groups,previousReplicaSecurityGroups:$replica_groups,
       status:$status,recordedAt:(now|todateiso8601)}' > "$temporary"
@@ -179,6 +355,11 @@ apply_quarantine_group() {
   local primary_groups replica_groups vpc_id group_name created current_groups instance_id
   local -a instance_ids=()
   local primary_display replica_display apply_approval
+  vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")" || return 1
+  if [[ -n "$ACTIVE_REPLICA" ]]; then
+    [[ "$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_REPLICA_JSON")" == "$vpc_id" ]] \
+      || { echo 'Active DB pair is not in the same VPC.' >&2; return 1; }
+  fi
   primary_groups="$(group_ids_for_db "$ACTIVE_PRIMARY")"
   replica_groups='[]'
   if [[ -n "$ACTIVE_REPLICA" ]]; then
@@ -203,20 +384,26 @@ apply_quarantine_group() {
       "$COLOR_RED" "$COLOR_RESET"
     printf '%sReplacement SG: no ingress rules%s\n' "$COLOR_GREEN" "$COLOR_RESET"
   fi
-  printf 'Both source DBs will use only the quarantine SG. This blocks new connections; existing sessions may continue. Restored DB SGs will not change.\n'
-  read -r -p 'Apply this quarantine? [y/N]: ' apply_approval
+  printf 'The active DBs will use only the quarantine SG. This blocks new connections; existing sessions may continue. Return DB SGs will not change.\n'
+  bb3_prompt_read apply_approval 'Apply this quarantine? [y/N]: '
   [[ "$apply_approval" =~ ^[Yy]$ ]] || { echo 'Quarantine SG not applied.' >&2; return 2; }
   if [[ -f "$NETWORK_RECORD" ]]; then
-    jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    jq -e --arg run "$RUN_ID" --arg mode "$MODE" --arg account "$ACCOUNT" --arg region "$REGION" \
       --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
-      '.runId==$run and .account==$account and .region==$region and .activePrimary==$primary and
-      (.activeReplica // "")==$replica and (.status=="prepared" or .status=="submitted" or .status=="attached")' \
+      '.runId==$run and .mode==$mode and .account==$account and .region==$region and .activePrimary==$primary and
+      (.activeReplica // "")==$replica and (.status=="prepared" or .status=="submitted" or .status=="attached") and
+      (.previousPrimarySecurityGroups|type=="array" and length>0) and
+      ($replica=="" or (.previousReplicaSecurityGroups|type=="array" and length>0))' \
       "$NETWORK_RECORD" >/dev/null \
       || { echo 'Network fence journal does not match this run or is not resumable.' >&2; return 1; }
     QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' "$NETWORK_RECORD")"
     PREVIOUS_PRIMARY_GROUPS="$(jq -ce '.previousPrimarySecurityGroups' "$NETWORK_RECORD")"
     PREVIOUS_REPLICA_GROUPS="$(jq -ce '.previousReplicaSecurityGroups' "$NETWORK_RECORD")"
   elif [[ "$MODE" == failback ]]; then
+    jq -e 'type=="array" and length>0' <<< "$primary_groups" >/dev/null || return 1
+    if [[ -n "$ACTIVE_REPLICA" ]]; then
+      jq -e 'type=="array" and length>0' <<< "$replica_groups" >/dev/null || return 1
+    fi
     PREVIOUS_PRIMARY_GROUPS="$primary_groups"
     PREVIOUS_REPLICA_GROUPS="$replica_groups"
     vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")" \
@@ -266,7 +453,7 @@ apply_quarantine_group() {
     fi
   done
   for instance_id in "${instance_ids[@]}"; do
-    aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+    bb3_wait 'Waiting for restored quarantine DB availability' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
       --db-instance-identifier "$instance_id" || return 1
     wait_for_quarantine_attachment "$instance_id" \
       || { echo "Quarantine SG attachment is not active on $instance_id after retries." >&2; return 1; }
@@ -280,12 +467,74 @@ apply_quarantine_group() {
   printf 'Verified run-scoped no-ingress SG %s is the only SG on the active DB pair. This blocks new connections, not existing sessions.\n' "$QUARANTINE_SG"
 }
 
+verify_restored_fence_for_release() {
+  local primary_json replica_json vpc_id instance_id
+  for instance_id in "$ACTIVE_PRIMARY" "$ACTIVE_REPLICA"; do
+    [[ -n "$instance_id" ]] || continue
+    [[ "$instance_id" != "$RETURN_PRIMARY" && "$instance_id" != "$RETURN_REPLICA" ]] || return 2
+  done
+  [[ -n "$EXISTING_RECORD" ]] || { echo 'Saved failback fence is required before source release.' >&2; return 2; }
+  jq -e '.fenceMethod=="security-group-no-ingress" and .fenceVerified==true and
+    .existingSessionsClosed==true and (.appOwner|type=="string" and length>0)' \
+    <<< "$EXISTING_RECORD" >/dev/null || return 2
+  QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' <<< "$EXISTING_RECORD")" || return 2
+  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" --arg sg "$QUARANTINE_SG" \
+    '.runId==$run and .mode=="failback" and .account==$account and .region==$region and
+     .activePrimary==$primary and (.activeReplica // "")==$replica and .status=="attached" and
+     .quarantineSecurityGroup==$sg and (.previousPrimarySecurityGroups|type=="array" and length>0) and
+     ($replica=="" or (.previousReplicaSecurityGroups|type=="array" and length>0))' \
+    "$NETWORK_RECORD" >/dev/null || return 2
+  primary_json="$(inspect_db "$ACTIVE_PRIMARY")" || return 2
+  vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$primary_json")" || return 2
+  jq -e --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
+    '.DBInstanceIdentifier==$primary and .DBInstanceStatus=="available" and
+     (.ReadReplicaSourceDBInstanceIdentifier // "")=="" and
+     ((.ReadReplicaDBInstanceIdentifiers // [] | sort)==(if $replica=="" then [] else [$replica] end))' \
+    <<< "$primary_json" >/dev/null || return 2
+  if [[ -n "$ACTIVE_REPLICA" ]]; then
+    replica_json="$(inspect_db "$ACTIVE_REPLICA")" || return 2
+    jq -e --arg replica "$ACTIVE_REPLICA" --arg primary "$ACTIVE_PRIMARY" --arg vpc "$vpc_id" \
+      '.DBInstanceIdentifier==$replica and .DBInstanceStatus=="available" and
+       .ReadReplicaSourceDBInstanceIdentifier==$primary and .DBSubnetGroup.VpcId==$vpc' \
+      <<< "$replica_json" >/dev/null || return 2
+  fi
+  verify_quarantine_group "$QUARANTINE_SG" "$vpc_id" || return 2
+  for instance_id in "$ACTIVE_PRIMARY" "$ACTIVE_REPLICA"; do
+    [[ -n "$instance_id" ]] || continue
+    wait_for_quarantine_attachment "$instance_id" || return 2
+  done
+}
+
+wait_for_saved_security_groups() {
+  local instance_id="$1" expected_groups="$2" attached attempt
+  printf 'Waiting for saved SG attachments on %s to become active. DB available alone is not sufficient.\n' "$instance_id"
+  for ((attempt=1; attempt<=24; attempt++)); do
+    attached="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds describe-db-instances \
+      --db-instance-identifier "$instance_id" --query 'DBInstances[0].VpcSecurityGroups' --output json)" || return 2
+    if jq -e --argjson expected "$expected_groups" 'type=="array" and
+      ([.[].VpcSecurityGroupId]|sort)==($expected|sort) and all(.[];.Status=="active")' \
+      <<< "$attached" >/dev/null; then
+      printf 'Verified saved SG set active on %s.\n' "$instance_id"
+      return 0
+    fi
+    printf 'SG attachment verification %s/24 for %s: %s\n' "$attempt" "$instance_id" \
+      "$(jq -c '[.[] | {id:.VpcSecurityGroupId,status:.Status}]' <<< "$attached")"
+    if ((attempt < 24)); then sleep 5; fi
+  done
+  printf 'Saved SG set is not active on %s; quarantine SG retained and source release remains incomplete.\n' "$instance_id" >&2
+  printf 'Review current SG attachments, then resume: bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01 --failback %s --release-quarantine\n' "$RUN_ID" >&2
+  return 2
+}
+
 release_source_quarantine() {
   local source_primary source_replica source_group source_vpc primary_groups replica_groups current_groups expected_groups instance_id group_json
   local group_count record_status
   local original_record="$LEDGER/$RUN_ID/network-fence.json"
   local -a instance_ids=() target_groups=()
   [[ "$MODE" == failback ]] || { echo '--release-quarantine requires --failback.' >&2; return 2; }
+  verify_restored_fence_for_release \
+    || { echo 'Restored fence is unconfirmed, mismatched, or drifted; no source release changes made.' >&2; return 2; }
   [[ -f "$LEDGER/$RUN_ID/failback.json" ]] \
     && jq -e --arg run "$RUN_ID" '.runId==$run and .operation=="failback" and .status=="complete"' \
       "$LEDGER/$RUN_ID/failback.json" >/dev/null \
@@ -299,6 +548,8 @@ release_source_quarantine() {
   source_primary="$(jq -er '.activePrimary' "$original_record")"
   source_replica="$(jq -r '.activeReplica // empty' "$original_record")"
   source_group="$(jq -er '.quarantineSecurityGroup' "$original_record")"
+  [[ "$source_group" != "$QUARANTINE_SG" ]] \
+    || { echo 'Source and restored quarantine SGs must be distinct.' >&2; return 2; }
   primary_groups="$(jq -ce '.previousPrimarySecurityGroups|select(length>0)' "$original_record")"
   replica_groups="$(jq -ce '.previousReplicaSecurityGroups' "$original_record")"
   [[ "$source_primary" == "$RETURN_PRIMARY" && "$source_replica" == "$RETURN_REPLICA" ]] \
@@ -328,7 +579,8 @@ release_source_quarantine() {
   [[ "$group_count" == 0 || "$group_count" == 1 ]] || { echo 'Quarantine SG lookup returned an unexpected result.' >&2; return 2; }
   if [[ "$record_status" == attached ]]; then
     printf 'Restore the saved pre-drill SG sets on the source pair, then delete the temporary SG %s.\n' "$source_group"
-    read -r -p 'Type RELEASE-SOURCE-QUARANTINE to continue: ' release_approval
+    release_approval=''
+    bb3_prompt_token_read release_approval 'Type ' RELEASE-SOURCE-QUARANTINE ' to continue: '
     [[ "$release_approval" == RELEASE-SOURCE-QUARANTINE ]] || { echo 'No SG changes made.' >&2; return 2; }
   fi
   if [[ "$group_count" == 1 ]]; then
@@ -349,12 +601,10 @@ release_source_quarantine() {
       aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds modify-db-instance \
         --db-instance-identifier "$instance_id" --vpc-security-group-ids "${target_groups[@]}" \
         --apply-immediately >/dev/null
-      aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+      bb3_wait 'Waiting for original DB availability after SG release' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
         --db-instance-identifier "$instance_id"
-      current_groups="$(group_ids_for_db "$instance_id")"
     fi
-    jq -e --argjson expected "$expected_groups" 'sort == ($expected|sort)' <<< "$current_groups" >/dev/null \
-      || { echo "Saved SG set was not verified on $instance_id; quarantine SG retained." >&2; return 2; }
+    wait_for_saved_security_groups "$instance_id" "$expected_groups" || return 2
   done
   for instance_id in "${instance_ids[@]}"; do
     current_groups="$(group_ids_for_db "$instance_id")"
@@ -441,7 +691,7 @@ else
   printf 'Return replica: none selected\n'
 fi
   APP_OWNER_INPUT=''
-  read -r -p "App owner name [${APP_OWNER:-required}]: " APP_OWNER_INPUT
+  bb3_prompt_read APP_OWNER_INPUT "App owner name [${APP_OWNER:-required}]: "
   APP_OWNER="${APP_OWNER_INPUT:-$APP_OWNER}"
 [[ -n "$APP_OWNER" ]] || { echo 'App owner is required.' >&2; exit 2; }
 
@@ -479,17 +729,18 @@ elif [[ "$ACTIVE_STANDALONE" == true ]]; then
     SESSIONS_CLOSED=true
   else
     printf 'AWS confirms this is a standalone primary; temporary RDS stop is permitted.\n'
-    read -r -p 'Fence choice: 1) Stop standalone primary  2) Network fence: ' FENCE_CHOICE
+    bb3_prompt_read FENCE_CHOICE 'Fence choice: 1) Stop standalone primary  2) Network fence: '
     case "$FENCE_CHOICE" in
       1)
         printf 'Pause/drain app writers, readers, workers and scheduled jobs before stopping the DB.\n'
         TOKEN=STOP-OLD-PRIMARY
         [[ "$MODE" != failback ]] || TOKEN=STOP-RESTORED-PRIMARY
-        read -r -p "Confirm app clients are drained and stop the active primary. Type $TOKEN: " STOP_APPROVAL
+        bb3_prompt_token_read STOP_APPROVAL \
+          'Confirm app clients are drained and stop the active primary. Type ' "$TOKEN" ': '
         [[ "$STOP_APPROVAL" == "$TOKEN" ]] || { echo 'Stop not approved; no change made.' >&2; exit 2; }
         aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds stop-db-instance \
           --db-instance-identifier "$ACTIVE_PRIMARY" >/dev/null
-        aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-stopped \
+        bb3_wait 'Waiting for standalone primary to stop' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-stopped \
           --db-instance-identifier "$ACTIVE_PRIMARY"
         ACTIVE_PRIMARY_JSON="$(inspect_db "$ACTIVE_PRIMARY")"
         [[ "$(jq -r '.DBInstanceStatus' <<< "$ACTIVE_PRIMARY_JSON")" == stopped ]] \
@@ -505,30 +756,10 @@ elif [[ "$ACTIVE_STANDALONE" == true ]]; then
   fi
 else
   printf 'RDS stop is prohibited: this primary has a read replica or is itself a replica. No stop request will be sent.\n'
-  [[ -f "$NETWORK_RECORD" ]] \
-    || { echo 'P0 quarantine record is required; no SG changes are made in P3-S01.' >&2; exit 2; }
-  jq -e --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
-    --arg primary "$ACTIVE_PRIMARY" --arg replica "$ACTIVE_REPLICA" \
-    '.runId==$run and .account==$account and .region==$region and .activePrimary==$primary and
-     (.activeReplica // "")==$replica and .status=="attached"' \
-    "$NETWORK_RECORD" >/dev/null \
-    || { echo 'P0 quarantine record is not attached for this source pair.' >&2; exit 2; }
-  QUARANTINE_SG="$(jq -er '.quarantineSecurityGroup' "$NETWORK_RECORD")"
-  vpc_id="$(jq -er '.DBSubnetGroup.VpcId' <<< "$ACTIVE_PRIMARY_JSON")"
-  verify_quarantine_group "$QUARANTINE_SG" "$vpc_id" \
-    || { echo 'P0 quarantine SG is missing, changed, or has ingress rules.' >&2; exit 2; }
-  for instance_id in "$ACTIVE_PRIMARY" "$ACTIVE_REPLICA"; do
-    [[ -n "$instance_id" ]] || continue
-    current_groups="$(group_ids_for_db "$instance_id")"
-    jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null \
-      || { echo "P0 quarantine SG is not the only attached SG on $instance_id." >&2; exit 2; }
-  done
-  FENCE_METHOD=security-group-no-ingress
-  FENCE_VERIFIED=true
-  printf 'P0 quarantine verified; P3-S01 will not submit another SG change.\n'
+  apply_quarantine_group
 fi
 if [[ "$FENCE_METHOD" == security-group-no-ingress ]]; then
-  read -r -p 'Are all app clients and existing DB sessions closed? [y/N]: ' SESSION_APPROVAL
+  bb3_prompt_read SESSION_APPROVAL 'Are all app clients and existing DB sessions closed? [y/N]: '
   [[ "$SESSION_APPROVAL" =~ ^[Yy]$ ]] && SESSIONS_CLOSED=true
   [[ "$SESSIONS_CLOSED" == true ]] \
     || printf 'SG isolation is verified, but session closure is unconfirmed; P3-S02 remains blocked.\n'
@@ -536,11 +767,11 @@ fi
 
 if [[ "$MODE" == failback && "$RETURN_WAS_STOPPED" == true ]]; then
   printf 'Active pair is fenced; saved return primary is standalone and stopped.\n'
-  read -r -p 'Type START-RETURN-PRIMARY to start the saved original primary: ' START_APPROVAL
+  bb3_prompt_token_read START_APPROVAL 'Type ' START-RETURN-PRIMARY ' to start the saved original primary: '
   [[ "$START_APPROVAL" == START-RETURN-PRIMARY ]] || { echo 'Start not approved; no start request made.' >&2; exit 2; }
   aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds start-db-instance \
     --db-instance-identifier "$RETURN_PRIMARY" >/dev/null
-  aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+  bb3_wait 'Waiting for original standalone primary to start' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
     --db-instance-identifier "$RETURN_PRIMARY"
   RETURN_PRIMARY_JSON="$(inspect_db "$RETURN_PRIMARY")"
   [[ "$(jq -r '.DBInstanceStatus' <<< "$RETURN_PRIMARY_JSON")" == available ]] \

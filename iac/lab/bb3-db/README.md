@@ -8,6 +8,44 @@ is intentional; it does not establish production performance parity.
 This stack creates no EKS, Swarm, application, IAM role, or policy.
 It does not manage existing `lab/db` resources or real BB3 databases.
 
+Failback P4-S02 offers an explicit `SIGN-OFF-FAILBACK` approval after the transaction.
+Retry reuses the saved transaction and records separate immutable local sign-off with owner,
+supporting evidence references and journal/log hashes. Enter leaves sign-off pending; it never
+approves deletion. External evidence is not independently verified.
+Sign-off reuses the displayed deployment, health and transaction references captured in earlier steps;
+it does not ask for three additional supporting references. Missing/invalid prior records still block it.
+Existing immutable sign-off records, including previously entered supplemental references, are unchanged.
+
+The standalone retirement script is an owner-approved exception to Terraform-only cleanup:
+
+```bash
+bash iac/lab/bb3-db/retire-restored.sh --failback DR-ID
+```
+
+It requires completed failback sign-off with no minimum waiting period, and verifies sign-off hashes, current original
+endpoints, restored resource IDs, topology and run tags. It shows the exact DB/SG/snapshot/backup
+scope before matching-owner approval, a retention decision reference and `RETIRE-RESTORED-PAIR`.
+Enter cancels. This one approval includes permanent removal of the restored pair's recovery data;
+no second backup approval is required. It creates and verifies a temporary manual safety snapshot,
+prints timestamped stages 1-7 and waiter start/completion messages (not a percentage),
+deletes the restored replica before the primary, then deletes only their run-owned quarantine
+SG after DB/ENI detachment. Finally it deletes automated backups identified by the exact saved
+restored DB resource IDs, and deletes the verified retirement-created snapshot. It retains original
+DBs and their backups, the source restore snapshot, unrelated snapshots/SGs/networking/secrets and
+evidence. Cross-account/Region or mismatched backup identities block deletion. This is a manual
+command, not a scheduled job.
+No new Terraform stack is used. DB deletion protection is never disabled automatically.
+The ignored `retirement.json` pins resources and records progress; rerun the exact command after
+an interrupted waiter. Unexpected disappearance or identity/evidence drift stops for investigation.
+An incomplete AWS waiter prints the same-run resume command and prevents later stages from running.
+Completed retries verify DB/SG/temporary-snapshot/scoped-backup absence without mutations. Local journals and
+the original P5 package are not rewritten. The separate existing quarantine helper remains SG-only.
+Run `bash iac/lab/bb3-db/test-retire-restored.sh` for visible mocked tests; no live retirement
+has been certified by those tests. Do not approve placeholder references as application evidence.
+Older journals that retained recovery data require a fresh scope review and the same typed retirement
+approval before the new purge policy is applied. Interrupted backup deletion stays incomplete until
+absence is verified; rerun the same command, without recreating a snapshot already marked for purge.
+
 The [sanitized UAT observation](uat-baseline.sanitized.json) records only prior
 read-only API results from 2026-10-19, supplemented with retention from the saved full capture. It is not a full
 restore baseline or a `dr-restore`-compatible instance capture. Unknown fields and
@@ -151,6 +189,56 @@ replication, not a Multi-AZ standby. Replica automated backups are disabled.
 
 ## Later Approved Usage
 
+### Recovery Closeout
+
+After P4-S01 health/T8 and P4-S02 business validation/T9:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P4-G4
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P5
+```
+
+P4-G4 records the incident approver and actual declaration time T10, without a ticket-reference prompt,
+and one review of the saved T0/T8/T9 evidence references. Enter for restrictions means
+`none`; type `DECLARE-RESTORED` to attest the references were reviewed and finalize the
+immutable local closeout record. Type `EDIT` instead to correct the three references before
+the same final approval. The CLI displays the RTO result with color when supported. Runner
+steps show What/Expected descriptions by default; `--verbose` remains accepted for compatibility.
+Plain `S3` runs the complete recovery from P0-S01 through T10 and P5 local packaging, preserving
+all approval and manual application-validation gates. It does not perform external deployment,
+failback or retirement. Use `S3 --to P2-S09` to stop at RDS-only readiness, or
+`S3 --from P3-S01 --to P5` to continue an existing run after P2-S09. Do not restart plain `S3` to resume.
+Default and ranged sequences call P3-S02 with `--apply` to enter its fence/typed-approval flow;
+they never approve the change.
+One-command failback uses `S3 --failback DR-ID` for the explicit completed recovery: endpoint preview,
+restored-pair fence/session closure, guarded endpoint apply, original-source release, manual deployment
+confirmation, health and transaction/sign-off. Add `--list` to inspect without actions. Approval gates,
+manual deployment and data reconciliation decisions remain mandatory; this is not a new restore or
+automatic retirement. Do not combine top-level failback with step/range selectors. Existing single-step
+failback commands remain available for controlled continuation after interruption.
+Original-quarantine release waits for the exact saved SG attachments to report active, rather than
+assuming RDS `available` proves SG convergence. It prints bounded retry progress and retains the SG on
+timeout. After live-state review, retry just P3-S01 `--failback DR-ID --release-quarantine`; original DBs
+already on their saved SG set are verified without another modification request.
+No top-level `--apply` flag is needed: guided failback explicitly calls preview first and guarded apply
+after the restored-pair fence. Typed approvals remain mandatory. Incident declaration in recovery records
+the selected S3 scenario without asking for S3/S4 again; BB3 S4/PITR is still unsupported.
+Failback What/Expected descriptions are action-aware: P3-S02 distinguishes read-only original-return
+preview from guarded apply; P3-S01 distinguishes restored-pair fence, original release and SG-only cleanup.
+Deployment, health and transaction/sign-off descriptions refer to the original pair and preserve recovery
+milestones. The same wording applies to guided and explicit single-step failback commands.
+Single-step `--only P3-S02` remains preview-only; add `--apply` to request confirmation, or `--preview`
+for read-only inspection.
+Full compliance limitations are saved in the report/package rather than
+repeated in console output. P5
+automatically packages a validated allowlisted local snapshot, SHA-256 manifest/archive and receipt
+without additional input. It reuses the closeout approver as evidence owner and the fixed ignored
+`evidence/bb3-packages` destination. Deployment logs are omitted, not automatically reviewed or included.
+Existing closeout records with ticket references remain compatible; immutable outputs are never overwritten.
+It does not upload evidence, make AWS calls, resume jobs or authorize failback. Raw
+baselines and external references remain separate. See the runbook closeout section for
+all required confirmations and evidence limitations.
+
 ### Interactive Snapshot Drill
 
 Use the BB3-only runner to preview and execute each RDS phase independently. It
@@ -188,6 +276,9 @@ bash iac/lab/bb3-db/bb3-run.sh S3 --only P2-S07
 ```
 
 The all-in-one `S3` sequence waits automatically at the primary and replica availability checkpoints.
+RDS waiters show elapsed `HH:MM:SS` on one line, updated each second in an interactive terminal,
+including primary/replica creation, hardening, fencing and retirement waits. This is elapsed time,
+not a percentage or estimated finish time. Redirected output records only the start and final timer lines.
 Press Ctrl+C during a wait to stop; the runner prints the matching `--only P2-Sxx` resume command. After an
 accepted restore/create request, resume at its wait ID rather than resubmitting the mutation.
 

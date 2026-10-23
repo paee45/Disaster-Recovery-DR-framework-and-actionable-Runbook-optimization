@@ -70,6 +70,114 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **BB3 late EOF and owner roles (2026-10-23):** runner changed during the active
+  `DR-20261023-062817-uat-BB3-S3` drill; current syntax passes and its T10 closeout, local package
+  manifest/archive hashes and no-upload receipt were verified read-only after the trailing EOF error.
+  Final recovery dispatch/tail now parses as one block and exits before reading newly appended text;
+  a mocked mid-run edit regression passes. Do not edit any runner/helpers during a live drill.
+  IC/T10 approver may differ from app owner; regression tests preserve separate identities while
+  still rejecting mismatched deployment/health/transaction app owners. No live recovery rerun.
+- **BB3 isolated dependency check (2026-10-23):** clean Ubuntu 24.04 ARM64 container, no host mounts,
+  credentials or real sandbox config: installed Bash 5.2, Python 3.12, jq 1.7, Git 2.43 and official
+  AWS CLI v2.38.5, then passed runner listing, 62 Python tests and mocked recovery/failback/prompt tests.
+  This is not a fresh-macOS/Homebrew install certification. The clean checkout exposed restore preview
+  checking the default config before its override; it now validates/sources the selected ignored config.
+  Account/profile/region guards remain. No cloud resources or DR drill were started.
+- **BB3 elapsed wait display (2026-10-23):** shared RDS waiter display counts `HH:MM:SS` on one
+  terminal line for primary/replica creation and hardening, fence lifecycle and retirement waits.
+  Redirected output has only start/final timer lines; no percentages or estimated completion.
+  Waiter arguments, approval gates and same-run retry behavior remain unchanged. Focused timer and
+  mocked recovery/fence/retirement tests pass; no live AWS actions were run for this change.
+- **BB3 UAT runbook consolidation (2026-10-23):** promoted the current BB3 procedure from temporary
+  dev notes into `runbooks/bb3/RB-BB3-S3-snapshot-restore-swarm.md` v1.0 as the maintained UAT-role
+  sandbox reference. Includes quick recovery/failback/retirement commands, actual runner step IDs,
+  S3-only declaration, endpoint approvals, manual app evidence, T8/T9/T10/P5 semantics, retry guidance,
+  SG convergence and scoped backup purge. Removed obsolete draft execution paths; catalogue and temp
+  notes point to the maintained runbook. Named owner review remains pending; this does not authorize
+  real BB3 UAT/production execution or claim independent application certification. No live actions run.
+- **BB3 sign-off reference reuse (2026-10-23):** failback P4-S02 reuses the displayed saved deployment
+  log reference, health evidence reference and transaction ID instead of prompting for three extra
+  supporting references. Evidence validation, owner match, typed `SIGN-OFF-FAILBACK`, hashes and immutable
+  outputs remain. Existing sign-offs are not changed; external evidence is still owner-attested, not
+  independently verified. Mocked interactive tests verify exact reuse and rejection of blank approval
+  or wrong owner. No live sign-off or AWS mutation was performed for this change.
+- **BB3 source-release SG convergence (2026-10-23):** original-quarantine release no longer trusts the
+  DB-available waiter plus one immediate SG-ID check. It verifies exact saved SG IDs and active attachment
+  status with up to 24 checks/five-second intervals, showing progress and a targeted release resume command.
+  Timeout retains the quarantine SG and unreleased journal. Mocked delayed activation, stuck attachment
+  and partial-release retry tests pass; retry skips modifications for already-restored original SG sets.
+  No live release was retried for this fix; inspect current state before resuming the explicit run.
+- **BB3 scenario prompt removal (2026-10-23):** P1-S01-2 now records the S3-only declaration without
+  prompting for S3/S4 again. Timing/evidence/run-ID checks remain unchanged; the runner rejects S4.
+  Guided `S3 --failback DR-ID` already supplies preview/apply per action, with fence and typed approvals;
+  no extra top-level apply flag is required. Mocked incident/runner checks cover this; no live run started.
+- **BB3 failback display clarity (2026-10-23):** What/Expected output now uses forwarded failback/action
+  flags. P3-S02 distinguishes read-only return-to-original preview from guarded apply; P3-S01 distinguishes
+  restored-pair fence, original release and detached-SG-only cleanup. App deployment, health and transaction/
+  sign-off descriptions refer to originals and supplemental evidence, not recovery milestones. Mocked tests
+  check all seven guided actions, standalone cleanup, explicit single-step mode and preview/apply precedence.
+  Helper arguments, order, approval gates and resources are unchanged; no live failback was run.
+- **BB3 guided failback (2026-10-23):** `bb3-run.sh S3 --failback DR-ID` runs preview, restored-pair
+  fence/session closure, endpoint apply, original-source quarantine release, deployment confirmation,
+  health and transaction/sign-off in order. Explicit ID required (never latest); `--list` is action-free.
+  Top-level failback cannot combine with `--only`/ranges; existing single-step failback remains unchanged.
+  All approvals and app/data-owner obligations remain. No discovery/restore or automatic retirement.
+  Mocked tests verify exact helper arguments/order and stop before apply on fence failure; no live failback
+  was performed for this change. Interrupted actions require journal/live-state review before retry.
+- **BB3 full recovery default (2026-10-23):** owner requested plain `bb3-run.sh S3` as one guided
+  process from P0-S01 through service-restored T10 and P5 automatic local packaging. This supersedes
+  the earlier RDS-only default described below. `--to P2-S09` explicitly selects RDS-only recovery;
+  `--from` alone still ends at P4-S02 for compatibility. Default/ranged sequences select guarded
+  P3-S02 `--apply`; explicit single-step preview behavior and all approval/fence/app-evidence gates
+  remain intact. Failback/retirement stay separate. Isolated mocked full-sequence tests verify ordering,
+  endpoint apply forwarding and stopping on gate failure; no live DR run was started for this change.
+- **BB3 prompt-free packaging (2026-10-23):** removed the T10 ticket-reference prompt; explicit
+  service-restored approval remains. P5 validates saved closeout and packages locally without input,
+  reusing the closeout approver and ignored `evidence/bb3-packages` destination. Deployment logs are
+  omitted by default, not automatically reviewed. Hash checks, path safety, immutable outputs and
+  no-upload behavior remain. Legacy closeout records with ticket references are supported.
+- **BB3 range endpoint apply (2026-10-23):** ranged recovery invokes P3-S02 with `--apply` so it does
+  not silently end at preview before app deployment. Matching fence, mode selection and typed endpoint
+  approval remain mandatory. Single-step `--only P3-S02` stays preview-only unless explicitly given
+  `--apply`; explicit preview/failback arguments are preserved. Mocked dispatcher tests cover both paths;
+  no live endpoint changes were made for this change.
+- **BB3 runner clarity (2026-10-23):** every executed step now displays What/Expected descriptions by
+  default (`--verbose` remains compatible). P0-S03 explicitly says it simulates app failure by cutting
+  off new DB traffic, without closing existing sessions. Plain `S3` still intentionally ends at P2-S09;
+  the runner prints its RDS-only limitation and safe P3 continuation commands. A new full recovery is
+  explicitly selected with `S3 --to P5`; continuing an existing run uses `S3 --from P3-S01 --to P5`.
+  All gates remain intact. Mocked restore/runner coverage verifies descriptions for all executable IDs,
+  visible status handoff, ordered selection, inclusive ranges and fail-before-action validation.
+- **BB3 standalone retirement (2026-10-23):** owner approved AWS CLI script-only retirement as a narrow
+  exception to Terraform-only cleanup, for the explicit run's restored pair and run-owned quarantine SG.
+  `iac/lab/bb3-db/retire-restored.sh --failback DR-ID` validates sign-off hashes, current original endpoints,
+  live restored resource IDs/topology/tags and quarantine; previews scope and requires matching owner,
+  retirement/retention reference and `RETIRE-RESTORED-PAIR` (Enter cancels). Creates/verifies a retained
+  temporary primary safety snapshot, deletes replica before primary, then verifies DB/ENI detachment before
+  SG deletion. Owner removed the 24-hour guard: after completed failback sign-off, the same typed
+  retirement approval also deletes automated backups for the exact restored DB resource IDs and the verified
+  retirement-created snapshot. No separate backup gate or automatic scheduling. Original DB backups, source
+  restore snapshot, unrelated resources and evidence are retained. Never disables deletion protection.
+  Separate ignored `retirement.json` supports waiter retry; completed retry is read-only. Timestamped stages
+  1-7 show waiter start/completion and incomplete-wait resume guidance, without fake percentages. Visible mock
+  tests cover fourteen checks, including fresh-sign-off retirement without a delay, backup ownership and interrupted purge resume.
+  Old retained-backup journals require fresh scope review/approval before purge; partial purge retries do not
+  recreate the temporary snapshot. Live retirement/purge completed for `DR-20261021-091418-uat-BB3-S3`
+  after Pa's typed approval and owner-entered retention reference `dfghj` (reference content unverified).
+  Replica was already absent with a recorded deletion request; the script deleted the restored primary,
+  verified DB/ENI detachment and deleted the run-owned quarantine SG, then purged the restored primary's
+  automated backups and verified temporary snapshot. Final absence checks passed; originals, original
+  backups, source snapshot and evidence were retained. Pa's owner-attested sign-off
+  was saved 2026-10-22T16:55:43Z with unverified external references; this is not independent app proof.
+- **BB3 combined failback sign-off (2026-10-22):** failback P4-S02 offers explicit `SIGN-OFF-FAILBACK`
+  after the transaction; retry reuses the existing reference/time without overwriting it. Matching owner,
+  actual supporting deployment/health/transaction references, and local journal/log hashes are saved in
+  immutable `failback-signoff.json`; external evidence remains owner-attested, not independently verified.
+  Enter declines sign-off and cleanup. Standalone restored-DB retirement was added on 2026-10-23 as
+  described above; existing detached-quarantine cleanup remains separate and SG-only.
+  Mocked interactive sign-off tests pass. Live failback transaction reference `3423242342` is owner-entered;
+  deployment/health inputs were prompt testing; later owner-attested sign-off is not independent app proof.
+- **BB3 failback safety and cleanup (2026-10-21):** paired failback now creates/resumes its approved quarantine; source release freshly validates restored isolation/session evidence before any release mutation. After signed-off failback and approved restored-DB retirement, `P3-S01 --failback <explicit-id> --cleanup-failback-quarantine` deletes only a verified detached run-owned no-ingress SG (no DB/ENI attachments), after owner/evidence and typed approval. Original-source release separately deletes its quarantine SG. Mocked confirm/cleanup tests and 28 endpoint tests pass; no live failback/cleanup performed. Latest local report: ignored `evidence/bb3-secret-endpoints/DR-20261021-091418-uat-BB3-S3/run-report.md`; owner-attested T9, RTO 46.12 min, unverified supporting references, T10/data decision/failback pending.
 - **BB3 ranges (2026-10-21):** `bb3-run.sh S3 --from STEP --to STEP` runs inclusive validated ranges; `--from` alone ends at P4-S02, `--to` alone starts at P0-S01. Default execution still ends at P2-S09. Ranges cannot combine with `--only`; add `--list` for selection-only inspection. Existing approval gates are unchanged; P3-G0/P4-G4/P5 are not executable IDs. Invalid selections fail before any step starts.
 - **BB3 pre-impact quarantine (2026-10-21):** `bb3-run.sh` orders P0-S01 discovery, P0-S02 checksum baseline, and P0-S03 run-scoped no-ingress SG attachment to both source DBs before T0; P1-S01-1 records T0 from required app/monitor evidence (Enter accepts current UTC), and P1-S01-2 declares the same run ID. P3-S01 verifies the P0 quarantine and session closure without a second SG change or source stop. The pre-quarantine baseline is pinned against recapture. No live AWS mutation was performed for this code change; use mocked tests only until separately approved.
 - **RTO milestone definition (2026-10-21):** Service RTO is `T8-T0`, where T8 is an app-level health check through the recovered DB endpoint. T9 is business transaction/readback validation and is reported separately as `T9-T8`; total elapsed through business validation is `T9-T0`. RPO remains unchanged. The RTO calculator and runner summary use T8; BB3 P4-S01/P4-S02 collect the separate T8/T9 owner attestations. The active run has no deployment attestation, so T8/T9 remain pending. BB3 S4/PITR remains backlog.

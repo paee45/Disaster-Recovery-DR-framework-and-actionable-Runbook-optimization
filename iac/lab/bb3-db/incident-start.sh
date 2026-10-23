@@ -4,6 +4,8 @@ set +x
 umask 077
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
 LEDGER="${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}"
@@ -73,13 +75,13 @@ if [[ "$MODE" == impact ]]; then
   else
     printf 'Current UTC default: %s\n' "$sample"
   fi
-  read -r -p "Impact start T0 from app/monitor evidence (UTC ISO-8601) [${sample}]: " T0_INPUT
+  bb3_prompt_read T0_INPUT "Impact start T0 from app/monitor evidence (UTC ISO-8601) [${sample}]: "
   T0_INPUT="${T0_INPUT:-$sample}"
   T0_AT="$(parse_utc "$T0_INPUT")" \
     || { echo 'T0 must be ISO-8601 UTC, for example 2026-10-21T00:15:00Z.' >&2; exit 2; }
   [[ ! -e "$LEDGER/${BB3_DR_ID}/incident.json" ]] \
     || { echo 'A DR run is already declared; use its saved T0 instead.' >&2; exit 2; }
-  read -r -p "T0 incident/monitor evidence reference [${BB3_T0_EVIDENCE_REF:-}]: " T0_REF_INPUT
+  bb3_prompt_read T0_REF_INPUT "T0 incident/monitor evidence reference [${BB3_T0_EVIDENCE_REF:-}]: "
   T0_EVIDENCE_REF="${T0_REF_INPUT:-${BB3_T0_EVIDENCE_REF:-}}"
   [[ -n "$T0_EVIDENCE_REF" ]] || { echo 'T0 evidence reference is required.' >&2; exit 2; }
   temporary="$(mktemp "${CONFIG}.tmp.XXXXXX")"
@@ -98,11 +100,10 @@ T0_EVIDENCE_REF="${BB3_T0_EVIDENCE_REF:-}"
   || { echo 'Run P0-S03 before declaring the incident.' >&2; exit 2; }
 [[ -f "$LEDGER/check.json" ]] || git -C "$ROOT" check-ignore -q "$LEDGER/check.json" \
   || { echo 'Incident records must be Git-ignored.' >&2; exit 2; }
-read -r -p 'Scenario to recover [S3 snapshot restore; S4/PITR is backlog] (S3): ' SCENARIO_INPUT
-SCENARIO_INPUT="${SCENARIO_INPUT:-S3}"
-[[ "$SCENARIO_INPUT" == S3 ]] || { echo 'Only S3 is implemented for BB3; S4/PITR remains backlog.' >&2; exit 2; }
+SCENARIO_INPUT=S3
+echo 'Recovery scenario: S3 snapshot restore. BB3 is S3-only; no additional scenario selection is required.'
 sample="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-read -r -p "Incident declaration T1 UTC ISO-8601 [${sample}]: " T1_INPUT
+bb3_prompt_read T1_INPUT "Incident declaration T1 UTC ISO-8601 [${sample}]: "
 T1_AT="$(parse_utc "${T1_INPUT:-$sample}")" \
   || { echo 'T1 must be ISO-8601 UTC, for example 2026-10-21T00:15:00Z.' >&2; exit 2; }
 python3 - "$T0_AT" "$T1_AT" <<'PY'
@@ -114,7 +115,7 @@ if t0 > t1:
 PY
 T1_EVIDENCE_REF="${BB3_T1_EVIDENCE_REF:-}"
 if [[ -n "$T1_INPUT" ]]; then
-  read -r -p 'T1 log/incident-declaration evidence reference: ' T1_EVIDENCE_REF
+  bb3_prompt_read T1_EVIDENCE_REF 'T1 log/incident-declaration evidence reference: '
   [[ -n "$T1_EVIDENCE_REF" ]] || { echo 'Backdated or edited T1 requires an evidence reference.' >&2; exit 2; }
 fi
 [[ "$ENV" == uat ]] || { echo 'This BB3 runner is currently scoped to the UAT S3 scenario.' >&2; exit 2; }

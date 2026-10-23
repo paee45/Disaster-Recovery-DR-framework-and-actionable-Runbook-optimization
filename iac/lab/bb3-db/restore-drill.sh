@@ -8,6 +8,8 @@ else
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 JQ_LIBRARY="$(<"$ROOT/automation/scripts/rds-requests.jq")"
 usage() {
@@ -29,13 +31,13 @@ EOF
 MODE="$1"; shift
 [[ "$MODE" =~ ^(preview|status|restore|harden-primary|replica|harden-replica)$ ]] || usage
 
-CONFIG="$ROOT/iac/sandbox.env"
+CONFIG="${BB3_RESTORE_CONFIG:-$ROOT/iac/sandbox.env}"
 [[ -f "$CONFIG" ]] || { echo 'Missing ignored iac/sandbox.env.' >&2; exit 2; }
 git -C "$ROOT" check-ignore -q "$CONFIG" || { echo 'Refusing non-ignored sandbox config.' >&2; exit 2; }
 [[ -z "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}" ]] \
   || { echo 'Unset exported AWS credentials; use the configured named profile.' >&2; exit 2; }
 # shellcheck source=/dev/null
-source "${BB3_RESTORE_CONFIG:-$CONFIG}"
+source "$CONFIG"
 unset TF_VAR_terrakube_token AWS_DEFAULT_PROFILE
 SNAPSHOT_ID="${1:-${BB3_SNAPSHOT_ID:-}}"
 TARGET_PRIMARY="${2:-${BB3_RESTORE_TARGET_PRIMARY_ID:-}}"
@@ -241,7 +243,7 @@ if [[ "$MODE" == restore && -n "$SNAPSHOT_TAG_DIFFS" ]]; then
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
       tag_prompt="Choose '$tag_key' [1/2, default 1: ${GREEN}${baseline_value}${RESET}]"
     fi
-    read -r -p "$tag_prompt: " tag_choice </dev/tty
+    bb3_prompt_read tag_choice "$tag_prompt: " </dev/tty
     tag_choice="${tag_choice:-1}"
     [[ "$tag_choice" == 1 || "$tag_choice" == 2 ]] || { echo 'A tag choice of 1 or 2 is required; no restore was submitted.' >&2; exit 2; }
     selected_tag_value="$baseline_value"; [[ "$tag_choice" == 2 ]] && selected_tag_value="$snapshot_value"
@@ -463,7 +465,7 @@ confirm_snapshot_diffs() {
   local rows="$1" answer
   [[ -n "$rows" ]] || return 0
   [[ -t 0 && -t 1 ]] || { echo 'Snapshot metadata/tag differences require explicit interactive acceptance.' >&2; exit 2; }
-  read -r -p 'Type ACCEPT-DIFF to accept snapshot metadata/tag differences: ' answer </dev/tty
+  bb3_prompt_token_read answer 'Type ' ACCEPT-DIFF ' to accept snapshot metadata/tag differences: ' </dev/tty
   [[ "$answer" == ACCEPT-DIFF ]] || { echo 'Cancelled; snapshot differences were not accepted.' >&2; exit 2; }
 }
 
@@ -474,7 +476,7 @@ confirm_current_parameters() {
   printf 'The restore request uses parameter group %s, with its current AWS values.\n' "$primary_pg"
   printf '%s\n' 'To use the historical captured values instead, cancel and provision an approved parameter group; this helper will not rebuild it.'
   [[ -t 0 && -t 1 ]] || { echo 'Parameter drift requires an explicit current-group choice or cancellation.' >&2; exit 2; }
-  read -r -p 'Type USE-CURRENT-PARAMETERS to continue with this group: ' answer </dev/tty
+  bb3_prompt_token_read answer 'Type ' USE-CURRENT-PARAMETERS ' to continue with this group: ' </dev/tty
   [[ "$answer" == USE-CURRENT-PARAMETERS ]] \
     || { echo 'Cancelled; parameter values were not selected.' >&2; exit 2; }
 }
@@ -612,7 +614,7 @@ require_absent() {
 confirm() {
   local action="$1" answer
   [[ -t 0 && -t 1 ]] || { echo 'Confirmation requires an interactive terminal.' >&2; exit 2; }
-  read -r -p "Submit $action? [y/N]: " answer </dev/tty
+  bb3_prompt_read answer "Submit $action? [y/N]: " </dev/tty
   case "${answer,,}" in
     y|yes) ;;
     *) echo 'Cancelled; no RDS request was submitted.' >&2; exit 2 ;;
@@ -622,7 +624,7 @@ confirm() {
 confirm_go() {
   local answer
   [[ -t 0 && -t 1 ]] || { echo 'Explicit IC/data-owner GO gate requires an interactive terminal.' >&2; exit 2; }
-  read -r -p 'Type GO after data-owner loss acceptance and IC approval: ' answer </dev/tty
+  bb3_prompt_token_read answer 'Type ' GO ' after data-owner loss acceptance and IC approval: ' </dev/tty
   [[ "$answer" == GO ]] || { echo 'Cancelled; restore was not submitted.' >&2; exit 2; }
 }
 

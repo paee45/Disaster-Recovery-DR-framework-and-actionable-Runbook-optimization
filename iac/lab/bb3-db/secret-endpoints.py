@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -219,6 +220,272 @@ def record_app_e2e(directory, run_id, account, region, owner, transaction_ref):
     return result
 
 
+def load_failback_context(directory, run_id, account, region):
+    if not re.fullmatch(r"DR-[A-Za-z0-9_-]{1,120}", run_id):
+        raise ValueError("A valid explicit DR- run ID is required for failback app evidence.")
+    run_dir = Path(directory) / run_id
+    if not (run_dir / "cutover.json").is_file():
+        raise ValueError("A completed matching cutover is required for this failback run.")
+    cutover = load_cutover(directory, run_id, account, region)
+    if cutover.get("runId") != run_id:
+        raise ValueError("Saved cutover run ID does not match the selected failback run.")
+    failback_path = run_dir / "failback.json"
+    try:
+        failback = json.loads(failback_path.read_text())
+    except (OSError, ValueError):
+        raise ValueError("A completed matching endpoint failback is required.") from None
+    if (failback.get("runId") != run_id or failback.get("operation") != "failback" or
+            failback.get("status") != "complete" or failback.get("account") != account or
+            failback.get("region") != region or failback.get("source_db") != cutover["db"] or
+            (failback.get("source_replica") or "") != (cutover.get("replica") or "") or
+            failback.get("db") != cutover["source_db"] or
+            (failback.get("replica") or "") != (cutover.get("source_replica") or "")):
+        raise ValueError("A completed matching endpoint failback is required.")
+
+    journals = (
+        ("network-fence.json", {
+            "mode": "cutover", "status": "released",
+            "activePrimary": cutover["source_db"],
+            "activeReplica": cutover.get("source_replica") or "",
+        }),
+        ("failback-network-fence.json", {
+            "mode": "failback", "status": "attached",
+            "activePrimary": cutover["db"],
+            "activeReplica": cutover.get("replica") or "",
+        }),
+        ("failback-fence.json", {
+            "mode": "failback", "status": "owner-confirmed", "activePrimary": cutover["db"],
+            "activeReplica": cutover.get("replica") or "",
+            "returnPrimary": cutover["source_db"],
+            "returnReplica": cutover.get("source_replica") or "",
+        }),
+    )
+    records = {}
+    for filename, expected in journals:
+        try:
+            record = json.loads((run_dir / filename).read_text())
+        except (OSError, ValueError):
+            raise ValueError(f"Required failback journal is missing or invalid: {filename}.") from None
+        if (record.get("runId") != run_id or record.get("account") != account or
+                record.get("region") != region or any(
+                    (record.get(key) or "") != (value or "") for key, value in expected.items()
+                )):
+            raise ValueError(f"Required failback journal does not match: {filename}.")
+        if filename == "failback-fence.json" and (
+                record.get("fenceVerified") is not True or
+                record.get("existingSessionsClosed") is not True or
+                not isinstance(record.get("appOwner"), str) or not record["appOwner"].strip()):
+            raise ValueError("Confirmed failback isolation and session closure are required.")
+        records[filename] = record
+
+    if not cutover.get("oldHost") or not cutover.get("oldReplicaHost"):
+        raise ValueError("Saved original endpoint pair is incomplete.")
+    return {
+        "cutover": cutover,
+        "failbackFence": records["failback-fence.json"],
+        "account": account,
+        "region": region,
+        "primaryHost": cutover["oldHost"],
+        "replicaHost": cutover["oldReplicaHost"],
+    }
+
+
+def record_failback_app_deployment(directory, run_id, account, region, owner, evidence_ref):
+    context = load_failback_context(directory, run_id, account, region)
+    if not owner.strip() or not evidence_ref.strip():
+        raise ValueError("App owner and sanitized failback deployment log reference are required.")
+    expected_evidence = f"evidence/bb3-secret-endpoints/{run_id}/failback-app-deploy.log"
+    if evidence_ref.strip() != expected_evidence:
+        raise ValueError("Failback deployment evidence must reference the run's failback-app-deploy.log.")
+    if owner.strip() != context["failbackFence"]["appOwner"].strip():
+        raise ValueError("Failback app owner must match the confirmed failback fence owner.")
+    path = Path(directory) / run_id / "failback-app-deploy.json"
+    if path.exists():
+        raise ValueError("Failback app deployment confirmation already exists for this run.")
+    result = {
+        "runId": run_id, "operation": "failback", "status": "owner-confirmed",
+        "account": account, "region": region, "mode": "manual", "appOwner": owner.strip(),
+        "evidenceRef": evidence_ref.strip(), "primaryHost": context["primaryHost"],
+        "replicaHost": context["replicaHost"], "servicesConverged": True,
+        "recordedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    save_record(path, result, exclusive=True)
+    return result
+
+
+def parse_utc_timestamp(value, label):
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{label} must be a UTC ISO-8601 timestamp.") from None
+    if timestamp.tzinfo is None or timestamp.utcoffset() != timezone.utc.utcoffset(timestamp):
+        raise ValueError(f"{label} must be a UTC ISO-8601 timestamp.")
+    return timestamp
+
+
+def matching_failback_deployment(path, context, run_id, account, region, owner):
+    try:
+        deployment = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise ValueError("A matching failback app deployment attestation is required.") from None
+    if (deployment.get("runId") != run_id or deployment.get("operation") != "failback" or
+            deployment.get("account") != account or deployment.get("region") != region or
+            deployment.get("status") != "owner-confirmed" or deployment.get("mode") != "manual" or
+            deployment.get("appOwner") != owner.strip() or deployment.get("servicesConverged") is not True or
+            deployment.get("primaryHost") != context["primaryHost"] or
+            deployment.get("replicaHost") != context["replicaHost"]):
+        raise ValueError("A matching failback app deployment attestation is required.")
+    return deployment
+
+
+def record_failback_app_health(directory, run_id, account, region, owner, evidence_ref, health_at):
+    context = load_failback_context(directory, run_id, account, region)
+    if not owner.strip() or not evidence_ref.strip():
+        raise ValueError("App owner and health-check evidence reference are required.")
+    run_dir = Path(directory) / run_id
+    matching_failback_deployment(run_dir / "failback-app-deploy.json", context,
+                                 run_id, account, region, owner)
+    path = run_dir / "failback-app-health.json"
+    if path.exists():
+        raise ValueError("Failback app health confirmation already exists for this run.")
+    result = {
+        "runId": run_id, "operation": "failback", "status": "owner-confirmed",
+        "account": account, "region": region, "appOwner": owner.strip(),
+        "healthVerified": True, "primaryHost": context["primaryHost"],
+        "replicaHost": context["replicaHost"], "evidenceRef": evidence_ref.strip(),
+        "healthCheckAt": parse_utc_timestamp(health_at, "Health-check time").isoformat(),
+        "recordedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    save_record(path, result, exclusive=True)
+    return result
+
+
+def record_failback_app_e2e(directory, run_id, account, region, owner, transaction_ref, transaction_at):
+    context = load_failback_context(directory, run_id, account, region)
+    if not owner.strip() or not transaction_ref.strip():
+        raise ValueError("App owner and non-secret transaction reference are required.")
+    run_dir = Path(directory) / run_id
+    matching_failback_deployment(run_dir / "failback-app-deploy.json", context,
+                                 run_id, account, region, owner)
+    health_path = run_dir / "failback-app-health.json"
+    try:
+        health = json.loads(health_path.read_text())
+    except (OSError, ValueError):
+        raise ValueError("A matching failback app health confirmation is required.") from None
+    if (health.get("runId") != run_id or health.get("operation") != "failback" or
+            health.get("account") != account or health.get("region") != region or
+            health.get("status") != "owner-confirmed" or health.get("appOwner") != owner.strip() or
+            health.get("healthVerified") is not True or
+            health.get("primaryHost") != context["primaryHost"] or
+            health.get("replicaHost") != context["replicaHost"]):
+        raise ValueError("A matching failback app health confirmation is required.")
+    path = run_dir / "failback-app-e2e.json"
+    if path.exists():
+        raise ValueError("Failback business transaction confirmation already exists for this run.")
+    result = {
+        "runId": run_id, "operation": "failback", "status": "owner-confirmed",
+        "account": account, "region": region, "appOwner": owner.strip(),
+        "transactionRef": transaction_ref.strip(), "businessTransactionVerified": True,
+        "primaryHost": context["primaryHost"], "replicaHost": context["replicaHost"],
+        "transactionAt": parse_utc_timestamp(transaction_at, "Transaction time").isoformat(),
+        "recordedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    save_record(path, result, exclusive=True)
+    return result
+
+
+def failback_signoff_review(directory, run_id, account, region):
+    context = load_failback_context(directory, run_id, account, region)
+    owner = context["failbackFence"]["appOwner"].strip()
+    run_dir = Path(directory) / run_id
+    deployment = matching_failback_deployment(
+        run_dir / "failback-app-deploy.json", context, run_id, account, region, owner)
+    records = {"deployment": deployment}
+    hashes = {}
+    for label, filename, verified in (
+            ("health", "failback-app-health.json", "healthVerified"),
+            ("transaction", "failback-app-e2e.json", "businessTransactionVerified")):
+        record = json.loads((run_dir / filename).read_text())
+        if (any(record.get(key) != value for key, value in {
+                "runId": run_id, "operation": "failback", "status": "owner-confirmed",
+                "account": account, "region": region, "appOwner": owner,
+                "primaryHost": context["primaryHost"], "replicaHost": context["replicaHost"],
+        }.items()) or record.get(verified) is not True):
+            raise ValueError(f"Matching failback {label} evidence is required for sign-off.")
+        records[label] = record
+    health_at = parse_utc_timestamp(records["health"]["healthCheckAt"], "Health-check time")
+    transaction_at = parse_utc_timestamp(records["transaction"]["transactionAt"], "Transaction time")
+    if transaction_at < health_at or transaction_at > datetime.now(timezone.utc):
+        raise ValueError("Transaction time must follow health and must not be in the future.")
+    for record, field in ((deployment, "evidenceRef"), (records["health"], "evidenceRef"),
+                          (records["transaction"], "transactionRef")):
+        if not isinstance(record.get(field), str) or not record[field].strip():
+            raise ValueError("Deployment, health and transaction references are required.")
+    for filename in ("cutover.json", "failback.json", "network-fence.json",
+                     "failback-network-fence.json", "failback-fence.json",
+                     "failback-app-deploy.json", "failback-app-health.json",
+                     "failback-app-e2e.json", "failback-app-deploy.log"):
+        path = run_dir / filename
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError(f"Nonempty regular evidence file required: {filename}.")
+        hashes[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return dict(runId=run_id, account=account, region=region, appOwner=owner,
+                primaryHost=context["primaryHost"], replicaHost=context["replicaHost"],
+                evidence=records, evidenceHashes=hashes)
+
+
+def record_failback_signoff(directory, run_id, account, region, owner,
+                            deployment_ref, health_ref, transaction_ref, approval):
+    review = failback_signoff_review(directory, run_id, account, region)
+    if owner.strip() != review["appOwner"] or approval != "SIGN-OFF-FAILBACK":
+        raise ValueError("Matching app owner and explicit SIGN-OFF-FAILBACK approval are required.")
+    references = dict(deployment=deployment_ref.strip(), health=health_ref.strip(),
+                      transaction=transaction_ref.strip())
+    if any(not value or value.lower() in ("y", "yes", "no", "none", "ok", "test", "placeholder")
+           for value in references.values()):
+        raise ValueError("Actual supporting deployment, health and transaction evidence references are required.")
+    result = dict(review, operation="failback", status="signed-off",
+                  supportingEvidence=references, signedOffAt=datetime.now(timezone.utc).isoformat(),
+                  approval=approval, evidenceReviewedByOwner=True, cleanupAuthorized=False,
+                  limitations="Owner attestation; external evidence is not independently verified.")
+    save_record(Path(directory) / run_id / "failback-signoff.json", result, exclusive=True)
+    return result
+
+
+def retirement_context(directory, run_id, account, region):
+    review = failback_signoff_review(directory, run_id, account, region)
+    path = Path(directory) / run_id / "failback-signoff.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("A regular matching failback sign-off record is required for retirement.")
+    signoff = json.loads(path.read_text())
+    for key in ("runId", "account", "region", "appOwner", "evidence", "evidenceHashes",
+                "primaryHost", "replicaHost"):
+        if signoff.get(key) != review[key]:
+            raise ValueError("Failback sign-off evidence changed; retirement is blocked.")
+    if (signoff.get("status") != "signed-off" or signoff.get("operation") != "failback" or
+            signoff.get("approval") != "SIGN-OFF-FAILBACK" or
+            signoff.get("evidenceReviewedByOwner") is not True):
+        raise ValueError("Explicit matching failback sign-off is required for retirement.")
+    parse_utc_timestamp(signoff.get("signedOffAt"), "Sign-off time")
+    references = signoff.get("supportingEvidence", {})
+    if any(not isinstance(references.get(key), str) or not references[key].strip()
+           for key in ("deployment", "health", "transaction")):
+        raise ValueError("Supporting failback evidence references are required for retirement.")
+    cutover = load_cutover(directory, run_id, account, region)
+    identifiers = [cutover.get(key) for key in ("db", "replica", "source_db", "source_replica")]
+    if (not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,62}", value)
+                for value in identifiers) or len(set(identifiers)) != 4):
+        raise ValueError("Retirement requires four distinct saved DB identifiers.")
+    network = json.loads((Path(directory) / run_id / "failback-network-fence.json").read_text())
+    quarantine = network.get("quarantineSecurityGroup", "")
+    if not re.fullmatch(r"sg-[a-f0-9]+", quarantine):
+        raise ValueError("A valid run-owned quarantine SG is required for retirement.")
+    return dict(review, restoredPrimary=identifiers[0], restoredReplica=identifiers[1],
+                originalPrimary=identifiers[2], originalReplica=identifiers[3],
+                quarantineSecurityGroup=quarantine,
+                signoffHash=hashlib.sha256(path.read_bytes()).hexdigest())
+
+
 def bb3_update(event, rds, sm):
     operation = event.get("operation", "cutover")
     run_id = event.get("run_id", "")
@@ -353,6 +620,19 @@ def main(arguments):
             _, directory, selection, account, region = arguments
             print(json.dumps(load_cutover(directory, selection, account, region)))
             return 0
+        if arguments[0] == "--show-failback":
+            _, directory, run_id = arguments
+            if not re.fullmatch(r"DR-[A-Za-z0-9_-]{1,120}", run_id):
+                raise ValueError("A valid explicit DR- run ID is required for failback app evidence.")
+            run_dir = Path(directory) / run_id
+            try:
+                cutover = json.loads((run_dir / "cutover.json").read_text())
+            except (OSError, ValueError):
+                raise ValueError("A completed matching cutover is required for this failback run.") from None
+            print(json.dumps(load_failback_context(
+                directory, run_id, cutover.get("account", ""), cutover.get("region", "")
+            )))
+            return 0
         if arguments[0] == "--record-app-deploy":
             _, directory, run_id, account, region, owner, evidence_ref = arguments
             print(json.dumps(record_app_deployment(directory, run_id, account, region, owner, evidence_ref)))
@@ -364,6 +644,34 @@ def main(arguments):
         if arguments[0] == "--record-app-e2e":
             _, directory, run_id, account, region, owner, transaction_ref = arguments
             print(json.dumps(record_app_e2e(directory, run_id, account, region, owner, transaction_ref)))
+            return 0
+        if arguments[0] == "--record-failback-app-deploy":
+            _, directory, run_id, account, region, owner, evidence_ref = arguments
+            print(json.dumps(record_failback_app_deployment(
+                directory, run_id, account, region, owner, evidence_ref
+            )))
+            return 0
+        if arguments[0] == "--record-failback-app-health":
+            _, directory, run_id, account, region, owner, evidence_ref, health_at = arguments
+            print(json.dumps(record_failback_app_health(
+                directory, run_id, account, region, owner, evidence_ref, health_at
+            )))
+            return 0
+        if arguments[0] == "--record-failback-app-e2e":
+            _, directory, run_id, account, region, owner, transaction_ref, transaction_at = arguments
+            print(json.dumps(record_failback_app_e2e(
+                directory, run_id, account, region, owner, transaction_ref, transaction_at
+            )))
+            return 0
+        if arguments[0] == "--review-failback-signoff":
+            _, directory, run_id, account, region = arguments
+            print(json.dumps(failback_signoff_review(directory, run_id, account, region)))
+            return 0
+        if arguments[0] == "--record-failback-signoff":
+            print(json.dumps(record_failback_signoff(*arguments[1:])))
+            return 0
+        if arguments[0] == "--retirement-context":
+            print(json.dumps(retirement_context(*arguments[1:])))
             return 0
         if arguments[0] == "--check-fence":
             _, path, run_id, account, region, active_primary, active_replica, return_primary, return_replica = arguments

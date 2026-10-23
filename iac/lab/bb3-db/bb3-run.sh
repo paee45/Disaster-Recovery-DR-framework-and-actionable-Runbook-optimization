@@ -3,19 +3,29 @@ set -euo pipefail
 set +x
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 CONFIG="$ROOT/iac/sandbox.env"
 SCENARIO=''
 CURRENT_STEP=''
+FAILBACK_RUN=''
+CURRENT_ARGS=()
+NEW_RUN=false
+PROGRESS_ENABLED=false
+PROGRESS_MODE=recovery
+CURRENT_ACTION=''
+NEXT_ACTION=preview
+LEDGER="$ROOT/evidence/bb3-secret-endpoints"
 
 list_steps() {
   cat <<'EOF'
 BB3 S3 RDS drill steps:
   P0-S01  Discover/select source, snapshot, and restore targets
   P0-S02  Capture/checksum original primary and replica baseline
-  P0-S03  Quarantine source DB pair and capture app failure evidence
+  P0-S03  Simulate app failure by cutting off new DB traffic with a no-ingress SG
   P1-S01-1  Record evidence-based impact T0 (Enter defaults to current UTC)
-  P1-S01-2  Record declaration T1 and select S3 (reuse the P0 run ID)
+  P1-S01-2  Record declaration T1 for S3 without reselection (reuse the P0 run ID)
   P2-S00  Preview snapshot, tag, parameter, and restore-request comparisons (read-only)
   P2-S01  Restore primary (explicit tag, data-loss, parameter, and mutation gates)
   P2-S02  Wait for restored primary to become available
@@ -28,17 +38,23 @@ BB3 S3 RDS drill steps:
   P2-S09  Check both saved targets (read-only)
   P3-S01  Verify P0 no-ingress SG and confirm existing sessions closed; no source mutation
   P3-S02  Secret update: automatic CLI or verify manual update (explicit selection)
-  P3-S03  App deploy: automatic unavailable; confirm manual deployment (explicit selection)
-  P4-S01  Confirm app health check connects to restored DB; record T8 and stop Service RTO
-  P4-S02  Confirm business transaction/readback; record T9 separately
+  P3-S03  App deploy: automatic unavailable; manual confirmation; --failback DR-ID records return deployment
+  P4-S01  Confirm restored-pair health (T8); --failback DR-ID records original-pair health
+  P4-S02  Confirm recovery transaction/readback (T9); --failback DR-ID offers return-path sign-off
+  P4-G4   Record formal service-restored approval and T10 (local attestation)
+  P5      Automatically package local journals with SHA256 manifest; omit deployment logs (no prompts/upload)
 
-Manual app-owner gate (not a runner command): P4-G4 declare services restored and record T10.
-
-Run all RDS steps in order: bb3-run.sh S3
+Run or resume recovery through T10 and local packaging: bb3-run.sh S3
+Start a separate new recovery deliberately: bb3-run.sh S3 --new
+Run guided failback for an explicit completed recovery: bb3-run.sh S3 --failback DR-ID
+Default checks saved progress and offers confirmed continuation; new runs use P0-S01 through P5.
+Run only the RDS recovery phase: bb3-run.sh S3 --to P2-S09
 Run selected steps only:  bb3-run.sh S3 --only P0-S01,P0-S02,P0-S03
 Run an inclusive range:   bb3-run.sh S3 --from P2-S06 --to P2-S09
 Inspect a range only:     bb3-run.sh S3 --from P3-S01 --to P4-S02 --list
-Run from the repository root. Direct underlying scripts remain available for overrides.
+Every executed step shows What/Expected descriptions by default; --verbose remains accepted for compatibility.
+Run from the repository root. Approval gates are unchanged.
+Direct underlying scripts remain available for overrides.
 EOF
 }
 
@@ -47,13 +63,28 @@ usage() {
 Usage:
   bash iac/lab/bb3-db/bb3-run.sh --list
   bash iac/lab/bb3-db/bb3-run.sh S3 [--only P0-S01,P0-S02 [step arguments]]
-  bash iac/lab/bb3-db/bb3-run.sh S3 [--from STEP] [--to STEP] [--list]
+  bash iac/lab/bb3-db/bb3-run.sh S3 [--new | --from STEP] [--to STEP] [--list] [--verbose]
+  bash iac/lab/bb3-db/bb3-run.sh S3 --failback DR-ID [--list]
 EOF
   list_steps >&2
   exit 2
 }
 
 on_interrupt() {
+  if [[ "$PROGRESS_ENABLED" == true ]]; then
+    echo >&2
+    echo 'Progress saved. Rerun this main command for a checked, confirmed continuation:' >&2
+    print_main_command >&2
+  fi
+  if [[ -n "$FAILBACK_RUN" ]]; then
+    printf '\nInterrupted guided failback at %s for %s. Inspect saved journals/live state before retrying; do not restart recovery.\n' \
+      "$CURRENT_STEP" "$FAILBACK_RUN" >&2
+    printf 'After reviewing whether the action completed, the exact single-step command is:\n' >&2
+    printf 'bash iac/lab/bb3-db/bb3-run.sh S3 --only %q' "$CURRENT_STEP" >&2
+    printf ' %q' "${CURRENT_ARGS[@]}" >&2
+    printf '\n' >&2
+    exit 130
+  fi
   case "$CURRENT_STEP" in
     P2-S02|P2-S04|P2-S06|P2-S08)
       printf '\nInterrupted while waiting at %s. Resume only this waiter; it will not repeat the mutation:\n' "$CURRENT_STEP" >&2
@@ -83,6 +114,19 @@ on_interrupt() {
 }
 trap on_interrupt INT
 
+on_error() {
+  local exit_code=$?
+  trap - ERR
+  if [[ "$PROGRESS_ENABLED" == true && -n "$CURRENT_STEP" ]]; then
+    printf '\nStopped at %s (%s). No later steps were run.\n' "$CURRENT_STEP" "${CURRENT_ACTION:-recovery}" >&2
+    echo 'Rerun this main command to check saved progress and confirm continuation:' >&2
+    print_main_command >&2
+  fi
+  exit "$exit_code"
+}
+set -E
+trap on_error ERR
+
 if [[ $# == 1 && "$1" == --list ]]; then
   list_steps
   exit 0
@@ -96,15 +140,22 @@ LIST_ONLY=false
 STEP_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --new)
+      [[ -z "$ONLY$FROM$TO$FAILBACK_RUN" && "$NEW_RUN" == false ]] || usage
+      NEW_RUN=true; shift ;;
     --list) LIST_ONLY=true; shift ;;
+    --verbose) shift ;;
+    --failback)
+      [[ $# -ge 2 && "$2" =~ ^DR-[A-Za-z0-9_-]{1,120}$ && -z "$FAILBACK_RUN$ONLY$FROM$TO" && "$NEW_RUN" == false ]] || usage
+      FAILBACK_RUN="$2"; shift 2 ;;
     --from)
-      [[ $# -ge 2 && -n "$2" && -z "$FROM" && -z "$ONLY" ]] || usage
+      [[ $# -ge 2 && -n "$2" && -z "$FROM" && -z "$ONLY$FAILBACK_RUN" && "$NEW_RUN" == false ]] || usage
       FROM="$2"; shift 2 ;;
     --to)
-      [[ $# -ge 2 && -n "$2" && -z "$TO" && -z "$ONLY" ]] || usage
+      [[ $# -ge 2 && -n "$2" && -z "$TO" && -z "$ONLY$FAILBACK_RUN" && "$NEW_RUN" == false ]] || usage
       TO="$2"; shift 2 ;;
     --only)
-      [[ $# -ge 2 && -n "$2" && -z "$ONLY$FROM$TO" ]] || usage
+      [[ $# -ge 2 && -n "$2" && -z "$ONLY$FROM$TO$FAILBACK_RUN" && "$NEW_RUN" == false ]] || usage
       ONLY="$2"; shift 2
       STEP_ARGS=("$@")
       for argument in "${STEP_ARGS[@]}"; do
@@ -115,7 +166,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ALL_STEPS=(P0-S01 P0-S02 P0-S03 P1-S01-1 P1-S01-2 P2-S00 P2-S01 P2-S02 P2-S03 P2-S04 P2-S05 P2-S06 P2-S07 P2-S08 P2-S09 P3-S01 P3-S02 P3-S03 P4-S01 P4-S02)
+if [[ -n "$FAILBACK_RUN" && "$LIST_ONLY" == true ]]; then
+  printf 'Guided failback for %s (no actions run):\n' "$FAILBACK_RUN"
+  cat <<'EOF'
+  FB-01  P3-S02 --preview: review saved original return endpoints
+  FB-02  P3-S01: fence restored DBs and confirm sessions closed
+  FB-03  P3-S02 --apply: approve endpoint return to originals
+  FB-04  P3-S01 --release-quarantine: verify restored fence, release originals
+  FB-05  P3-S03: confirm approved external app deployment/convergence
+  FB-05  P4-S01: confirm original-pair app health
+  FB-06  P4-S02: confirm transaction/readback and offer explicit failback sign-off
+Retirement is not automatic; resource deletion requires separate approval.
+EOF
+  exit 0
+fi
+
+ALL_STEPS=(P0-S01 P0-S02 P0-S03 P1-S01-1 P1-S01-2 P2-S00 P2-S01 P2-S02 P2-S03 P2-S04 P2-S05 P2-S06 P2-S07 P2-S08 P2-S09 P3-S01 P3-S02 P3-S03 P4-S01 P4-S02 P4-G4 P5)
 step_index() {
   local step="$1" index
   for index in "${!ALL_STEPS[@]}"; do
@@ -136,8 +202,7 @@ elif [[ -n "$FROM$TO" ]]; then
   ((first_index <= last_index)) || { echo '--from must not follow --to.' >&2; exit 2; }
   STEPS=("${ALL_STEPS[@]:first_index:last_index-first_index+1}")
 else
-  last_index="$(step_index P2-S09)"
-  STEPS=("${ALL_STEPS[@]:0:last_index+1}")
+  STEPS=("${ALL_STEPS[@]}")
 fi
 for selected_step in "${STEPS[@]}"; do
   step_index "$selected_step" >/dev/null || exit 2
@@ -156,7 +221,7 @@ if ((${#STEP_ARGS[@]} > 0 && ${#STEPS[@]} != 1)); then
   usage
 fi
 
-load_environment() {
+read_configuration() {
   [[ -f "$CONFIG" ]] || { echo 'Missing ignored iac/sandbox.env; run from the repository root.' >&2; return 2; }
   # shellcheck source=/dev/null
   source "$CONFIG"
@@ -167,8 +232,98 @@ load_environment() {
   [[ "$PROFILE" =~ ^(lab_sandbox|pa_aws_sandbox|pa_iam_aws_sandbox)$ \
     && "$REGION" == ap-southeast-1 && "$ACCOUNT" =~ ^[0-9]{12}$ ]] \
     || { echo 'Sandbox profile, region or account is invalid.' >&2; return 2; }
+}
+
+load_environment() {
+  read_configuration
   CALLER="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager sts get-caller-identity --query Account --output text)"
   [[ "$CALLER" == "$ACCOUNT" ]] || { echo 'AWS caller does not match the configured sandbox account.' >&2; return 2; }
+}
+
+print_main_command() {
+  if [[ -n "$FAILBACK_RUN" ]]; then
+    printf 'bash iac/lab/bb3-db/bb3-run.sh S3 --failback %s\n' "$FAILBACK_RUN"
+  else
+    echo 'bash iac/lab/bb3-db/bb3-run.sh S3'
+  fi
+}
+
+progress_context() {
+  read_configuration
+  jq -cn --arg root "$ROOT" --arg ledger "$LEDGER" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg environment "${ENV:-}" --arg run "${FAILBACK_RUN:-${BB3_DR_ID:-}}" \
+    --arg primary "${BB3_SOURCE_PRIMARY_ID:-}" --arg replica "${BB3_SOURCE_REPLICA_ID:-}" \
+    --arg targetPrimary "${BB3_RESTORE_TARGET_PRIMARY_ID:-}" --arg targetReplica "${BB3_RESTORE_TARGET_REPLICA_ID:-}" \
+    --arg snapshot "${BB3_SNAPSHOT_ID:-}" \
+    '{root:$root,ledger:$ledger,account:$account,region:$region,environment:$environment,runId:$run,
+      primary:$primary,replica:$replica,targetPrimary:$targetPrimary,targetReplica:$targetReplica,snapshot:$snapshot}'
+}
+
+progress_update() {
+  [[ "$PROGRESS_ENABLED" == true ]] || return 0
+  local context
+  context="$(progress_context)"
+  python3 "$HERE/runner-progress.py" "$1" --context "$context" --mode "$PROGRESS_MODE" \
+    --step "${CURRENT_ACTION:-$CURRENT_STEP}"
+}
+
+prepare_progress() {
+  [[ -z "$ONLY$FROM$TO" ]] || return 0
+  local context plan next reply mode inventory start
+  context="$(progress_context)"
+  git -C "$ROOT" check-ignore -q "$LEDGER/.runner-check.json" \
+    || { echo 'Runner progress must be Git-ignored.' >&2; return 2; }
+  [[ -z "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}" ]] \
+    || { echo 'Unset exported AWS credentials.' >&2; return 2; }
+  [[ -z "$FAILBACK_RUN" ]] || PROGRESS_MODE=failback
+  if [[ "$NEW_RUN" == true ]]; then
+    python3 "$HERE/runner-progress.py" reset --context "$context" --mode recovery
+    PROGRESS_ENABLED=true
+    return 0
+  fi
+  plan="$(python3 "$HERE/runner-progress.py" plan --context "$context" --mode "$PROGRESS_MODE")"
+  if [[ "$(jq -r '.next' <<< "$plan")" == probe ]]; then
+    echo 'An RDS submission was interrupted. Checking target identity/tags read-only before choosing a retry or waiter.'
+    load_environment
+    inventory="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds describe-db-instances --output json | \
+      jq -ce '.DBInstances | select(type=="array")')"
+    plan="$(python3 "$HERE/runner-progress.py" plan --context "$context" --mode "$PROGRESS_MODE" --inventory "$inventory")"
+  fi
+  [[ "$(jq -r '.existing' <<< "$plan")" == true ]] || { PROGRESS_ENABLED=true; return 0; }
+  mode="$(jq -r '.mode' <<< "$plan")"
+  next="$(jq -r '.next // empty' <<< "$plan")"
+  printf '\nSaved %s progress for run: %s\n' "$mode" "$(jq -r '.runId // "not allocated yet"' <<< "$plan")"
+  echo 'Saved evidence/checkpoints are local progress, not independent application proof. Existing live checks and typed approvals still apply.'
+  if [[ -z "$next" ]]; then
+    echo 'This workflow is already complete; no steps will be repeated.'
+    if [[ "$mode" == recovery ]]; then
+      printf 'Next phase, after its separate approvals: bash iac/lab/bb3-db/bb3-run.sh S3 --failback %s\n' "$(jq -r '.runId' <<< "$plan")"
+      echo 'For a separate new incident, use: bash iac/lab/bb3-db/bb3-run.sh S3 --new'
+    else
+      printf 'Retirement remains separately approved: bash iac/lab/bb3-db/retire-restored.sh --failback %s\n' "$(jq -r '.runId' <<< "$plan")"
+    fi
+    exit 0
+  fi
+  printf 'Suggested continuation: %s\n' "$next"
+  if [[ "$mode" == failback ]]; then
+    FAILBACK_RUN="$(jq -r '.runId' <<< "$plan")"
+    printf 'Continuation command: '; print_main_command
+  else
+    printf 'Equivalent continuation: bash iac/lab/bb3-db/bb3-run.sh S3 --from %s --to P5\n' "$next"
+  fi
+  [[ -t 0 ]] || { echo 'Interactive confirmation required; no continuation was run.' >&2; return 2; }
+  bb3_prompt_read reply 'Continue from the suggested action? [Enter=yes, n=cancel]: '
+  case "$reply" in ''|y|Y|yes|YES) ;; *) echo 'Continuation cancelled; no steps run.'; exit 0 ;; esac
+  PROGRESS_MODE="$mode"
+  PROGRESS_ENABLED=true
+  context="$(progress_context)"
+  python3 "$HERE/runner-progress.py" adopt --context "$context" --mode "$mode" --step "$next"
+  if [[ "$mode" == failback ]]; then
+    NEXT_ACTION="$next"
+  else
+    start="$(step_index "$next")"
+    STEPS=("${ALL_STEPS[@]:start}")
+  fi
 }
 
 wait_for_target() {
@@ -176,19 +331,31 @@ wait_for_target() {
   load_environment
   printf '%s: waiting for %s (%s) to become available. Press Ctrl+C to stop; the resume command will be printed.\n' \
     "$CURRENT_STEP" "$target" "$description"
-  aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+  bb3_wait "$CURRENT_STEP: waiting for $description" aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
     --db-instance-identifier "$target"
   printf '%s: %s is available.\n' "$CURRENT_STEP" "$target"
 }
 
 step_preview() {
   local action expected what_label='  What:' expected_label='  Expected:'
-  case "$1" in
+  local step="$1" argument failback=false apply=false fence_action=fence
+  shift
+  if [[ "$step" == P3-S02 && -z "$ONLY" && $# == 0 ]]; then apply=true; fi
+  for argument in "$@"; do
+    case "$argument" in
+      --failback) failback=true ;;
+      --apply) apply=true ;;
+      --preview) apply=false ;;
+      --release-quarantine) fence_action=release ;;
+      --cleanup-failback-quarantine) fence_action=cleanup ;;
+    esac
+  done
+  case "$step" in
     P0-S01) action='Discover and save the source pair, snapshot, and restore targets.'; expected='A reviewed source/replica selection and deterministic restore target IDs are saved.' ;;
     P0-S02) action='Capture the original primary/replica API baseline and checksums.'; expected='A complete, checksum-verified baseline matching the selected DBs is recorded before the quarantine.' ;;
-    P0-S03) action='Attach the run-scoped no-ingress SG to the source pair.'; expected='Both attachments are active; app failure evidence is recorded; the original SG sets remain in the baseline.' ;;
+    P0-S03) action='Simulate app failure by cutting off new DB traffic: attach the run-scoped no-ingress SG to both source DBs.'; expected='Both attachments are active and actual app/monitor failure evidence is recorded. Existing sessions are not closed by an SG change; original SG sets remain in the baseline.' ;;
     P1-S01-1) action='Record the service-impact time T0 from app/monitor evidence; Enter defaults to current UTC.'; expected='UTC T0 and its required evidence reference are saved for the existing P0 run ID.' ;;
-    P1-S01-2) action='Record declaration T1 and select the recovery scenario.'; expected='T1 is not earlier than T0; T1 evidence is required if backfilled; the existing S3 run ID is declared.' ;;
+    P1-S01-2) action='Record declaration T1 for the selected S3 snapshot recovery; no scenario reselection.'; expected='T1 is not earlier than T0; T1 evidence is required if backfilled; the existing P0 run ID is declared for S3.' ;;
     P2-S00) action='Preview snapshot metadata, baseline differences, parameters, and restore requests.'; expected='Read-only comparison is reviewed; no RDS resource is created or changed.' ;;
     P2-S01) action='Restore a new primary from the selected snapshot.'; expected='A new target is submitted only after explicit mutation approval; the restore API omits PreferredMaintenanceWindow, which P2-S03 applies after creation.' ;;
     P2-S02) action='Wait for the restored primary.'; expected='RDS reports the saved primary target as available.' ;;
@@ -199,13 +366,48 @@ step_preview() {
     P2-S07) action='Harden and validate the restored replica.'; expected='Replica topology and captured parameter/settings checks pass.' ;;
     P2-S08) action='Wait for the hardened replica.'; expected='RDS reports the replica as available after hardening.' ;;
     P2-S09) action='Inspect both saved restore targets.'; expected='Current status and topology are shown; no AWS resource is changed.' ;;
-    P3-S01) action='Verify the P0 run-scoped no-ingress SG and confirm existing sessions are closed.'; expected='Both source DBs must still have only the verified quarantine SG; no SG change or source stop is submitted here.' ;;
+    P3-S01) action='Verify the original source pair quarantine and confirm existing sessions are closed.'; expected='Both original source DBs remain isolated by the verified P0 quarantine; this recovery step does not change source SGs or stop DBs.' ;;
     P3-S02) action='Update or verify the app secret endpoint pair.'; expected='Both endpoints match the selected restored pair; any write requires the matching verified fence.' ;;
-    P3-S03) action='Record the application owner deployment and service convergence attestation.'; expected='No deployment runs here; owner confirmation and one sanitized multiline deployment log are captured.' ;;
-    P4-S01) action='Confirm the running app health check reaches the restored DB path.'; expected='After P3-S03, owner evidence and UTC T0 produce T8 and Service RTO T8-T0.' ;;
-    P4-S02) action='Confirm the separate business transaction and readback.'; expected='After T8, the owner records the transaction reference and T9; validation duration is T9-T8.' ;;
+    P3-S03) action='Record deployment and service convergence; --failback DR-ID selects supplemental return-path evidence.'; expected='No deployment runs here; automatic mode exits unavailable, while manual confirmation records a sanitized log.' ;;
+    P4-S01) action='Confirm app health on the selected endpoint pair.'; expected='Recovery mode records T8; --failback DR-ID records separate original-pair health evidence and actual UTC time.' ;;
+    P4-S02) action='Confirm a successful business transaction and readback.'; expected='Recovery mode records T9; --failback DR-ID records or reuses a separate transaction and offers explicit owner sign-off, not deletion approval.' ;;
+    P4-G4) action='Review saved recovery evidence and record formal service-restored approval.'; expected='Validated T10, approver/role and evidence references are saved locally after typed approval; T8/T9 are preserved.' ;;
+    P5) action='Automatically package validated local recovery journals without additional input.'; expected='Use the saved closeout approver and default local directory; create a frozen snapshot, SHA256 archive and receipt. Deployment logs are omitted; no automatic review, AWS verification or upload is claimed.' ;;
     *) action='Run the selected BB3 step.'; expected='Follow the step output and approval prompts.' ;;
   esac
+  if [[ "$failback" == true ]]; then
+    case "$step" in
+      P3-S01)
+        case "$fence_action" in
+          release)
+            action='Release the original DB pair quarantine after endpoint failback.'
+            expected='Freshly verify restored-pair isolation and session-closure evidence, restore the saved original SGs after typed approval, then remove the original quarantine SG. Keep the restored pair fenced.' ;;
+          cleanup)
+            action='Delete only the detached restored-pair failback quarantine SG.'
+            expected='Verify completed failback app attestations, run ownership and no DB/ENI attachments before typed cleanup approval. This action never retires DBs or deletes snapshots/backups.' ;;
+          fence)
+            action='Fence the restored DB pair for failback and confirm existing sessions are closed.'
+            expected='After approval, create or resume the restored-pair no-ingress quarantine and verify its attachments. Session closure is separately owner-confirmed; an SG change does not close existing sessions. Keep originals isolated until approved release.' ;;
+        esac ;;
+      P3-S02)
+        if [[ "$apply" == true ]]; then
+          action='Apply failback: return both app secret endpoints from the restored pair to the original pair.'
+          expected='Require the matching restored-pair fence/session record and typed FAILBACK-ENDPOINTS approval before updating only endpoint keys. No data reconciliation or application deployment is performed.'
+        else
+          action='Preview failback: show current restored endpoints and the saved original return endpoints (read-only).'
+          expected='Review the original primary/replica destination. No secret write, fencing, application deployment or data reconciliation occurs; this preview runs before the restored-pair fence.'
+        fi ;;
+      P3-S03)
+        action='Record manual app deployment and service convergence on the original DB endpoint pair.'
+        expected='The app owner performs the external deployment; automatic deployment remains unavailable. Review/capture the sanitized failback log and explicitly confirm convergence in separate failback evidence, without changing recovery milestones.' ;;
+      P4-S01)
+        action='Record app-owner health confirmation on the original primary/replica endpoint pair.'
+        expected='Require matching failback/deployment/fence journals and collect actual successful health-check UTC time and evidence. Save supplemental failback health; original recovery T8 and RTO remain unchanged.' ;;
+      P4-S02)
+        action='Record or reuse the original-path business transaction/readback and offer explicit failback sign-off.'
+        expected='Preserve the saved transaction reference/time on retry. Review actual deployment/health/business evidence and require matching-owner SIGN-OFF-FAILBACK approval. Recovery T9 stays unchanged; resource retirement needs separate approval.' ;;
+    esac
+  fi
   if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     printf '\033[1;36m%s\033[0m %s\n\033[1;36m%s\033[0m %s\n' \
       "$what_label" "$action" "$expected_label" "$expected"
@@ -217,8 +419,10 @@ step_preview() {
 run_step() {
   CURRENT_STEP="$1"
   shift
+  CURRENT_ARGS=("$@")
+  progress_update start
   printf '\n== %s ==\n' "$CURRENT_STEP"
-  step_preview "$CURRENT_STEP"
+  step_preview "$CURRENT_STEP" "$@"
   case "$CURRENT_STEP" in
     P1-S01-1)
       bash "$HERE/incident-start.sh" impact "$@"
@@ -278,7 +482,12 @@ run_step() {
       bash "$HERE/fence-confirm.sh" "$@"
       ;;
     P3-S02)
-      bash "$HERE/secret-endpoints.sh" "$@"
+      if [[ -z "$ONLY" && $# == 0 ]]; then
+        echo 'Recovery sequence selects --apply; fence verification and explicit endpoint approval are still required.'
+        bash "$HERE/secret-endpoints.sh" --apply "$@"
+      else
+        bash "$HERE/secret-endpoints.sh" "$@"
+      fi
       ;;
     P3-S03)
       bash "$HERE/app-deploy-confirm.sh" "$@"
@@ -289,16 +498,63 @@ run_step() {
     P4-S02)
       bash "$HERE/app-recovery-confirm.sh" e2e "$@"
       ;;
+    P4-G4)
+      bash "$HERE/closeout.sh" declare "$@"
+      ;;
+    P5)
+      bash "$HERE/closeout.sh" package "$@"
+      ;;
     *) echo "Unknown BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; return 2 ;;
   esac
+  progress_update done
 }
 
-for CURRENT_STEP in "${STEPS[@]}"; do
-  [[ "$CURRENT_STEP" =~ ^P[0-4]-S[0-9]{2}(-[12])?$ ]] || { echo "Invalid BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; exit 2; }
-  if [[ "$ONLY" != '' ]]; then
-    run_step "$CURRENT_STEP" "${STEP_ARGS[@]}"
-  else
-    run_step "$CURRENT_STEP"
+prepare_progress
+
+if [[ -n "$FAILBACK_RUN" ]]; then
+  printf 'Guided failback for completed recovery: %s\n' "$FAILBACK_RUN"
+  echo 'Prerequisite: approved failback window and data-owner reconciliation/data-loss decision. Endpoint return does not copy writes.'
+  echo 'Pause/drain app consumers before confirming the restored-pair fence. External deployment remains manual.'
+  continue_actions=false
+  for CURRENT_ACTION in preview fence endpoints release deployment health signoff; do
+    [[ "$CURRENT_ACTION" != "$NEXT_ACTION" ]] || continue_actions=true
+    [[ "$continue_actions" == true ]] || continue
+    case "$CURRENT_ACTION" in
+      preview) run_step P3-S02 --failback "$FAILBACK_RUN" --preview ;;
+      fence) run_step P3-S01 --failback "$FAILBACK_RUN" ;;
+      endpoints) run_step P3-S02 --failback "$FAILBACK_RUN" --apply ;;
+      release) run_step P3-S01 --failback "$FAILBACK_RUN" --release-quarantine ;;
+      deployment) run_step P3-S03 --failback "$FAILBACK_RUN" ;;
+      health) run_step P4-S01 --failback "$FAILBACK_RUN" ;;
+      signoff) run_step P4-S02 --failback "$FAILBACK_RUN" ;;
+    esac
+  done
+  echo 'Guided failback steps finished. Completion requires the saved app-owner sign-off; declining it leaves sign-off pending.'
+  echo 'Resource retirement remains separately approved; original recovery T8/T9 and P5 package are unchanged.'
+  CURRENT_STEP=''
+  exit 0
+fi
+
+{
+  for CURRENT_STEP in "${STEPS[@]}"; do
+    if [[ "$ONLY" != '' ]]; then
+      run_step "$CURRENT_STEP" "${STEP_ARGS[@]}"
+    else
+      run_step "$CURRENT_STEP"
+    fi
+  done
+  if [[ "$CURRENT_STEP" == P2-S09 ]]; then
+    cat <<'EOF'
+
+RDS target inspection finished at P2-S09. This selection stops before application recovery.
+RDS available/configuration checks do not prove application recovery.
+Next: verify isolation/session closure and collect cutover approval before changing endpoints:
+  bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01
+Continue the remaining recovery/closeout steps with all approval gates:
+  bash iac/lab/bb3-db/bb3-run.sh S3 --from P3-S01 --to P5
+Do not restart plain S3 to continue: it starts discovery and fault injection again.
+EOF
   fi
-done
-CURRENT_STEP=''
+  CURRENT_STEP=''
+  exit 0
+}

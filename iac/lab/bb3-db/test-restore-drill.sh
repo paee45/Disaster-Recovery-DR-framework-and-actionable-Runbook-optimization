@@ -2,6 +2,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TEMP="$(mktemp -d)"
+TEMP="$(cd "$TEMP" && pwd -P)"
 trap 'rm -rf "$TEMP"' EXIT
 
 printf '%s\n' \
@@ -94,6 +95,16 @@ aws() {
 export -f git aws
 export BB3_RESTORE_CONFIG="$TEMP/sandbox.env" BB3_RESTORE_BASELINE_DIR="$BASELINE_STORE" TEST_CALLS="$TEMP/calls"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+CONFIG_FIXTURE="$TEMP/config-override"
+mkdir -p "$CONFIG_FIXTURE/iac/lab/bb3-db" "$CONFIG_FIXTURE/automation/scripts"
+cp "$HERE/restore-drill.sh" "$HERE/bb3-prompt.sh" "$CONFIG_FIXTURE/iac/lab/bb3-db/"
+cp "$HERE/../../../automation/scripts/rds-requests.jq" "$CONFIG_FIXTURE/automation/scripts/"
+[[ ! -e "$CONFIG_FIXTURE/iac/sandbox.env" ]]
+TEST_PARAMETERS_MATCH=true TEST_NO_SNAPSHOT_DIFF=true \
+  bash "$CONFIG_FIXTURE/iac/lab/bb3-db/restore-drill.sh" preview snapshot-no-replica restore-primary replica-target \
+  > "$TEMP/config-override.txt" 2>&1
+: > "$TEST_CALLS"
+echo 'PASS restore config override works without a default sandbox file'
 
 bash "$HERE/restore-drill.sh" preview snapshot-no-replica restore-primary replica-target > "$TEMP/preview.txt" 2>&1
 grep -F 'Original replica: not present in source baseline.' "$TEMP/preview.txt" >/dev/null
@@ -202,6 +213,20 @@ grep -F 'Snapshot: snapshot-no-replica (source primary: primary-no-replica)' "$T
 grep -F 'primary target: available' "$TEMP/dispatcher-preview.txt" >/dev/null
 echo 'PASS S3 --only comma list runs only the requested ordered step IDs'
 
+bash "$HERE/bb3-run.sh" S3 --only P2-S09 > "$TEMP/default-preview.txt" 2>&1
+grep -F '  What: Inspect both saved restore targets.' "$TEMP/default-preview.txt" >/dev/null
+grep -F '  Expected:' "$TEMP/default-preview.txt" >/dev/null
+grep -F 'This selection stops before application recovery.' "$TEMP/default-preview.txt" >/dev/null
+grep -F 'S3 --from P3-S01 --to P5' "$TEMP/default-preview.txt" >/dev/null
+bash "$HERE/bb3-run.sh" S3 --verbose --only P2-S09 > "$TEMP/verbose-preview.txt" 2>&1
+grep -F '  What:' "$TEMP/verbose-preview.txt" >/dev/null
+grep -F 'Simulate app failure by cutting off new DB traffic' <<< "$steps" >/dev/null
+while IFS= read -r step; do
+  grep -F "    $step) action=" "$HERE/bb3-run.sh" >/dev/null \
+    || { echo "Missing What/Expected description for $step" >&2; exit 1; }
+done < <(awk '$1 ~ /^P[0-9]/ {print $1}' <<< "$steps")
+echo 'PASS every step has What/Expected descriptions; default output and RDS-only handoff are visible'
+
 range_steps="$(bash "$HERE/bb3-run.sh" S3 --from P2-S06 --to P2-S09 --list)"
 [[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P2-S06\n  P2-S07\n  P2-S08\n  P2-S09' ]]
 range_steps="$(bash "$HERE/bb3-run.sh" S3 --to P1-S01-2 --from P1-S01-1 --list)"
@@ -225,11 +250,159 @@ reject_selection() {
 }
 reject_selection --from P2-S09 --to P2-S06
 reject_selection --from P3-G0
-reject_selection --to P5
+reject_selection --to P5-S99
 reject_selection --from
 reject_selection --to ''
 reject_selection --from P2-S09 --from P2-S09
 reject_selection --from P2-S09 --only P2-S09
 reject_selection --only P2-S09 --to P2-S09
 reject_selection --only P0-S03,unknown
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --from P4-G4 --to P5 --list)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P4-G4\n  P5' ]]
+range_steps="$(bash "$HERE/bb3-run.sh" S3 --list --only P5)"
+[[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P5' ]]
+reject_selection --from P5 --to P4-S02
 echo 'PASS inclusive ranges, one-sided defaults, split step IDs, and fail-before-action validation'
+
+export TEST_SECRET_SCRIPT="$HERE/secret-endpoints.sh"
+cat > "$TEMP/endpoint-dispatch.bash" <<'EOF'
+bash() {
+  if [[ "$1" == "$TEST_SECRET_SCRIPT" ]]; then
+    shift
+    printf 'ENDPOINT_ARGS'
+    printf ' <%s>' "$@"
+    printf '\n'
+  else
+    command bash "$@"
+  fi
+}
+EOF
+BASH_ENV="$TEMP/endpoint-dispatch.bash" command bash "$HERE/bb3-run.sh" S3 --from P3-S02 --to P3-S02 > "$TEMP/range-endpoints.txt" 2>&1
+grep -Fx 'ENDPOINT_ARGS <--apply>' "$TEMP/range-endpoints.txt" >/dev/null
+BASH_ENV="$TEMP/endpoint-dispatch.bash" command bash "$HERE/bb3-run.sh" S3 --only P3-S02 --preview > "$TEMP/preview-endpoints.txt" 2>&1
+grep -Fx 'ENDPOINT_ARGS <--preview>' "$TEMP/preview-endpoints.txt" >/dev/null
+BASH_ENV="$TEMP/endpoint-dispatch.bash" command bash "$HERE/bb3-run.sh" S3 --only P3-S02 --failback DR-fixture --preview \
+  > "$TEMP/single-failback-preview.txt" 2>&1
+grep -Fx 'ENDPOINT_ARGS <--failback> <DR-fixture> <--preview>' "$TEMP/single-failback-preview.txt" >/dev/null
+grep -F 'What: Preview failback: show current restored endpoints and the saved original return endpoints (read-only).' \
+  "$TEMP/single-failback-preview.txt" >/dev/null
+! grep -F 'Both endpoints match the selected restored pair' "$TEMP/single-failback-preview.txt" >/dev/null
+BASH_ENV="$TEMP/endpoint-dispatch.bash" command bash "$HERE/bb3-run.sh" S3 --only P3-S02 --apply > "$TEMP/apply-endpoints.txt" 2>&1
+grep -Fx 'ENDPOINT_ARGS <--apply>' "$TEMP/apply-endpoints.txt" >/dev/null
+BASH_ENV="$TEMP/endpoint-dispatch.bash" command bash "$HERE/bb3-run.sh" S3 --only P3-S02 > "$TEMP/default-endpoints.txt" 2>&1
+! grep -F '<--apply>' "$TEMP/default-endpoints.txt" >/dev/null
+echo 'PASS ranges select guarded endpoint apply; single-step preview/apply arguments stay explicit'
+
+FIXTURE_ROOT="$TEMP/full-run"
+mkdir -p "$FIXTURE_ROOT/iac/lab/bb3-db"
+cp "$HERE/bb3-run.sh" "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh"
+cp "$HERE/bb3-prompt.sh" "$HERE/bb3-wait.py" "$FIXTURE_ROOT/iac/lab/bb3-db/"
+cp "$HERE/runner-progress.py" "$HERE/closeout.py" "$HERE/secret-endpoints.py" "$FIXTURE_ROOT/iac/lab/bb3-db/"
+printf '%s\n' 'TF_VAR_account_id=000000000000' 'TF_VAR_aws_profile=lab_sandbox' \
+  'TF_VAR_region=ap-southeast-1' 'ENV=uat' 'BB3_RESTORE_TARGET_PRIMARY_ID=fixture-primary' \
+  'BB3_RESTORE_TARGET_REPLICA_ID=fixture-replica' > "$FIXTURE_ROOT/iac/sandbox.env"
+cat > "$TEMP/full-dispatch.bash" <<'EOF'
+bash() {
+  local helper="${1##*/}"
+  shift
+  printf 'MOCK_STEP %s' "$helper"
+  printf ' <%s>' "$@"
+  printf '\n'
+  if [[ "$helper" == closeout.sh && "${1:-}" == package && -n "${TEST_REWRITE_RUNNER:-}" ]]; then
+    printf '\nprintf "unterminated\n' >> "$TEST_REWRITE_RUNNER"
+  fi
+  [[ "$helper" != "${TEST_STOP_HELPER:-}" ]]
+}
+aws() {
+  case "$*" in
+    *'sts get-caller-identity'*) echo 000000000000 ;;
+    *'rds wait db-instance-available'*) return 0 ;;
+    *) echo 'Unexpected AWS call in full-run fixture' >&2; return 99 ;;
+  esac
+}
+EOF
+BASH_ENV="$TEMP/full-dispatch.bash" command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 \
+  > "$TEMP/full-run.txt" 2>&1
+actual_steps="$(awk '/^== P/ {print $2}' "$TEMP/full-run.txt")"
+expected_steps="$(awk '$1 ~ /^P[0-9]/ {print $1}' <<< "$steps")"
+[[ "$actual_steps" == "$expected_steps" ]]
+grep -Fx 'MOCK_STEP secret-endpoints.sh <--apply>' "$TEMP/full-run.txt" >/dev/null
+grep -Fx 'MOCK_STEP closeout.sh <declare>' "$TEMP/full-run.txt" >/dev/null
+grep -Fx 'MOCK_STEP closeout.sh <package>' "$TEMP/full-run.txt" >/dev/null
+! grep -F 'MOCK_STEP retire-restored.sh' "$TEMP/full-run.txt" >/dev/null
+if TEST_STOP_HELPER=fence-confirm.sh BASH_ENV="$TEMP/full-dispatch.bash" \
+    command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --new > "$TEMP/blocked-full-run.txt" 2>&1; then
+  echo 'FAIL full recovery continued past a failed fence gate' >&2
+  exit 1
+fi
+! grep -F '== P3-S02 ==' "$TEMP/blocked-full-run.txt" >/dev/null
+! grep -F '== P5 ==' "$TEMP/blocked-full-run.txt" >/dev/null
+echo 'PASS plain S3 runs every recovery step through T10/P5, selects guarded apply and stops on gate failure'
+
+TEST_REWRITE_RUNNER="$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" BASH_ENV="$TEMP/full-dispatch.bash" \
+  command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --new > "$TEMP/edited-full-run.txt" 2>&1
+grep -Fx 'MOCK_STEP closeout.sh <package>' "$TEMP/edited-full-run.txt" >/dev/null
+! grep -F 'unexpected EOF' "$TEMP/edited-full-run.txt" >/dev/null
+if command bash -n "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" > "$TEMP/edited-syntax.txt" 2>&1; then
+  echo 'FAIL mid-run edit fixture did not contain a syntax error' >&2
+  exit 1
+fi
+echo 'PASS runner exits after packaging without parsing a mid-run edited tail'
+
+cp "$HERE/bb3-run.sh" "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh"
+BASH_ENV="$TEMP/full-dispatch.bash" command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --failback DR-fixture \
+  > "$TEMP/full-failback.txt" 2>&1
+actual_failback="$(grep '^MOCK_STEP ' "$TEMP/full-failback.txt")"
+expected_failback='MOCK_STEP secret-endpoints.sh <--failback> <DR-fixture> <--preview>
+MOCK_STEP fence-confirm.sh <--failback> <DR-fixture>
+MOCK_STEP secret-endpoints.sh <--failback> <DR-fixture> <--apply>
+MOCK_STEP fence-confirm.sh <--failback> <DR-fixture> <--release-quarantine>
+MOCK_STEP app-deploy-confirm.sh <--failback> <DR-fixture>
+MOCK_STEP app-recovery-confirm.sh <connectivity> <--failback> <DR-fixture>
+MOCK_STEP app-recovery-confirm.sh <e2e> <--failback> <DR-fixture>'
+[[ "$actual_failback" == "$expected_failback" ]]
+for description in \
+  'What: Preview failback:' \
+  'What: Fence the restored DB pair for failback' \
+  'What: Apply failback: return both app secret endpoints' \
+  'What: Release the original DB pair quarantine' \
+  'What: Record manual app deployment and service convergence on the original DB endpoint pair.' \
+  'What: Record app-owner health confirmation on the original primary/replica endpoint pair.' \
+  'What: Record or reuse the original-path business transaction/readback'; do
+  grep -F "$description" "$TEMP/full-failback.txt" >/dev/null
+done
+! grep -F 'Both endpoints match the selected restored pair' "$TEMP/full-failback.txt" >/dev/null
+[[ "$(grep -c '  Expected:' "$TEMP/full-failback.txt")" == 7 ]]
+BASH_ENV="$TEMP/full-dispatch.bash" command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" \
+  S3 --only P3-S01 --failback DR-fixture --cleanup-failback-quarantine > "$TEMP/cleanup-description.txt" 2>&1
+grep -F 'What: Delete only the detached restored-pair failback quarantine SG.' "$TEMP/cleanup-description.txt" >/dev/null
+grep -F 'never retires DBs or deletes snapshots/backups' "$TEMP/cleanup-description.txt" >/dev/null
+BASH_ENV="$TEMP/full-dispatch.bash" command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" \
+  S3 --only P3-S02 --failback DR-fixture --apply > "$TEMP/single-failback-apply.txt" 2>&1
+grep -F 'What: Apply failback: return both app secret endpoints from the restored pair to the original pair.' \
+  "$TEMP/single-failback-apply.txt" >/dev/null
+BASH_ENV="$TEMP/full-dispatch.bash" command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" \
+  S3 --only P3-S02 --failback DR-fixture --apply --preview > "$TEMP/last-flag-preview.txt" 2>&1
+grep -F 'What: Preview failback:' "$TEMP/last-flag-preview.txt" >/dev/null
+! grep -F 'What: Apply failback:' "$TEMP/last-flag-preview.txt" >/dev/null
+echo 'PASS failback descriptions distinguish all seven actions, SG-only cleanup and explicit preview/apply mode'
+! grep -F '== P0-' "$TEMP/full-failback.txt" >/dev/null
+! grep -F 'MOCK_STEP restore-drill.sh' "$TEMP/full-failback.txt" >/dev/null
+if TEST_STOP_HELPER=fence-confirm.sh BASH_ENV="$TEMP/full-dispatch.bash" \
+    command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --failback DR-fixture \
+    > "$TEMP/blocked-failback.txt" 2>&1; then
+  echo 'FAIL guided failback continued past a failed fence gate' >&2
+  exit 1
+fi
+! grep -F '<--apply>' "$TEMP/blocked-failback.txt" >/dev/null
+! grep -F 'MOCK_STEP app-deploy-confirm.sh' "$TEMP/blocked-failback.txt" >/dev/null
+plan="$(command bash "$HERE/bb3-run.sh" S3 --failback DR-fixture --list)"
+grep -F 'FB-04  P3-S01 --release-quarantine' <<< "$plan" >/dev/null
+! grep -F '== P' <<< "$plan" >/dev/null
+reject_selection --failback latest
+reject_selection --failback
+reject_selection --failback DR-fixture --to P5
+reject_selection --from P3-S01 --failback DR-fixture
+reject_selection --failback DR-fixture --only P3-S01
+reject_selection --failback DR-fixture --failback DR-other
+echo 'PASS guided failback preserves exact ordering/run ID, stops at fence failure and rejects unsafe selectors'

@@ -4,6 +4,8 @@ set +x
 umask 077
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=bb3-prompt.sh
+source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 CONFIG="${BB3_SECRET_CONFIG:-$ROOT/iac/sandbox.env}"
 APPLY=false
@@ -11,6 +13,7 @@ OPERATION=cutover
 MODE=auto
 RUN_SELECTION=latest
 SUGGESTED_RUN=''
+SAVED_SECRET_NAME=''
 LEDGER_DIR="$ROOT/evidence/bb3-secret-endpoints"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +52,7 @@ git -C "$ROOT" check-ignore -q "$LEDGER_DIR/check.json" \
 if [[ "$OPERATION" == failback ]]; then
   SAVED="$(python3 "$HERE/secret-endpoints.py" --show-run "$LEDGER_DIR" "$RUN_SELECTION" "$ACCOUNT" "$AWS_REGION")"
   SUGGESTED_RUN="$(jq -er '.runId' <<< "$SAVED")"
+  SAVED_SECRET_NAME="$(jq -er '.secretName' <<< "$SAVED")"
   BB3_SOURCE_PRIMARY_ID="$(jq -er '.db' <<< "$SAVED")"
   BB3_SOURCE_REPLICA_ID="$(jq -er '.replica' <<< "$SAVED")"
   BB3_RESTORE_TARGET_PRIMARY_ID="$(jq -er '.source_db' <<< "$SAVED")"
@@ -59,8 +63,12 @@ fi
 for variable in BB3_SOURCE_PRIMARY_ID BB3_SOURCE_REPLICA_ID BB3_RESTORE_TARGET_PRIMARY_ID BB3_RESTORE_TARGET_REPLICA_ID; do
   [[ -n "${!variable:-}" ]] || { echo "Missing $variable; discover and validate both database pairs first." >&2; exit 2; }
 done
-SECRETS="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" --no-cli-pager secretsmanager list-secrets \
-  --query 'SecretList[].{Name:Name}' --output json)"
+if [[ "$OPERATION" == failback ]]; then
+  SECRET_ID="$SAVED_SECRET_NAME"
+else
+  SECRETS="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" --no-cli-pager secretsmanager list-secrets \
+    --query 'SecretList[].{Name:Name}' --output json)"
+fi
 HIGHLIGHT=''
 SELECTED_COLOR=''
 RESET=''
@@ -69,20 +77,24 @@ if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
   SELECTED_COLOR=$'\033[1;32m'
   RESET=$'\033[0m'
 fi
-SECRET_COUNT="$(jq -er 'length' <<< "$SECRETS")"
-[[ "$SECRET_COUNT" -gt 0 ]] || { echo 'No AWS secrets found. Nothing selected or changed.' >&2; exit 2; }
-printf 'AWS secret names (%s found):\n' "$SECRET_COUNT"
-SECRET_NUMBER=0
-while IFS= read -r name; do
-  SECRET_NUMBER=$((SECRET_NUMBER + 1))
-  printf '  %2d. %s%s%s\n' "$SECRET_NUMBER" "$HIGHLIGHT" "$name" "$RESET"
-done < <(jq -r 'sort_by(.Name) | .[].Name' <<< "$SECRETS")
-echo 'Select a number or enter the approved secret NAME/full ARN, NOT its password or value.'
-read -r -p 'Secret selection: ' SECRET_ID
-[[ -n "$SECRET_ID" ]] || { echo 'No secret selected.' >&2; exit 2; }
-if [[ "$SECRET_ID" =~ ^[0-9]+$ ]]; then
-  SECRET_ID="$(jq -er --arg index "$SECRET_ID" \
-    'sort_by(.Name) | if ($index|tonumber) > 0 then .[($index|tonumber)-1].Name // error("Invalid secret number") else error("Invalid secret number") end' <<< "$SECRETS")"
+if [[ "$OPERATION" == failback ]]; then
+  printf 'Reusing secret from the saved cutover for failback: %s\n' "$SECRET_ID"
+else
+  SECRET_COUNT="$(jq -er 'length' <<< "$SECRETS")"
+  [[ "$SECRET_COUNT" -gt 0 ]] || { echo 'No AWS secrets found. Nothing selected or changed.' >&2; exit 2; }
+  printf 'AWS secret names (%s found):\n' "$SECRET_COUNT"
+  SECRET_NUMBER=0
+  while IFS= read -r name; do
+    SECRET_NUMBER=$((SECRET_NUMBER + 1))
+    printf '  %2d. %s%s%s\n' "$SECRET_NUMBER" "$HIGHLIGHT" "$name" "$RESET"
+  done < <(jq -r 'sort_by(.Name) | .[].Name' <<< "$SECRETS")
+  echo 'Select a number or enter the approved secret NAME/full ARN, NOT its password or value.'
+  bb3_prompt_read SECRET_ID 'Secret selection: '
+  [[ -n "$SECRET_ID" ]] || { echo 'No secret selected.' >&2; exit 2; }
+  if [[ "$SECRET_ID" =~ ^[0-9]+$ ]]; then
+    SECRET_ID="$(jq -er --arg index "$SECRET_ID" \
+      'sort_by(.Name) | if ($index|tonumber) > 0 then .[($index|tonumber)-1].Name // error("Invalid secret number") else error("Invalid secret number") end' <<< "$SECRETS")"
+  fi
 fi
 META="$(aws --profile "$AWS_PROFILE" --region "$AWS_REGION" --no-cli-pager secretsmanager describe-secret \
   --secret-id "$SECRET_ID" --query '{Name:Name,ARN:ARN}' --output json)"
@@ -99,8 +111,13 @@ if [[ -z "$SUGGESTED_RUN" ]]; then
     --resource-name "$TARGET_ARN" --query 'TagList[?Key==`dr-restore`].Value | [0]' --output text)"
   [[ "$SUGGESTED_RUN" != None ]] || SUGGESTED_RUN=''
 fi
-read -r -p "Confirm DR run ID [${SUGGESTED_RUN:-no default}]: " RUN_ID
-RUN_ID="${RUN_ID:-$SUGGESTED_RUN}"
+if [[ "$OPERATION" == failback ]]; then
+  RUN_ID="$SUGGESTED_RUN"
+  printf 'Reusing saved failback run ID: %s\n' "$RUN_ID"
+else
+  bb3_prompt_read RUN_ID "Confirm DR run ID [${SUGGESTED_RUN:-no default}]: "
+  RUN_ID="${RUN_ID:-$SUGGESTED_RUN}"
+fi
 [[ "$RUN_ID" =~ ^DR-[A-Za-z0-9_-]{1,120}$ ]] || { echo 'Invalid or missing DR run ID.' >&2; exit 2; }
 if [[ -n "$SUGGESTED_RUN" && "$RUN_ID" != "$SUGGESTED_RUN" ]]; then
   echo 'Confirmed DR run ID does not match the restored primary dr-restore tag or selected saved run.' >&2
@@ -109,7 +126,7 @@ fi
 printf 'DR run: %s; operation: %s; record directory: %s/%s\n' "$RUN_ID" "$OPERATION" "$LEDGER_DIR" "$RUN_ID"
 if [[ "$OPERATION" == cutover ]]; then
   printf 'Secret update mode:\n  1. Automatic AWS CLI endpoint update\n  2. Manual update already performed; verify only\n'
-  read -r -p 'Select 1 or 2: ' MODE_SELECTION
+  bb3_prompt_read MODE_SELECTION 'Select 1 or 2: '
   case "$MODE_SELECTION" in
     1) MODE=auto ;;
     2) MODE=manual ;;
@@ -161,7 +178,9 @@ python3 "$HERE/secret-endpoints.py" --check-fence "$FENCE_FILE" "$RUN_ID" "$ACCO
   "$BB3_RESTORE_TARGET_PRIMARY_ID" "$BB3_RESTORE_TARGET_REPLICA_ID" \
   || { echo "No matching fence record with verified isolation and session closure at $FENCE_FILE. No secret write made." >&2; exit 2; }
 if [[ "$MODE" == manual ]]; then
-  read -r -p 'Have you manually updated both secret hosts to the displayed targets? Type ENDPOINTS-ALREADY-UPDATED: ' APPROVAL
+  bb3_prompt_token_read APPROVAL \
+    'Have you manually updated both secret hosts to the displayed targets? Type ' \
+    ENDPOINTS-ALREADY-UPDATED ': '
   [[ "$APPROVAL" == ENDPOINTS-ALREADY-UPDATED ]] || { echo 'Not confirmed. No AWS value changed.' >&2; exit 2; }
   RESULT="$(run_update true '' manual)"
   jq -e '.manualVerified == true' <<< "$RESULT" >/dev/null
@@ -175,7 +194,7 @@ if [[ "$OPERATION" == failback ]]; then
   TOKEN=FAILBACK-ENDPOINTS
   echo 'Confirm the displayed CURRENT and RETURN-TO host values. Secret-only failback does not reconcile data or restart applications.'
 fi
-read -r -p "Authorized sandbox $OPERATION of this secret? Type $TOKEN to apply: " APPROVAL
+bb3_prompt_token_read APPROVAL "Authorized sandbox $OPERATION of this secret? Type " "$TOKEN" ' to apply: '
 [[ "$APPROVAL" == "$TOKEN" ]] || { echo 'Not approved. Nothing changed.' >&2; exit 2; }
 RESULT="$(run_update true "$(jq -er '.previousVersion' <<< "$PREVIEW")")"
 jq -e '.applied == true' <<< "$RESULT" >/dev/null
