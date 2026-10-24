@@ -11,17 +11,20 @@ CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
 LEDGER="${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}"
 RUN_SELECTION=latest
 FAILBACK=false
-if [[ $# -gt 0 ]]; then
-  if [[ $# == 2 && "$1" == --failback && "$2" =~ ^DR-[A-Za-z0-9_-]{1,120}$ ]]; then
-    FAILBACK=true
-    RUN_SELECTION="$2"
-  elif [[ $# == 2 && "$1" == --run-id ]]; then
-    RUN_SELECTION="$2"
-  else
-    echo 'Usage: app-deploy-confirm.sh [--run-id DR-ID | --failback DR-ID]' >&2
-    exit 2
-  fi
-fi
+FORCE_REAL_SSH=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --failback)
+      [[ $# -ge 2 && "$2" =~ ^DR-[A-Za-z0-9_-]{1,120}$ && "$FAILBACK" == false ]] \
+        || { echo 'Failback requires one explicit DR-ID.' >&2; exit 2; }
+      FAILBACK=true; RUN_SELECTION="$2"; shift 2 ;;
+    --run-id)
+      [[ $# -ge 2 ]] || { echo 'A DR-ID is required after --run-id.' >&2; exit 2; }
+      RUN_SELECTION="$2"; shift 2 ;;
+    --real-ssh) FORCE_REAL_SSH=true; shift ;;
+    *) echo 'Usage: app-deploy-confirm.sh [--run-id DR-ID | --failback DR-ID] [--real-ssh]' >&2; exit 2 ;;
+  esac
+done
 git -C "$ROOT" check-ignore -q "$LEDGER/check.json" \
   || { echo 'App deployment attestations must be Git-ignored.' >&2; exit 2; }
 [[ -t 0 ]] || { echo 'Run this step in an interactive terminal.' >&2; exit 2; }
@@ -68,15 +71,28 @@ printf 'DR run: %s\nPrimary: %s\nReplica: %s\n' "$RUN_ID" "$PRIMARY_HOST" "$REPL
 printf 'Deployment mode:\n  1. Automatic deployment over local SSH\n  2. Guided deployment over local SSH (Enter=run, n=stop, s=skip optional checks)\n  3. Manual deployment already completed\n'
 bb3_prompt_read DEPLOY_MODE 'Select 1, 2 or 3: '
 case "$DEPLOY_MODE" in
-  1)
-    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" automatic
-    ;;
-  2)
-    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" guided
-    ;;
+  1) EXECUTION_MODE=automatic ;;
+  2) EXECUTION_MODE=guided ;;
   3) ;;
   *) echo 'Invalid deployment mode.' >&2; exit 2 ;;
 esac
+if [[ "$DEPLOY_MODE" != 3 ]]; then
+  if [[ "$FORCE_REAL_SSH" == true ]]; then
+    echo 'Explicit --real-ssh selected; BB3_DOCKER_LOCAL_CONTEXT is ignored for this invocation.'
+    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
+  elif [[ -n "${BB3_DOCKER_LOCAL_CONTEXT:-}" ]]; then
+    DOCKER_CONTEXT="$BB3_DOCKER_LOCAL_CONTEXT" \
+      BB3_DEPLOYMENT_ENV="$DEPLOY_ENV" \
+      BB3_DEPLOYMENT_MODE="$EXECUTION_MODE" \
+      bash "$HERE/test-bb3-deployment-docker.sh"
+    echo 'Docker SSH simulation finished. This is not a deployment; no P3-S03 evidence was recorded.' >&2
+    exit 2
+  else
+    printf 'BB3_DOCKER_LOCAL_CONTEXT is blank; using real SSH to %s (ENV=%s).\n' "$BB3_DEPLOYMENT_HOST" "$DEPLOY_ENV"
+    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
+  fi
+  echo 'SSH deployment command/check sequence finished. Review live output; deployment evidence is still owner-confirmed below.'
+fi
 if [[ "$DEPLOY_MODE" == 3 ]]; then
   cat <<'EOF'
 Manual deployment guide:

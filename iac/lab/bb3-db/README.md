@@ -230,11 +230,18 @@ P3-S03 option 1 runs automatic SSH deployment for dev/uat after clean-main prefl
 required-step skips prevent attestation); option 3 records an already completed manual deployment and
 prints the [BB3 Deployment Guide](https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying).
 Production SSH deployment is not permitted by this UAT-role workflow. The Docker image/test runs the same
-orchestrator with mocked remote results, network disabled, no mounts and no SSH/Docker CLI. It creates
-a temporary mock container named `bb3-deploument-ec2` by default and removes it after testing; this is
-not an EC2 instance or deployment evidence. Failback sign-off writes hash-linked `failback-report.md`/`.json`; retirement stage 8
+orchestrator through the OpenSSH client/server protocol to an isolated loopback host, with network disabled,
+no host mounts and a synthetic Git repo/fake Docker results. It creates a temporary mock container named
+`bb3-deploument-ec2` by default and removes it afterward; it is not an EC2 instance or deployment evidence.
+Set `BB3_DOCKER_LOCAL_CONTEXT` in the ignored sandbox config/current environment to route P3-S03 to this
+Docker SSH mock; Docker errors never fall back to SSH. When blank/unset, P3-S03 uses real SSH. The committed
+example leaves it blank; set it to `colima-dr-framework` only to select the local mock. `BB3_DEPLOYMENT_HOST` is validated against `ENV`, and
+`BB3_DOCKER_STACK_NAME` defaults to `beepbeep`. Mock output shows simulated passes but never records deployment evidence. Failback sign-off writes hash-linked
+`failback-report.md`/`.json`; retirement stage 8
 writes a versioned `retirement-report-<audit-time>.md` and checksum. Recovery P5 already packages a detailed
 `snapshot/summary.md` with RTO/RPO results and limitations.
+Append `--real-ssh` to one `--only P3-S03` invocation to override the configured Docker context without
+editing `sandbox.env`; typed `DEPLOY-ENV` and host allowlisting still apply.
 Original-quarantine release waits for the exact saved SG attachments to report active, rather than
 assuming RDS `available` proves SG convergence. It prints bounded retry progress and retains the SG on
 timeout. After live-state review, retry just P3-S01 `--failback DR-ID --release-quarantine`; original DBs

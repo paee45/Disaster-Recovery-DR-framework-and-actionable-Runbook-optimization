@@ -311,13 +311,34 @@ tasks and recent logs. Normal SSH host-key checks remain enabled. It does not us
 production deployment is refused by this UAT-role workflow; the Docker mock can display `live-1.app.beepte.ch`
 and the production-only `sudo su` instruction, but never executes them.
 
+`BB3_DEPLOYMENT_HOST` sets the SSH DNS destination and must match the allowlisted host for `ENV`
+(`dev-1.app.beepte.ch` or `uat-1.app.beepte.ch`). `BB3_DOCKER_STACK_NAME` sets the verified Swarm
+stack (`beepbeep` by default). A value inconsistent with `ENV` is refused before remote commands.
+
+`BB3_DOCKER_LOCAL_CONTEXT` selects the Docker SSH mock. When set, P3-S03 uses that local Docker context
+and never falls back to real SSH if Docker fails. When blank or unset, P3-S03 uses real local SSH with
+typed approval to `BB3_DEPLOYMENT_HOST`. The committed sandbox example leaves this variable blank for
+real SSH; set it to `colima-dr-framework` to select the local mock. Mock output shows simulated passes
+but exits without deployment evidence, so P3-S03 remains pending.
+To explicitly use real SSH for one P3-S03 invocation while keeping the Docker mock configured, append
+`--real-ssh`:
+
+```bash
+bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03 --real-ssh
+```
+
+Failback step form: `bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S03 --failback "$DR_ID" --real-ssh`.
+Real SSH still requires the typed `DEPLOY-ENV` gate and allowlisted host matching `ENV`; production is refused.
+
 Option 2 runs the same steps one at a time: Enter runs, `n` stops all later commands, and `s` skips.
 Skipping `git pull`, deploy or convergence blocks a completed deployment result. Optional service/task/log
 checks may be skipped. Both SSH modes require the local SSH identity/agent and host already authorized by
 the operator; the script does not copy keys, disable host checking or save raw remote output.
 
-The Docker test image runs this same orchestrator with a simulated remote transport, `--network none`,
-read-only filesystem, no mounts and no SSH/Docker CLI. It creates the temporary container named by
+The Docker test image runs this same orchestrator using the real OpenSSH client/server protocol to an
+isolated loopback mock host, `--network none`, a read-only root filesystem and no host mounts. A
+synthetic clean-main Git repo and fake Docker command provide remote results; it contacts no EC2 host,
+external repo or Docker daemon from inside the container. It creates the temporary container named by
 `BB3_DEPLOYMENT_CONTAINER` (default `bb3-deploument-ec2`) and removes only that test container afterward.
 This name is not an EC2 instance or a real deployment target. The test validates command order/results
 only, not real deployment or app behavior. To run it where Docker is available:
@@ -325,6 +346,10 @@ only, not real deployment or app behavior. To run it where Docker is available:
 ```bash
 DOCKER_CONTEXT=colima-dr-framework bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
 ```
+
+The test highlights build phases and each Dockerfile layer, showing only the last few layer lines
+to keep the terminal readable. Full image-build and SSH-session logs are retained in ignored
+`evidence/bb3-deployment-mock/<timestamp>-<pid>/`; `NO_COLOR` disables terminal color.
 
 Option 3 means the app owner already completed the approved manual deployment. It prints the
 [BB3 Deployment Guide](https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying)

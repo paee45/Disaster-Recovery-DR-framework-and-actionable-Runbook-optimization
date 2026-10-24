@@ -7,28 +7,40 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=bb3-prompt.sh
 source "$HERE/bb3-prompt.sh"
 MOCK=false
-if [[ "${1:-}" == --mock ]]; then
-  MOCK=true
-  shift
-fi
+MOCK_SSH=false
+case "${1:-}" in
+  --mock) MOCK=true; shift ;;
+  --mock-ssh) MOCK_SSH=true; shift ;;
+esac
 [[ $# == 1 && "$1" =~ ^(automatic|guided)$ ]] || {
-  echo 'Usage: bb3-deployment.sh [--mock] <automatic|guided>' >&2
+  echo 'Usage: bb3-deployment.sh [--mock | --mock-ssh] <automatic|guided>' >&2
   exit 2
 }
 MODE="$1"
 DEPLOY_ENV="${ENV:-}"
 case "$DEPLOY_ENV" in
-  dev) HOST=dev-1.app.beepte.ch ;;
-  uat) HOST=uat-1.app.beepte.ch ;;
+  dev) EXPECTED_HOST=dev-1.app.beepte.ch ;;
+  uat) EXPECTED_HOST=uat-1.app.beepte.ch ;;
   prod)
-    if [[ "$MOCK" == true ]]; then HOST=live-1.app.beepte.ch
+    if [[ "$MOCK" == true ]]; then EXPECTED_HOST=live-1.app.beepte.ch
     else echo 'Production deployment is outside this UAT-role DR workflow.' >&2; exit 2
     fi ;;
   *) echo 'ENV must be dev or uat for real deployment.' >&2; exit 2 ;;
 esac
-[[ "$MOCK" == true || ( -t 0 && -t 1 ) ]] || { echo 'Real deployment requires a local interactive terminal.' >&2; exit 2; }
-if [[ "$MOCK" == false ]]; then
+HOST="${BB3_DEPLOYMENT_HOST:-$EXPECTED_HOST}"
+[[ "$HOST" == "$EXPECTED_HOST" ]] \
+  || { echo 'BB3_DEPLOYMENT_HOST does not match the approved host for ENV; deployment refused.' >&2; exit 2; }
+STACK="${BB3_DOCKER_STACK_NAME:-beepbeep}"
+[[ "$STACK" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]] \
+  || { echo 'BB3_DOCKER_STACK_NAME is invalid.' >&2; exit 2; }
+[[ "$MOCK" == true || "$MOCK_SSH" == true || ( -t 0 && -t 1 ) ]] \
+  || { echo 'Real deployment requires a local interactive terminal.' >&2; exit 2; }
+if [[ "$MOCK" == false && "$MOCK_SSH" == false ]]; then
   command -v ssh >/dev/null || { echo 'OpenSSH client is required.' >&2; exit 2; }
+fi
+if [[ "$MOCK_SSH" == true ]]; then
+  [[ -f "${BB3_DEPLOYMENT_SSH_CONFIG:-}" && ! -L "${BB3_DEPLOYMENT_SSH_CONFIG:-}" ]] \
+    || { echo 'Mock SSH requires its isolated test SSH config; no real SSH fallback.' >&2; exit 2; }
 fi
 
 WAIT_SECONDS="${BB3_DEPLOY_WAIT_SECONDS:-900}"
@@ -49,10 +61,10 @@ remote_output() {
       *'scripts/deploy.sh'*) printf 'MOCK deploy started for %s\nMOCK deploy completed\n' "$DEPLOY_ENV" ;;
       *'docker stack ps --filter'*)
         printf 'beepbeep_web.1 Running 8 seconds ago\nbeepbeep_worker.1 Running 7 seconds ago\n' ;;
-      *"docker service ls --filter label=com.docker.stack.namespace=beepbeep"*) printf '2/2\n1/1\n' ;;
+      *"docker service ls --filter label=com.docker.stack.namespace="*) printf '2/2\n1/1\n' ;;
       *'docker service ls'*)
         printf 'NAME             MODE         REPLICAS   IMAGE\nbeepbeep_web     replicated   2/2        example:web\nbeepbeep_worker  replicated   1/1        example:worker\n' ;;
-      *'docker stack ps beepbeep | grep Running'*)
+      *'docker stack ps '*)
         printf 'beepbeep_web.1 Running 8 seconds ago\nbeepbeep_worker.1 Running 7 seconds ago\n' ;;
       *'docker service logs'*)
         if [[ "$command" == *'grep --color=always'* ]]; then
@@ -63,6 +75,9 @@ remote_output() {
         fi ;;
       *) echo 'Unknown mocked remote command; refused.' >&2; return 97 ;;
     esac
+  elif [[ "$MOCK_SSH" == true ]]; then
+    printf '[MOCK SSH PROTOCOL] isolated Docker host %s\n' "$HOST" >&2
+    ssh -F "$BB3_DEPLOYMENT_SSH_CONFIG" "$HOST" "$command"
   else
     ssh "$HOST" "$command"
   fi
@@ -85,18 +100,26 @@ if [[ "$MOCK" == true ]]; then
   if [[ "$DEPLOY_ENV" == prod ]]; then
     printf '%s\n' '[MOCK COMMAND ONLY] sudo su'
   fi
+elif [[ "$MOCK_SSH" == true ]]; then
+  printf '%s\n' 'MOCK SSH MODE: authenticating over OpenSSH to the isolated Docker host; no external network is available.'
+  printf 'MOCK_CONTAINER_NAME=%s (display label only)\n' "${BB3_DEPLOYMENT_CONTAINER:-bb3-deploument-ec2}"
 else
   echo 'Remote output is streamed to this local terminal. SSH host-key checking uses the normal local known_hosts policy.'
   echo 'Review/redact logs before P3-S03 evidence confirmation; the transcript is not saved automatically.'
-  bb3_prompt_token_read APPROVAL 'Type ' "DEPLOY-${DEPLOY_ENV^^}" " to authorize git pull and deployment to $HOST: "
-  [[ "$APPROVAL" == "DEPLOY-${DEPLOY_ENV^^}" ]] || { echo 'Deployment not approved; no change made.' >&2; exit 2; }
+  if [[ "$MOCK_SSH" == false ]]; then
+    bb3_prompt_token_read APPROVAL 'Type ' "DEPLOY-${DEPLOY_ENV^^}" " to authorize git pull and deployment to $HOST: "
+    [[ "$APPROVAL" == "DEPLOY-${DEPLOY_ENV^^}" ]] || { echo 'Deployment not approved; no change made.' >&2; exit 2; }
+  else
+    echo 'MOCK APPROVAL: bypassed only inside the no-network Docker test.'
+  fi
 fi
 
 SKIPPED=()
 REQUIRED_SKIPPED=false
 run_step() {
   local key="$1" label="$2" command="$3" required="$4" response=''
-  if [[ "$MODE" == guided && "$MOCK" == false ]]; then
+  if [[ "$MODE" == guided && ( "$MOCK" == false || "$MOCK_SSH" == true ) ]]; then
+    printf '\n[GUIDED] Next step: %s. Enter runs, n stops, s skips optional checks.\n' "$label"
     bb3_prompt_read response "[$key] $label [Enter=run, n=stop, s=skip]: "
     case "$response" in
       ''|y|Y|yes|YES) ;;
@@ -127,9 +150,9 @@ wait_for_stack() {
   local started="$SECONDS" elapsed tasks services replica current_count desired_count converged
   printf '\n== WAIT: all desired tasks and service replicas ==\n'
   while ((SECONDS - started < WAIT_SECONDS)); do
-    tasks="$(remote_output "docker stack ps --filter desired-state=running --format '{{.Name}} {{.CurrentState}}' beepbeep")" \
+    tasks="$(remote_output "docker stack ps --filter desired-state=running --format '{{.Name}} {{.CurrentState}}' $STACK")" \
       || { echo 'Unable to inspect stack tasks; deployment result remains unconfirmed.' >&2; return 2; }
-    services="$(remote_output "docker service ls --filter label=com.docker.stack.namespace=beepbeep --format '{{.Replicas}}'")" \
+    services="$(remote_output "docker service ls --filter label=com.docker.stack.namespace=$STACK --format '{{.Replicas}}'")" \
       || { echo 'Unable to inspect service replicas; deployment result remains unconfirmed.' >&2; return 2; }
     printf '%s\n%s\n' "$tasks" "$services"
     if [[ -n "$tasks" && -n "$services" ]] \
@@ -157,8 +180,9 @@ wait_for_stack() {
   return 2
 }
 
-if [[ "$MODE" == guided && "$MOCK" == false ]]; then
+if [[ "$MODE" == guided && ( "$MOCK" == false || "$MOCK_SSH" == true ) ]]; then
   response=''
+  printf '\n[GUIDED] Next step: verify all desired tasks and service replicas. Enter runs, n stops, s skips and leaves deployment incomplete.\n'
   bb3_prompt_read response '[VERIFY] Wait for all desired tasks and replicas to converge [Enter=run, n=stop, s=skip]: '
   case "$response" in
     ''|y|Y|yes|YES) wait_for_stack || exit $? ;;
@@ -173,8 +197,8 @@ else
   wait_for_stack || exit $?
 fi
 
-run_step SERVICES 'List deployed services' 'docker service ls' false || exit $?
-run_step TASKS 'Show running stack tasks' 'docker stack ps beepbeep | grep Running' false || exit $?
+run_step SERVICES 'List deployed services' "docker service ls --filter label=com.docker.stack.namespace=$STACK" false || exit $?
+run_step TASKS 'Show running stack tasks' "docker stack ps $STACK | grep Running" false || exit $?
 run_step LOGS 'Show recent promo service logs' \
   'docker service logs --timestamps --since 1m beepbeep_bb3-promos 2>&1 | sort' false || exit $?
 run_step WARNINGS 'Highlight warning/error log lines' \

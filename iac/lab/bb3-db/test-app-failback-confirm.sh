@@ -11,10 +11,14 @@ export TEST_PYTHON="${TEST_PYTHON:-$(command -v python3)}"
 export TEST_AWS_CALLED="$TEMP/aws-called"
 export TEST_REMOTE_CALLED="$TEMP/remote-called"
 export TEST_SSH_CALLS="$TEMP/ssh-calls"
+export TEST_DOCKER_MOCK_CALLED="$TEMP/docker-mock-called"
 export SCRIPT_DEPLOY="$HERE/app-deploy-confirm.sh"
 export SCRIPT_RECOVERY="$HERE/app-recovery-confirm.sh"
+export SCRIPT_DOCKER_TEST="$HERE/test-bb3-deployment-docker.sh"
 mkdir -p "$BB3_LEDGER_DIR/DR-fixture"
 printf '%s\n' TF_VAR_account_id=000000000000 TF_VAR_region=ap-southeast-1 ENV=uat \
+  BB3_DEPLOYMENT_HOST=uat-1.app.beepte.ch BB3_DOCKER_STACK_NAME=beepbeep \
+  BB3_DOCKER_LOCAL_CONTEXT= \
   > "$TEMP/sandbox.env"
 export BB3_SANDBOX_CONFIG="$TEMP/sandbox.env" BB3_DEPLOYMENT_CONTAINER=bb3-deploument-ec2
 
@@ -40,7 +44,16 @@ ssh() {
 }
 docker() { touch "$TEST_REMOTE_CALLED"; return 99; }
 watch() { touch "$TEST_REMOTE_CALLED"; return 99; }
-export -f git python3 aws ssh docker watch
+bash() {
+  if [[ "${1:-}" == "$SCRIPT_DOCKER_TEST" ]]; then
+    touch "$TEST_DOCKER_MOCK_CALLED"
+    printf 'DOCKER MOCK ENV=%s MODE=%s CONTAINER=%s\n' \
+      "${BB3_DEPLOYMENT_ENV:-}" "${BB3_DEPLOYMENT_MODE:-}" "${BB3_DEPLOYMENT_CONTAINER:-}"
+    return 0
+  fi
+  command bash "$@"
+}
+export -f git python3 aws ssh docker watch bash
 
 RUN_DIR="$BB3_LEDGER_DIR/DR-fixture"
 jq -n '{runId:"DR-fixture",status:"complete",account:"000000000000",region:"ap-southeast-1",
@@ -76,6 +89,7 @@ set command [split $env(TEST_ARGS)]
 if {$env(TEST_PHASE) eq "automatic"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
   expect "Select 1, 2 or 3:*" {send "1\r"}
+  expect "BB3_DOCKER_LOCAL_CONTEXT is blank; using real SSH to uat-1.app.beepte.ch*"
   expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
   expect "Paste the full log*" {send "sanitized automatic deployment log\r\r\r"}
   expect "Owner confirms both original endpoints*" {send "n\r"}
@@ -88,6 +102,20 @@ if {$env(TEST_PHASE) eq "automatic"} {
   expect -re {\[VERIFY\].*} {send "\r"}
   expect -re {\[SERVICES\].*} {send "s\r"}
   expect -re {\[TASKS\].*} {send "n\r"}
+} elseif {$env(TEST_PHASE) eq "docker-mock"} {
+  spawn bash $env(SCRIPT_DEPLOY) {*}$command
+  expect "Select 1, 2 or 3:*" {send "1\r"}
+  expect "DOCKER MOCK ENV=uat MODE=automatic CONTAINER=bb3-deploument-ec2"
+  expect "Docker SSH simulation finished. This is not a deployment*"
+  set result [wait]
+  exit [lindex $result 3]
+} elseif {$env(TEST_PHASE) eq "real-ssh-override"} {
+  spawn bash $env(SCRIPT_DEPLOY) {*}$command
+  expect "Select 1, 2 or 3:*" {send "1\r"}
+  expect "Explicit --real-ssh selected*"
+  expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
+  expect "Paste the full log*" {send "sanitized stub ssh log\r\r\r"}
+  expect "Owner confirms both original endpoints*" {send "n\r"}
 } elseif {$env(TEST_PHASE) eq "deploy" || $env(TEST_PHASE) eq "no-converge" || $env(TEST_PHASE) eq "resume-deploy"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
   expect "Select 1, 2 or 3:*" {send "3\r"}
@@ -168,6 +196,23 @@ rg 'Stopped before TASKS' "$TEMP/output" >/dev/null
 ! rg 'docker service logs' "$TEST_SSH_CALLS" >/dev/null
 [[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
 printf 'PASS guided mode runs on Enter, skips optional checks, and n stops all later steps without attestation\n'
+
+: > "$TEST_SSH_CALLS"
+printf '%s\n' 'export BB3_DOCKER_LOCAL_CONTEXT=colima-dr-framework' >> "$BB3_SANDBOX_CONFIG"
+TEST_PHASE=docker-mock; run_expect 2
+[[ -e "$TEST_DOCKER_MOCK_CALLED" && ! -s "$TEST_SSH_CALLS" ]]
+[[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
+printf 'PASS P3-S03 docker-mock transport routes to Docker test and never falls back to SSH/evidence\n'
+
+: > "$TEST_SSH_CALLS"
+rm -f "$TEST_DOCKER_MOCK_CALLED"
+TEST_ARGS='--failback DR-fixture --real-ssh'; TEST_PHASE=real-ssh-override; run_expect 2
+rg 'Explicit --real-ssh selected' "$TEMP/output" >/dev/null
+rg 'scripts/deploy.sh uat' "$TEST_SSH_CALLS" >/dev/null
+[[ ! -e "$TEST_DOCKER_MOCK_CALLED" && ! -e "$RUN_DIR/failback-app-deploy.json" ]]
+printf 'PASS --real-ssh overrides the Docker context for one invocation without changing sandbox.env\n'
+rm -f "$RUN_DIR/failback-app-deploy.log"
+TEST_ARGS='--failback DR-fixture'
 
 TEST_PHASE=deploy; run_expect 0
 rg 'Manual deployment guide:' "$TEMP/output" >/dev/null

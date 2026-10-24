@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'stack ps --filter desired-state=running --format {{.Name}} {{.CurrentState}} beepbeep')
+    printf 'beepbeep_web.1 Running 5 seconds ago\nbeepbeep_worker.1 Running 4 seconds ago\n' ;;
+  *'service ls --filter label=com.docker.stack.namespace='*'--format'*)
+    printf '2/2\n1/1\n' ;;
+  *'service ls --filter label=com.docker.stack.namespace='*)
+    printf 'NAME             MODE         REPLICAS   IMAGE\nbeepbeep_web     replicated   2/2        example:web\nbeepbeep_worker  replicated   1/1        example:worker\n' ;;
+  'stack ps beepbeep')
+    printf 'beepbeep_web.1 Running 5 seconds ago\nbeepbeep_worker.1 Running 4 seconds ago\n' ;;
+  'service ls')
+    printf 'NAME             MODE         REPLICAS   IMAGE\nbeepbeep_web     replicated   2/2        example:web\nbeepbeep_worker  replicated   1/1        example:worker\n' ;;
+  'service logs --timestamps --since 1m beepbeep_bb3-promos')
+    printf '2026-10-24T10:00:00Z mock service started\n2026-10-24T10:00:01Z warning: mock warning line\n' ;;
+  *) printf 'Unexpected mocked docker command: %s\n' "$*" >&2; exit 97 ;;
+esac

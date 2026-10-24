@@ -1,0 +1,11 @@
+Host uat-1.app.beepte.ch
+  HostName 127.0.0.1
+  Port 2222
+  HostKeyAlias 127.0.0.1
+  User mock
+  IdentityFile /opt/bb3/mock-client-key
+  IdentitiesOnly yes
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /opt/bb3/known_hosts
+  LogLevel ERROR

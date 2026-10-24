@@ -73,7 +73,11 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - **BB3 guarded SSH deployment and reports (2026-10-24):** P3-S03 option 1 runs automatic SSH deploy
   for dev/uat after clean-main preflight and typed `DEPLOY-ENV`; option 2 guides Enter/run, n/stop,
   s/skip; option 3 records an already completed manual deploy and prints the external guide. Prod SSH
-  remains outside this UAT-role workflow. Docker mock uses same orchestrator with no network/mounts.
+  remains outside this UAT-role workflow. `BB3_DOCKER_LOCAL_CONTEXT` routes option 1/2 to the named
+  no-network Docker OpenSSH server simulation and fails closed without real SSH fallback; blank/unset means
+  real SSH. The committed example leaves it blank. `BB3_DEPLOYMENT_HOST` is allowlist-validated against ENV; `BB3_DOCKER_STACK_NAME` selects
+  the stack. Docker mock uses a generated test key, loopback sshd and synthetic repo, with no external
+  network or host mounts.
   Failback sign-off creates a hash-linked result report; retirement stage 8 writes a versioned 8/8 report;
   recovery P5 already packages `summary.md`. Mocked SSH/UI/Docker tests pass; no real host accessed.
 - **BB3 retirement completion summary (2026-10-23):** final verified success and completed read-only
