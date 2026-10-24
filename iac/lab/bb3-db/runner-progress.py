@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,16 @@ JOURNALS = ("cutover.json", "network-fence.json", "incident.json", "fence.json",
             "app-deploy.json", "app-health.json", "app-e2e.json", "closeout.json", "evidence-package.json",
             "failback-network-fence.json", "failback-fence.json", "failback.json",
             "failback-app-deploy.json", "failback-app-health.json", "failback-app-e2e.json", "failback-signoff.json")
+WRITES = {
+    "P0-S03": {"network-fence.json"}, "P1-S01-2": {"incident.json"},
+    "P3-S01": {"fence.json"}, "P3-S02": {"cutover.json"}, "P3-S03": {"app-deploy.json"},
+    "P4-S01": {"app-health.json"}, "P4-S02": {"app-e2e.json"},
+    "P4-G4": {"closeout.json"}, "P5": {"evidence-package.json"},
+    "fence": {"failback-network-fence.json", "failback-fence.json"},
+    "endpoints": {"failback.json"}, "release": {"network-fence.json"},
+    "deployment": {"failback-app-deploy.json"}, "health": {"failback-app-health.json"},
+    "signoff": {"failback-app-e2e.json", "failback-signoff.json"},
+}
 
 
 def helper(name):
@@ -39,7 +50,7 @@ def matching(record, identity, **expected):
 
 def failback_next(records, identity):
     cutover = records.get("cutover.json")
-    if not matching(cutover, identity, operation="cutover", status="complete"):
+    if not matching(cutover, identity, status="complete") or cutover.get("operation", "cutover") != "cutover":
         raise ValueError("A matching completed cutover is required; no run is selected automatically.")
     for key in ("db", "source_db", "oldHost", "newHost"):
         if not isinstance(cutover.get(key), str) or not cutover[key].strip():
@@ -92,6 +103,15 @@ def state_path(ledger, context, mode):
     return ledger / (".runner-recovery-" + context["environment"] + ".json")
 
 
+def evidence_hashes(ledger, context):
+    if not context.get("runId"):
+        return {}
+    directory = ledger / context["runId"]
+    records = read_records(directory)
+    return {name: hashlib.sha256(helper("closeout").read_regular(directory / name)).hexdigest()
+            for name in records}
+
+
 def verify_package(record, identity, root):
     if not matching(record, identity, status="local-packaged", uploaded=False):
         raise ValueError("Invalid local evidence package receipt.")
@@ -138,7 +158,7 @@ def recovery_next(records, state, context, inventory=None):
         return "P4-G4"
     cutover = records.get("cutover.json")
     if cutover:
-        if not matching(cutover, identity, operation="cutover", status="complete"):
+        if not matching(cutover, identity, status="complete") or cutover.get("operation", "cutover") != "cutover":
             return "P3-S02"
         deployment = records.get("app-deploy.json")
         if not deployment:
@@ -181,11 +201,17 @@ def recovery_next(records, state, context, inventory=None):
         raise ValueError("Checkpoint claims completion without final evidence; inspect the run.")
     incident = records.get("incident.json")
     if matching(incident, identity, status="declared", scenario="S3"):
-        return "P2-S00"
+        if inventory is None:
+            return "probe"
+        next_step = recovery_next({}, dict(pending="P2-S01"), context, inventory)
+        return "P2-S00" if next_step == "P2-S01" else next_step
     network = records.get("network-fence.json")
     if network:
         if not matching(network, identity, mode="cutover", status="attached"):
             return "P0-S03"
+        if context.get("t0At") and context.get("t0Ref"):
+            helper("secret-endpoints").parse_utc_timestamp(context["t0At"], "Saved T0")
+            return "P1-S01-2"
         return "P1-S01-1"
     return "P0-S01"
 
@@ -198,7 +224,15 @@ def plan(ledger, context, mode, inventory=None):
     path = state_path(ledger, context, mode)
     state = regular_json(path) if path.exists() or path.is_symlink() else {}
     if state and state.get("context") != context:
-        raise ValueError("Saved runner scope/configuration differs; review it before resuming.")
+        changed = sorted(key for key in set(context) | set(state.get("context", {}))
+                         if context.get(key) != state.get("context", {}).get(key))
+        raise ValueError("Saved runner scope/configuration differs (" + ", ".join(changed) + "); review it before resuming.")
+    if state:
+        current_hashes = evidence_hashes(ledger, context)
+        allowed_changes = WRITES.get(state.get("pending"), set())
+        for name, digest in state.get("evidenceHashes", {}).items():
+            if name not in allowed_changes and current_hashes.get(name) != digest:
+                raise ValueError("Completed evidence changed since checkpoint: " + name)
     if mode == "recovery" and any(name.startswith("failback-") or name == "failback.json" for name in records):
         return plan(ledger, context, "failback", inventory)
     identity = {key: context.get(key) for key in ("runId", "account", "region")}
@@ -208,7 +242,10 @@ def plan(ledger, context, mode, inventory=None):
             review = endpoints.failback_signoff_review(ledger, run_id, context["account"], context["region"])
             signed = records["failback-signoff.json"]
             if (signed.get("evidenceHashes") != review["evidenceHashes"] or
-                    signed.get("appOwner") != review["appOwner"] or signed.get("status") != "owner-signed-off"):
+                    any(signed.get(key) != review[key] for key in
+                        ("runId", "account", "region", "appOwner", "evidence", "primaryHost", "replicaHost")) or
+                    signed.get("status") != "signed-off" or signed.get("operation") != "failback" or
+                    signed.get("approval") != "SIGN-OFF-FAILBACK" or signed.get("evidenceReviewedByOwner") is not True):
                 raise ValueError("Failback sign-off is invalid or changed; inspect before continuing.")
             next_step = None
         else:
@@ -226,6 +263,9 @@ def checkpoint(ledger, context, mode, action, step):
     state = regular_json(path) if path.exists() else {}
     if action == "start" and state and state.get("context") != context:
         raise ValueError("Configuration changed between actions; inspect before continuing.")
+    if (action == "done" and state and state.get("context") != context and
+            step not in ("P0-S01", "P0-S03", "P1-S01-1", "P1-S01-2")):
+        raise ValueError("Configuration changed during the action; checkpoint not advanced.")
     if action == "reset":
         state = {}
     completed = state.get("completed", [])
@@ -234,7 +274,8 @@ def checkpoint(ledger, context, mode, action, step):
         completed = sequence[:sequence.index(step)]
     if action == "done" and step not in completed:
         completed.append(step)
-    state = dict(context=context, completed=completed, pending=step if action == "start" else None)
+    state = dict(context=context, completed=completed, pending=step if action == "start" else None,
+                 evidenceHashes=evidence_hashes(ledger, context))
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".runner-", dir=path.parent)
     try:

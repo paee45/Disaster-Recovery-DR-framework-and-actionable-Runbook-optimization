@@ -317,6 +317,7 @@ aws() {
   case "$*" in
     *'sts get-caller-identity'*) echo 000000000000 ;;
     *'rds wait db-instance-available'*) return 0 ;;
+    *'rds describe-db-instances'*) echo '{"DBInstances":[]}' ;;
     *) echo 'Unexpected AWS call in full-run fixture' >&2; return 99 ;;
   esac
 }
@@ -389,11 +390,12 @@ echo 'PASS failback descriptions distinguish all seven actions, SG-only cleanup 
 ! grep -F '== P0-' "$TEMP/full-failback.txt" >/dev/null
 ! grep -F 'MOCK_STEP restore-drill.sh' "$TEMP/full-failback.txt" >/dev/null
 if TEST_STOP_HELPER=fence-confirm.sh BASH_ENV="$TEMP/full-dispatch.bash" \
-    command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --failback DR-fixture \
-    > "$TEMP/blocked-failback.txt" 2>&1; then
+    command bash "$FIXTURE_ROOT/iac/lab/bb3-db/bb3-run.sh" S3 --failback DR-fence-failure \
+    < /dev/null > "$TEMP/blocked-failback.txt" 2>&1; then
   echo 'FAIL guided failback continued past a failed fence gate' >&2
   exit 1
 fi
+grep -Fx 'MOCK_STEP fence-confirm.sh <--failback> <DR-fence-failure>' "$TEMP/blocked-failback.txt" >/dev/null
 ! grep -F '<--apply>' "$TEMP/blocked-failback.txt" >/dev/null
 ! grep -F 'MOCK_STEP app-deploy-confirm.sh' "$TEMP/blocked-failback.txt" >/dev/null
 plan="$(command bash "$HERE/bb3-run.sh" S3 --failback DR-fixture --list)"

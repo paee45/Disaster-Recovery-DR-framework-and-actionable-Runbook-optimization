@@ -70,6 +70,38 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **BB3 guarded SSH deployment and reports (2026-10-24):** P3-S03 option 1 runs automatic SSH deploy
+  for dev/uat after clean-main preflight and typed `DEPLOY-ENV`; option 2 guides Enter/run, n/stop,
+  s/skip; option 3 records an already completed manual deploy and prints the external guide. Prod SSH
+  remains outside this UAT-role workflow. Docker mock uses same orchestrator with no network/mounts.
+  Failback sign-off creates a hash-linked result report; retirement stage 8 writes a versioned 8/8 report;
+  recovery P5 already packages `summary.md`. Mocked SSH/UI/Docker tests pass; no real host accessed.
+- **BB3 retirement completion summary (2026-10-23):** final verified success and completed read-only
+  retry now show a highlighted completion banner, run ID and separate removed/retained scope lists.
+  Green ANSI highlighting is terminal-only and respects `NO_COLOR`; logs remain plain. Retained
+  resources are labelled outside deletion scope, not independently audited. Summary/NO_COLOR and
+  existing mocked retirement regressions plus shell lint/pinning pass; no live retirement rerun.
+- **BB3 actionable retirement refusals (2026-10-23):** restored-resource guard failures now list
+  the DB, failed predicate, expected/observed values, safe owner-review/wait guidance and the same-run
+  retry command. Existing guard conditions are unchanged; no automatic repair, protection disablement,
+  quarantine removal or journal repinning is suggested. Thirteen mocked diagnostic cases and existing
+  retirement interruption/purge regressions pass, along with shell lint/pinning. No live retirement was
+  retried; the owner's reported stage-6 failure remains unverified, not assigned a guessed root cause.
+- **BB3 owner-name reuse (2026-10-23):** app owner is captured once at the first fence and reused
+  from scope-matched journals across deployment, health, transaction, failback and retirement. SRE/IC
+  approver remains separate and is captured once at T10, then reused for packaging. Legacy runs without
+  a matching app-owner record still prompt for the first entry. Removed sign-off readiness yes/no and
+  owner re-entry; one explicit `SIGN-OFF-FAILBACK` remains after the evidence review, with Enter leaving
+  approval pending. Saved-owner mismatch validation, evidence hashes and separate retirement approval
+  remain; existing journals/sign-offs are not rewritten. Mocked tests only; no live AWS actions.
+- **BB3 checked main-command continuation (2026-10-23):** plain `bb3-run.sh S3` and explicit
+  `S3 --failback DR-ID` now inspect scope-bound ignored checkpoints/journals and offer Enter-to-continue
+  or cancellation. Every recovery step/action has a checkpoint; failback fence and original release
+  are distinct. Legacy progress is conservative, accepted restore/create requests select a tagged/topology-
+  checked waiter, and uncertain hardening waits/revalidates. Config/identity/evidence drift blocks;
+  `--list`, manual selectors and typed approval gates remain. `S3 --new` deliberately starts a separate
+  drill checkpoint without deleting evidence; this supersedes older notes saying plain S3 always starts
+  fault injection again. No live run resumed or AWS resources changed for implementation/testing.
 - **BB3 late EOF and owner roles (2026-10-23):** runner changed during the active
   `DR-20261023-062817-uat-BB3-S3` drill; current syntax passes and its T10 closeout, local package
   manifest/archive hashes and no-upload receipt were verified read-only after the trailing EOF error.

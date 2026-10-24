@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -136,7 +137,7 @@ class SecretEndpointTests(unittest.TestCase):
         (run_dir / "failback-network-fence.json").write_text(json.dumps({
             "runId": "DR-fixture", "account": "000000000000", "region": "ap-southeast-1",
             "mode": "failback", "status": "attached", "activePrimary": "new-primary",
-            "activeReplica": "new-replica",
+            "activeReplica": "new-replica", "quarantineSecurityGroup": "sg-abcdef",
         }))
         (run_dir / "failback-fence.json").write_text(json.dumps({
             "runId": "DR-fixture", "mode": "failback", "account": "000000000000", "region": "ap-southeast-1",
@@ -216,6 +217,15 @@ class SecretEndpointTests(unittest.TestCase):
 
     def test_failback_signoff_requires_evidence_owner_and_explicit_approval(self):
         run_dir = self.prepare_failback_app_run()
+        (run_dir / "app-health.json").write_text(json.dumps({
+            "runId": "DR-fixture", "status": "owner-confirmed", "t8At": "2026-10-22T12:00:00Z",
+            "serviceRtoMinutes": 12.5,
+        }))
+        (run_dir / "app-e2e.json").write_text(json.dumps({
+            "runId": "DR-fixture", "status": "owner-confirmed", "t9At": "2026-10-22T12:05:00Z",
+            "businessValidationMinutes": 5.0,
+        }))
+        (run_dir / "closeout.json").write_text(json.dumps({"runId": "DR-fixture", "status": "service-restored"}))
         arguments = (self.directory.name, "DR-fixture", "000000000000", "ap-southeast-1")
         owner = "owner@example.invalid"
         HANDLER["record_failback_app_deployment"](
@@ -236,14 +246,24 @@ class SecretEndpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "signed-off")
         self.assertFalse(result["cleanupAuthorized"])
         self.assertEqual(len(result["evidenceHashes"]), 9)
+        report = HANDLER["failback_result_report"](*arguments)
+        self.assertTrue(report["content"].startswith("# BB3 Failback Result Report"))
+        self.assertIn("**FAILBACK SIGNED OFF**", report["content"])
+        self.assertIn("**OWNER CONFIRMED**", report["content"])
+        self.assertIn("Pending separate retirement approval", report["content"])
+        self.assertIn("T8-T0: 12.5 minutes", report["content"])
+        self.assertIn("T9-T8: 5.0 minutes", report["content"])
+        self.assertIn("2026-10-22T12:05:00Z", report["content"])
+        self.assertEqual(hashlib.sha256(Path(report["path"]).read_bytes()).hexdigest(), report["reportSha256"])
+        report_retry = HANDLER["failback_result_report"](*arguments)
+        self.assertTrue(report_retry["existing"])
+        self.assertEqual(report_retry["reportSha256"], report["reportSha256"])
         network_path = run_dir / "failback-network-fence.json"
-        with self.assertRaisesRegex(ValueError, "valid run-owned"):
-            HANDLER["retirement_context"](*arguments)
         with self.assertRaises(FileExistsError):
             HANDLER["record_failback_signoff"](
                 *arguments, owner, "deploy-ticket-1", "health-log-1", "txn-log-1", "SIGN-OFF-FAILBACK")
         network = json.loads(network_path.read_text())
-        network["quarantineSecurityGroup"] = "sg-abcdef"
+        network["quarantineSecurityGroup"] = "sg-ff1234"
         network_path.write_text(json.dumps(network))
         with self.assertRaisesRegex(ValueError, "evidence changed"):
             HANDLER["retirement_context"](*arguments)

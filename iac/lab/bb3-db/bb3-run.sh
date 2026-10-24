@@ -38,7 +38,7 @@ BB3 S3 RDS drill steps:
   P2-S09  Check both saved targets (read-only)
   P3-S01  Verify P0 no-ingress SG and confirm existing sessions closed; no source mutation
   P3-S02  Secret update: automatic CLI or verify manual update (explicit selection)
-  P3-S03  App deploy: automatic unavailable; manual confirmation; --failback DR-ID records return deployment
+  P3-S03  App deploy: guarded automatic/guided SSH to dev/uat or manual completion confirmation
   P4-S01  Confirm restored-pair health (T8); --failback DR-ID records original-pair health
   P4-S02  Confirm recovery transaction/readback (T9); --failback DR-ID offers return-path sign-off
   P4-G4   Record formal service-restored approval and T10 (local attestation)
@@ -106,7 +106,7 @@ on_interrupt() {
       printf 'Then rerun the relevant validation step only after reviewing the current settings.\n' >&2
       ;;
     *)
-      printf '\nInterrupted during %s. Resume this read-only/current step with:\n' "${CURRENT_STEP:-the current step}" >&2
+      printf '\nInterrupted during %s. After reviewing saved/live state, the manual single-step command is:\n' "${CURRENT_STEP:-the current step}" >&2
       printf 'bash iac/lab/bb3-db/bb3-run.sh %s --only %s\n' "${SCENARIO:-S3}" "${CURRENT_STEP:-P1-S02}" >&2
       ;;
   esac
@@ -249,14 +249,22 @@ print_main_command() {
 }
 
 progress_context() {
+  local config_digest
   read_configuration
+  if command -v sha256sum >/dev/null 2>&1; then
+    config_digest="$(sha256sum "$CONFIG" | awk '{print $1}')"
+  else
+    config_digest="$(shasum -a 256 "$CONFIG" | awk '{print $1}')"
+  fi
   jq -cn --arg root "$ROOT" --arg ledger "$LEDGER" --arg account "$ACCOUNT" --arg region "$REGION" \
     --arg environment "${ENV:-}" --arg run "${FAILBACK_RUN:-${BB3_DR_ID:-}}" \
     --arg primary "${BB3_SOURCE_PRIMARY_ID:-}" --arg replica "${BB3_SOURCE_REPLICA_ID:-}" \
     --arg targetPrimary "${BB3_RESTORE_TARGET_PRIMARY_ID:-}" --arg targetReplica "${BB3_RESTORE_TARGET_REPLICA_ID:-}" \
-    --arg snapshot "${BB3_SNAPSHOT_ID:-}" \
+    --arg snapshot "${BB3_SNAPSHOT_ID:-}" --arg t0At "${BB3_T0_AT:-}" --arg t0Ref "${BB3_T0_EVIDENCE_REF:-}" \
+    --arg configDigest "$config_digest" \
     '{root:$root,ledger:$ledger,account:$account,region:$region,environment:$environment,runId:$run,
-      primary:$primary,replica:$replica,targetPrimary:$targetPrimary,targetReplica:$targetReplica,snapshot:$snapshot}'
+      primary:$primary,replica:$replica,targetPrimary:$targetPrimary,targetReplica:$targetReplica,snapshot:$snapshot,
+      t0At:$t0At,t0Ref:$t0Ref,configDigest:$configDigest}'
 }
 
 progress_update() {
@@ -305,6 +313,18 @@ prepare_progress() {
     exit 0
   fi
   printf 'Suggested continuation: %s\n' "$next"
+  if [[ "$mode" == failback ]]; then
+    case "$next" in
+      preview) echo 'Step: P3-S02 --preview (read-only return-endpoint review)' ;;
+      fence) echo 'Step: P3-S01 (fence restored DBs and confirm sessions closed)' ;;
+      endpoints) echo 'Step: P3-S02 --apply (guarded endpoint return)' ;;
+      release) echo 'Step: P3-S01 --release-quarantine (release original DBs)' ;;
+      deployment) echo 'Step: P3-S03 (manual original-path deployment confirmation)' ;;
+      health) echo 'Step: P4-S01 (original-path application health)' ;;
+      signoff) echo 'Step: P4-S02 (transaction and explicit failback sign-off)' ;;
+    esac
+  fi
+  printf 'Completed checkpoint actions: %s\n' "$(jq -r '.completed | if length==0 then "none (legacy journals checked)" else join(", ") end' <<< "$plan")"
   if [[ "$mode" == failback ]]; then
     FAILBACK_RUN="$(jq -r '.runId' <<< "$plan")"
     printf 'Continuation command: '; print_main_command
@@ -368,7 +388,7 @@ step_preview() {
     P2-S09) action='Inspect both saved restore targets.'; expected='Current status and topology are shown; no AWS resource is changed.' ;;
     P3-S01) action='Verify the original source pair quarantine and confirm existing sessions are closed.'; expected='Both original source DBs remain isolated by the verified P0 quarantine; this recovery step does not change source SGs or stop DBs.' ;;
     P3-S02) action='Update or verify the app secret endpoint pair.'; expected='Both endpoints match the selected restored pair; any write requires the matching verified fence.' ;;
-    P3-S03) action='Record deployment and service convergence; --failback DR-ID selects supplemental return-path evidence.'; expected='No deployment runs here; automatic mode exits unavailable, while manual confirmation records a sanitized log.' ;;
+    P3-S03) action='Run guarded automatic/guided deployment over local SSH, or confirm a manual deployment.'; expected='Only dev/uat hosts are supported. Automatic/guided SSH requires a typed DEPLOY-ENV approval; owner review and sanitized evidence confirmation are still required. --failback DR-ID records supplemental return-path evidence.' ;;
     P4-S01) action='Confirm app health on the selected endpoint pair.'; expected='Recovery mode records T8; --failback DR-ID records separate original-pair health evidence and actual UTC time.' ;;
     P4-S02) action='Confirm a successful business transaction and readback.'; expected='Recovery mode records T9; --failback DR-ID records or reuses a separate transaction and offers explicit owner sign-off, not deletion approval.' ;;
     P4-G4) action='Review saved recovery evidence and record formal service-restored approval.'; expected='Validated T10, approver/role and evidence references are saved locally after typed approval; T8/T9 are preserved.' ;;
@@ -417,10 +437,33 @@ step_preview() {
 }
 
 run_step() {
+  local context inventory decision
   CURRENT_STEP="$1"
   shift
   CURRENT_ARGS=("$@")
   progress_update start
+  if [[ "$PROGRESS_ENABLED" == true && -z "$CURRENT_ACTION" ]]; then
+    case "$CURRENT_STEP" in
+      P2-S03)
+        read_configuration
+        wait_for_target "${BB3_RESTORE_TARGET_PRIMARY_ID:-}" 'primary readiness before hardening/revalidation' ;;
+      P2-S07)
+        read_configuration
+        wait_for_target "${BB3_RESTORE_TARGET_REPLICA_ID:-}" 'replica readiness before hardening/revalidation' ;;
+    esac
+  fi
+  if [[ "$PROGRESS_ENABLED" == true && -z "$CURRENT_ACTION" && ( "$CURRENT_STEP" == P2-S01 || "$CURRENT_STEP" == P2-S05 ) ]]; then
+    load_environment
+    context="$(progress_context)"
+    inventory="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds describe-db-instances --output json | \
+      jq -ce '.DBInstances | select(type=="array")')"
+    decision="$(python3 "$HERE/runner-progress.py" plan --context "$context" --mode recovery --inventory "$inventory")"
+    if [[ "$(jq -r '.next' <<< "$decision")" == P2-S02 || "$(jq -r '.next' <<< "$decision")" == P2-S06 ]]; then
+      printf '%s: target already exists with matching run tag/topology; not resubmitting. Continue with its waiter.\n' "$CURRENT_STEP"
+      progress_update 'done'
+      return 0
+    fi
+  fi
   printf '\n== %s ==\n' "$CURRENT_STEP"
   step_preview "$CURRENT_STEP" "$@"
   case "$CURRENT_STEP" in
@@ -506,7 +549,7 @@ run_step() {
       ;;
     *) echo "Unknown BB3 step ID: $CURRENT_STEP" >&2; list_steps >&2; return 2 ;;
   esac
-  progress_update done
+  progress_update 'done'
 }
 
 prepare_progress
@@ -552,7 +595,7 @@ Next: verify isolation/session closure and collect cutover approval before chang
   bash iac/lab/bb3-db/bb3-run.sh S3 --only P3-S01
 Continue the remaining recovery/closeout steps with all approval gates:
   bash iac/lab/bb3-db/bb3-run.sh S3 --from P3-S01 --to P5
-Do not restart plain S3 to continue: it starts discovery and fault injection again.
+Plain S3 checks saved progress and offers confirmed continuation. Only S3 --new starts a separate drill.
 EOF
   fi
   CURRENT_STEP=''

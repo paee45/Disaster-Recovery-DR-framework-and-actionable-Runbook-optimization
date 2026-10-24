@@ -162,6 +162,9 @@ edit_json() {
   mv "$TEMP/edit.json" "$1"
 }
 reset_databases
+jq -n '{runId:"DR-fixture",mode:"cutover",status:"owner-confirmed",account:"000000000000",region:"ap-southeast-1",
+  activePrimary:"old-primary",activeReplica:"old-replica",returnPrimary:"new-primary",returnReplica:"new-replica",
+  appOwner:"fixture-owner",fenceVerified:true,existingSessionsClosed:true}' > "$RUN_DIR/fence.json"
 TEST_APPROVE=n
 reject_gate
 TEST_APPROVE=y
@@ -172,6 +175,9 @@ if run_gate; then echo 'FAIL adopted an unjournaled existing SG' >&2; exit 1; fi
 TEST_CONFLICT=0
 : > "$TEST_CALLS"
 run_gate
+grep -F 'Reusing saved app owner: fixture-owner' "$TEMP/output" >/dev/null
+! grep -F 'App owner name' "$TEMP/output" >/dev/null
+[[ "$(jq -r '.appOwner' "$RUN_DIR/failback-fence.json")" == fixture-owner ]]
 [[ "$(grep -c 'ec2 create-security-group' "$TEST_CALLS")" == 1 ]]
 [[ "$(grep -c 'rds modify-db-instance' "$TEST_CALLS")" == 2 ]]
 jq -e '.mode=="failback" and .status=="attached" and

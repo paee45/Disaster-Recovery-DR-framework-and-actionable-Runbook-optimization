@@ -30,6 +30,21 @@ git -C "$ROOT" check-ignore -q "$LEDGER/check.json" \
 [[ -t 0 ]] || { echo 'Run this step in an interactive terminal.' >&2; exit 2; }
 ulimit -c 0
 
+show_failback_report() {
+  local result report_path color='' reset=''
+  result="$(python3 "$HERE/secret-endpoints.py" --failback-result-report \
+    "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION")"
+  report_path="$(jq -er '.path' <<< "$result")"
+  if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
+    color=$'\033[1;32m'
+    reset=$'\033[0m'
+  fi
+  printf '\n%s============================================================\n' "$color"
+  printf 'FAILBACK RESULT REPORT\n============================================================%s\n' "$reset"
+  printf 'Evidence: %s (SHA-256: %s)\n\n' "$report_path" "$(jq -er '.reportSha256' <<< "$result")"
+  cat "$report_path"
+}
+
 if [[ "$FAILBACK" == true ]]; then
   RUN="$(python3 "$HERE/secret-endpoints.py" --show-failback "$LEDGER" "$RUN_SELECTION")"
   RUN_ID="$RUN_SELECTION"
@@ -69,9 +84,8 @@ if [[ "$FAILBACK" == true ]]; then
     OWNER="$(jq -er '.appOwner' "$FAILBACK_DEPLOY_RECORD")"
     [[ ! -e "$FAILBACK_HEALTH_RECORD" ]] \
       || { echo 'Failback app health is already recorded for this run.' >&2; exit 2; }
-    bb3_prompt_read OWNER_INPUT "App owner [${OWNER}]: "
-    OWNER="${OWNER_INPUT:-$OWNER}"
-    [[ "$OWNER" == "$(jq -er '.appOwner' "$FAILBACK_DEPLOY_RECORD")" ]] \
+    printf 'Reusing saved app owner: %s\n' "$OWNER"
+    [[ "$OWNER" == "$(jq -er '.failbackFence.appOwner' <<< "$RUN")" ]] \
       || { echo 'Failback health must be confirmed by the deployment app owner.' >&2; exit 2; }
     bb3_prompt_read CONNECTED 'Did the app health check succeed on the original primary/replica endpoints? [y/N]: '
     [[ "$CONNECTED" =~ ^[Yy]$ ]] || { echo 'Failback health not recorded.' >&2; exit 2; }
@@ -89,10 +103,9 @@ if [[ "$FAILBACK" == true ]]; then
   [[ -f "$FAILBACK_HEALTH_RECORD" ]] \
     || { echo 'Run P4-S01 --failback DR-ID and confirm original-pair health first.' >&2; exit 2; }
   OWNER="$(jq -er '.appOwner' "$FAILBACK_HEALTH_RECORD")"
+  printf 'Reusing saved app owner: %s\n' "$OWNER"
   if [[ ! -e "$FAILBACK_E2E_RECORD" ]]; then
-  bb3_prompt_read OWNER_INPUT "App owner [${OWNER}]: "
-  OWNER="${OWNER_INPUT:-$OWNER}"
-  [[ "$OWNER" == "$(jq -er '.appOwner' "$FAILBACK_HEALTH_RECORD")" ]] \
+  [[ "$OWNER" == "$(jq -er '.failbackFence.appOwner' <<< "$RUN")" ]] \
     || { echo 'Failback transaction must be confirmed by the deployment app owner.' >&2; exit 2; }
   bb3_prompt_read PASSED 'Did a successful business transaction and readback complete on the original DB path? [y/N]: '
   [[ "$PASSED" =~ ^[Yy]$ ]] || { echo 'Failback business validation not recorded.' >&2; exit 2; }
@@ -118,26 +131,26 @@ if [[ "$FAILBACK" == true ]]; then
     transactionAt:.evidence.transaction.transactionAt}' <<< "$REVIEW"
   if [[ -e "$LEDGER/$RUN_ID/failback-signoff.json" ]]; then
     echo 'Failback sign-off already exists; no record was overwritten.'
+    show_failback_report
     exit 0
   fi
   echo 'Review actual supporting evidence, not placeholder/prompt-test inputs. References are not independently verified.'
-  bb3_prompt_read SIGNOFF_READY 'Continue to app-owner failback sign-off? [y/N]: '
-  if [[ ! "$SIGNOFF_READY" =~ ^[Yy]$ ]]; then
-    echo 'Transaction retained; failback sign-off remains pending. No cleanup authorized.'
-    exit 0
-  fi
-  bb3_prompt_read SIGNOFF_OWNER "Sign-off app owner [${OWNER}]: "
-  SIGNOFF_OWNER="${SIGNOFF_OWNER:-$OWNER}"
+  SIGNOFF_OWNER="$(jq -er '.appOwner' <<< "$REVIEW")"
   DEPLOYMENT_REF="$(jq -er '.evidence.deployment.evidenceRef' <<< "$REVIEW")"
   HEALTH_REF="$(jq -er '.evidence.health.evidenceRef' <<< "$REVIEW")"
   BUSINESS_REF="$(jq -er '.evidence.transaction.transactionRef' <<< "$REVIEW")"
   echo 'Reusing the displayed saved deployment, health and transaction references for sign-off; no re-entry required.'
   bb3_prompt_token_read SIGNOFF_APPROVAL 'Type ' SIGN-OFF-FAILBACK \
-    ' to confirm evidence review and approve failback (not resource deletion): '
+    ' to confirm evidence review and approve failback (Enter leaves pending; not resource deletion): '
+  if [[ -z "$SIGNOFF_APPROVAL" ]]; then
+    echo 'Transaction retained; failback sign-off remains pending. No cleanup authorized.'
+    exit 0
+  fi
   RESULT="$(python3 "$HERE/secret-endpoints.py" --record-failback-signoff \
     "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION" "$SIGNOFF_OWNER" \
     "$DEPLOYMENT_REF" "$HEALTH_REF" "$BUSINESS_REF" "$SIGNOFF_APPROVAL")"
   jq '{runId,appOwner,status,signedOffAt,cleanupAuthorized}' <<< "$RESULT"
+  show_failback_report
   printf 'Next: review retirement of only this run\047s restored DB pair and quarantine SG.\n'
   bb3_prompt_read CLEANUP_READY 'Open the separately approved retirement workflow now? [y/N]: '
   if [[ "$CLEANUP_READY" =~ ^[Yy]$ ]]; then
@@ -159,10 +172,7 @@ if [[ "$MODE" == connectivity ]]; then
   OWNER="$(jq -er '.appOwner' "$DEPLOY_RECORD")"
   [[ ! -e "$HEALTH_RECORD" ]] || { echo 'T8 connectivity is already recorded for this run.' >&2; exit 2; }
   printf 'Deployment evidence: %s\n' "$(jq -er '.evidenceRef' "$DEPLOY_RECORD")"
-  bb3_prompt_read OWNER_INPUT "App owner [${OWNER}]: "
-  OWNER="${OWNER_INPUT:-$OWNER}"
-  [[ "$OWNER" == "$(jq -er '.appOwner' "$DEPLOY_RECORD")" ]] \
-    || { echo 'T8 must be confirmed by the app owner recorded for deployment.' >&2; exit 2; }
+  printf 'Reusing saved app owner: %s\n' "$OWNER"
   bb3_prompt_read CONNECTED 'Did the running app pass its health check against the restored DB endpoint? [y/N]: '
   [[ "$CONNECTED" =~ ^[Yy]$ ]] || { echo 'T8 not recorded; service RTO continues.' >&2; exit 2; }
   bb3_prompt_read EVIDENCE_REF 'Health-check evidence/logs reference: '

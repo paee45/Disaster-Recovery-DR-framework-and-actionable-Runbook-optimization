@@ -3,6 +3,13 @@ from pathlib import Path
 import unittest
 import tempfile
 import json
+import hashlib
+import os
+import pty
+import select
+import shutil
+import subprocess
+import time
 
 
 SPEC = importlib.util.spec_from_file_location("runner_progress", Path(__file__).with_name("runner-progress.py"))
@@ -108,6 +115,180 @@ class ProgressTests(unittest.TestCase):
             MODULE.state_path(ledger, context, "recovery").symlink_to(outside)
             with self.assertRaises(ValueError):
                 MODULE.checkpoint(ledger, context, "recovery", "start", "P0-S01")
+
+    def test_legacy_submission_requires_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = self.context(Path(directory))
+            records = {"incident.json": dict(self.identity, status="declared", scenario="S3")}
+            self.assertEqual(MODULE.recovery_next(records, {}, context), "probe")
+            self.assertEqual(MODULE.recovery_next(records, {}, context, []), "P2-S00")
+            inventory = [dict(DBInstanceIdentifier="restored", Engine="postgres",
+                              TagList=[dict(Key="dr-restore", Value="DR-fixture")])]
+            self.assertEqual(MODULE.recovery_next(records, {}, context, inventory), "P2-S02")
+
+    def test_changed_completed_evidence_blocks_but_pending_action_can_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = self.context(Path(directory))
+            ledger = Path(context["ledger"])
+            run = ledger / "DR-fixture"
+            run.mkdir(parents=True)
+            network = dict(self.identity, mode="cutover", status="submitted")
+            path = run / "network-fence.json"
+            path.write_text(json.dumps(network))
+            MODULE.checkpoint(ledger, context, "recovery", "start", "P0-S03")
+            path.write_text(json.dumps(dict(network, status="attached")))
+            self.assertEqual(MODULE.plan(ledger, context, "recovery")["next"], "P0-S01")
+            MODULE.checkpoint(ledger, context, "recovery", "done", "P0-S03")
+            path.write_text(json.dumps(dict(network, status="released")))
+            with self.assertRaisesRegex(ValueError, "Completed evidence changed"):
+                MODULE.plan(ledger, context, "recovery")
+
+
+class RunnerInteractionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.here = self.root / "iac/lab/bb3-db"
+        self.here.mkdir(parents=True)
+        source = Path(__file__).parent
+        for name in ("bb3-run.sh", "bb3-prompt.sh", "bb3-wait.py", "runner-progress.py", "closeout.py", "secret-endpoints.py"):
+            shutil.copyfile(source / name, self.here / name)
+        (self.root / "iac/sandbox.env").write_text(
+            "TF_VAR_account_id=000000000000\nTF_VAR_aws_profile=lab_sandbox\nTF_VAR_region=ap-southeast-1\n"
+            "ENV=uat\nBB3_DR_ID=DR-fixture\nBB3_SOURCE_PRIMARY_ID=original\nBB3_SOURCE_REPLICA_ID=original-replica\n"
+            "BB3_RESTORE_TARGET_PRIMARY_ID=restored\nBB3_RESTORE_TARGET_REPLICA_ID=restored-replica\n"
+            "BB3_SNAPSHOT_ID=snapshot-fixture\n")
+        fixture = ProgressTests()
+        fixture.setUp()
+        self.context = fixture.context(self.root)
+        self.context.update(t0At="", t0Ref="", configDigest=hashlib.sha256(
+            (self.root / "iac/sandbox.env").read_bytes()).hexdigest())
+        self.ledger = Path(self.context["ledger"])
+        self.run = self.ledger / "DR-fixture"
+        self.run.mkdir(parents=True)
+        stubs = self.root / "stubs.bash"
+        stubs.write_text('''git() { return 0; }
+aws() {
+  case "$*" in
+    *"sts get-caller-identity"*) echo 000000000000 ;;
+    *"rds describe-db-instances"*) echo '{"DBInstances":[]}' ;;
+    *"rds wait db-instance-available"*) return 0 ;;
+    *) echo 'REFUSED unexpected mock AWS call' >&2; return 97 ;;
+  esac
+}
+bash() {
+  local helper="${1##*/}"
+  shift
+  printf 'MOCK_STEP %s' "$helper"
+  printf ' <%s>' "$@"
+  printf '\\n'
+  [[ "$helper" != "${TEST_STOP_HELPER:-}" ]]
+}
+''')
+        self.environment = os.environ.copy()
+        for key in list(self.environment):
+            if key.startswith("BB3_") or key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "TEST_STOP_HELPER"):
+                self.environment.pop(key, None)
+        self.environment.update(BASH_ENV=str(stubs), TERM="xterm", NO_COLOR="", AWS_EC2_METADATA_DISABLED="true")
+
+    def run_terminal(self, arguments, answer="", stop=None):
+        master, slave = pty.openpty()
+        environment = dict(self.environment)
+        if stop:
+            environment["TEST_STOP_HELPER"] = stop
+        child = subprocess.Popen(["bash", str(self.here / "bb3-run.sh"), "S3", *arguments],
+                                 stdin=slave, stdout=slave, stderr=slave, env=environment)
+        os.close(slave)
+        output = bytearray()
+        sent = False
+        deadline = time.monotonic() + 25
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.2)
+                if ready:
+                    try:
+                        content = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not content:
+                        break
+                    output.extend(content)
+                    if not sent and b"Continue from the suggested action?" in output:
+                        os.write(master, (answer + "\n").encode())
+                        sent = True
+                if child.poll() is not None and not ready:
+                    break
+            if child.poll() is None:
+                try:
+                    child.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    self.fail("Resume interaction timed out: " + output.decode(errors="replace"))
+            return child.wait(), output.decode(errors="replace")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            os.close(master)
+
+    def seed_recovery(self, step="P3-S01"):
+        MODULE.checkpoint(self.ledger, self.context, "recovery", "adopt", step)
+
+    def seed_failback(self):
+        fixture = ProgressTests()
+        fixture.setUp()
+        for name, record in fixture.records.items():
+            (self.run / name).write_text(json.dumps(record))
+        return fixture
+
+    def test_enter_continues_recovery_without_discovery_or_restore(self):
+        self.seed_recovery()
+        exit_code, output = self.run_terminal([])
+        self.assertEqual(exit_code, 0, output)
+        self.assertIn("Suggested continuation: P3-S01", output)
+        self.assertIn("MOCK_STEP fence-confirm.sh", output)
+        self.assertIn("MOCK_STEP closeout.sh <package>", output)
+        self.assertNotIn("MOCK_STEP discover-env.sh", output)
+        self.assertNotIn("MOCK_STEP restore-drill.sh", output)
+
+    def test_cancel_does_not_run_steps_or_change_checkpoint(self):
+        self.seed_recovery()
+        path = MODULE.state_path(self.ledger, self.context, "recovery")
+        before = path.read_bytes()
+        exit_code, output = self.run_terminal([], answer="n")
+        self.assertEqual(exit_code, 0, output)
+        self.assertNotIn("MOCK_STEP", output)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_noninteractive_resume_refuses_without_mutations(self):
+        self.seed_recovery()
+        result = subprocess.run(["bash", str(self.here / "bb3-run.sh"), "S3"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, env=self.environment)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Interactive confirmation required", result.stderr)
+        self.assertNotIn("MOCK_STEP", result.stdout)
+
+    def test_interrupted_failback_retries_fence_and_prints_main_command(self):
+        self.seed_failback()
+        exit_code, output = self.run_terminal(["--failback", "DR-fixture"], stop="fence-confirm.sh")
+        self.assertNotEqual(exit_code, 0)
+        self.assertIn("Suggested continuation: fence", output)
+        self.assertIn("Stopped at P3-S01 (fence)", output)
+        self.assertIn("S3 --failback DR-fixture", output)
+        self.assertNotIn("<--apply>", output)
+
+    def test_plain_main_command_offers_existing_failback_continuation(self):
+        fixture = self.seed_failback()
+        fixture.fence()
+        for name, record in fixture.records.items():
+            (self.run / name).write_text(json.dumps(record))
+        exit_code, output = self.run_terminal([])
+        self.assertEqual(exit_code, 0, output)
+        self.assertIn("Saved failback progress for run: DR-fixture", output)
+        self.assertIn("Suggested continuation: endpoints", output)
+        self.assertIn("MOCK_STEP secret-endpoints.sh <--failback> <DR-fixture> <--apply>", output)
+        self.assertNotIn("MOCK_STEP discover-env.sh", output)
 
 
 if __name__ == "__main__":

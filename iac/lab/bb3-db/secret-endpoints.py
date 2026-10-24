@@ -486,6 +486,112 @@ def retirement_context(directory, run_id, account, region):
                 signoffHash=hashlib.sha256(path.read_bytes()).hexdigest())
 
 
+def failback_result_report(directory, run_id, account, region):
+    context = retirement_context(directory, run_id, account, region)
+    run_dir = Path(directory) / run_id
+    signoff_path = run_dir / "failback-signoff.json"
+    signoff = json.loads(signoff_path.read_text())
+    retirement_path = run_dir / "retirement.json"
+    retirement = None
+    if retirement_path.exists():
+        if retirement_path.is_symlink() or not retirement_path.is_file():
+            raise ValueError("Retirement evidence must be a regular file.")
+        retirement = json.loads(retirement_path.read_text())
+        if retirement.get("context", {}).get("runId") != run_id:
+            raise ValueError("Retirement journal belongs to a different run.")
+    recovery_report = run_dir / "closeout.json"
+    recovery_metrics = "Not present in this run's closeout."
+    if recovery_report.exists():
+        closeout = json.loads(recovery_report.read_text())
+        if closeout.get("runId") != run_id:
+            raise ValueError("Recovery closeout belongs to a different run.")
+        health_path = run_dir / "app-health.json"
+        transaction_path = run_dir / "app-e2e.json"
+        for evidence_path in (health_path, transaction_path):
+            if evidence_path.is_symlink() or not evidence_path.is_file():
+                raise ValueError("Recovery health/transaction evidence is missing or unsafe for the result report.")
+        health_record = json.loads(health_path.read_text())
+        transaction_record = json.loads(transaction_path.read_text())
+        if (health_record.get("runId") != run_id or transaction_record.get("runId") != run_id
+                or health_record.get("status") != "owner-confirmed"
+                or transaction_record.get("status") != "owner-confirmed"):
+            raise ValueError("Recovery health/transaction journals do not match the report run.")
+        recovery_metrics = (
+            f"T8: {health_record.get('t8At', 'not recorded')} "
+            f"(Service RTO T8-T0: {health_record.get('serviceRtoMinutes', 'not recorded')} minutes)\n"
+            f"T9: {transaction_record.get('t9At', 'not recorded')} "
+            f"(Business validation T9-T8: {transaction_record.get('businessValidationMinutes', 'not recorded')} minutes)\n"
+            f"RPO: Not independently measured. Original recovery package: {recovery_report.name}."
+        )
+    retirement_status = "Pending separate retirement approval."
+    if retirement:
+        if retirement.get("status") == "complete" and retirement.get("stage8VerifiedAt"):
+            retirement_status = f"Complete; final scoped audit verified at {retirement['stage8VerifiedAt']}."
+        else:
+            retirement_status = f"In progress ({retirement.get('status', 'unknown')}); not reported as complete."
+    evidence = context["evidence"]
+    lines = [
+        "# BB3 Failback Result Report",
+        "",
+        f"- Run ID: `{run_id}`",
+        "- Result: **FAILBACK SIGNED OFF**",
+        f"- App owner: {context['appOwner']}",
+        f"- Signed off at (UTC): {signoff['signedOffAt']}",
+        f"- Original primary: `{context['primaryHost']}`",
+        f"- Original replica: `{context['replicaHost']}`",
+        "",
+        "## Results",
+        "",
+        f"- Endpoint return: {signoff.get('evidenceHashes') is not None and 'complete; matching journals validated' or 'not verified'}",
+        f"- Deployment/convergence: **{'OWNER CONFIRMED' if evidence['deployment'].get('servicesConverged') else 'PENDING'}**",
+        f"- Application health: **{'OWNER CONFIRMED' if evidence['health'].get('healthVerified') else 'PENDING'}** at {evidence['health'].get('healthCheckAt', 'not recorded')}",
+        f"- Business transaction/readback: **{'OWNER CONFIRMED' if evidence['transaction'].get('businessTransactionVerified') else 'PENDING'}** at {evidence['transaction'].get('transactionAt', 'not recorded')}",
+        f"- Retirement: {retirement_status}",
+        "",
+        "## Evidence References",
+        "",
+        f"- Deployment: `{evidence['deployment']['evidenceRef']}`",
+        f"- Health: `{evidence['health']['evidenceRef']}`",
+        f"- Transaction: `{evidence['transaction']['transactionRef']}`",
+        f"- Failback sign-off SHA-256: `{context['signoffHash']}`",
+        "",
+        "## Recovery Metrics And Limits",
+        "",
+        recovery_metrics,
+        "",
+        "Failback does not rewrite recovery T8/T9 or the frozen recovery package. Owner attestations and external references are not independently verified. This report is local evidence, not proof of remote host state beyond the recorded checks. Retirement is a separate approved operation.",
+        "",
+    ]
+    content = "\n".join(lines).encode()
+    report_path = run_dir / "failback-report.md"
+    receipt_path = run_dir / "failback-report.json"
+    report_hash = hashlib.sha256(content).hexdigest()
+    receipt = dict(runId=run_id, status="failback-signed-off", report="failback-report.md",
+                   reportSha256=report_hash, signoffSha256=context["signoffHash"],
+                   evidenceHashes=signoff["evidenceHashes"], createdAt=datetime.now(timezone.utc).isoformat(),
+                   uploaded=False)
+    if report_path.exists() or report_path.is_symlink() or receipt_path.exists() or receipt_path.is_symlink():
+        if (report_path.is_symlink() or receipt_path.is_symlink() or not report_path.is_file()
+                or not receipt_path.is_file() or hashlib.sha256(report_path.read_bytes()).hexdigest() != report_hash):
+            raise ValueError("Existing failback report changed; immutable report was not overwritten.")
+        saved = json.loads(receipt_path.read_text())
+        if (saved.get("reportSha256") != report_hash or saved.get("signoffSha256") != context["signoffHash"]
+                or saved.get("evidenceHashes") != signoff["evidenceHashes"]):
+            raise ValueError("Failback report receipt does not match the signed evidence.")
+        return dict(saved, path=str(report_path), content=report_path.read_text(), existing=True)
+    descriptor = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        save_record(receipt_path, receipt, exclusive=True)
+    except BaseException:
+        report_path.unlink(missing_ok=True)
+        raise
+    return dict(receipt, path=str(report_path), content=content.decode(), existing=False)
+
+
 def bb3_update(event, rds, sm):
     operation = event.get("operation", "cutover")
     run_id = event.get("run_id", "")
@@ -616,6 +722,10 @@ def bb3_update(event, rds, sm):
 
 def main(arguments):
     try:
+        if arguments[0] == "--failback-result-report":
+            _, directory, run_id, account, region = arguments
+            print(json.dumps(failback_result_report(directory, run_id, account, region)))
+            return 0
         if arguments[0] == "--show-run":
             _, directory, selection, account, region = arguments
             print(json.dumps(load_cutover(directory, selection, account, region)))

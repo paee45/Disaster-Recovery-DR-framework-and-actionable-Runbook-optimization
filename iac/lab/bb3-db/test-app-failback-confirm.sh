@@ -9,14 +9,38 @@ trap 'rm -rf "$TEMP"' EXIT
 export BB3_LEDGER_DIR="$TEMP/ledger"
 export TEST_PYTHON="${TEST_PYTHON:-$(command -v python3)}"
 export TEST_AWS_CALLED="$TEMP/aws-called"
+export TEST_REMOTE_CALLED="$TEMP/remote-called"
+export TEST_SSH_CALLS="$TEMP/ssh-calls"
 export SCRIPT_DEPLOY="$HERE/app-deploy-confirm.sh"
 export SCRIPT_RECOVERY="$HERE/app-recovery-confirm.sh"
 mkdir -p "$BB3_LEDGER_DIR/DR-fixture"
+printf '%s\n' TF_VAR_account_id=000000000000 TF_VAR_region=ap-southeast-1 ENV=uat \
+  > "$TEMP/sandbox.env"
+export BB3_SANDBOX_CONFIG="$TEMP/sandbox.env" BB3_DEPLOYMENT_CONTAINER=bb3-deploument-ec2
 
 git() { return 0; }
 python3() { exec "$TEST_PYTHON" "$@"; }
 aws() { touch "$TEST_AWS_CALLED"; return 99; }
-export -f git python3 aws
+ssh() {
+  touch "$TEST_SSH_CALLS"
+  local host="$1" command="$2"
+  [[ "$host" == uat-1.app.beepte.ch ]] || return 99
+  printf '%s\n' "$command" >> "$TEST_SSH_CALLS"
+  case "$command" in
+    *'git branch --show-current'*) printf 'branch=main\nworktree=clean\ncommit=0123456789abcdef0123456789abcdef01234567\n' ;;
+    *'git pull --ff-only'*) printf 'Already up to date.\n' ;;
+    *'scripts/deploy.sh uat'*) printf 'deployment output: mock success\n' ;;
+    *'docker stack ps --filter'*) printf 'beepbeep_web.1 Running 5 seconds ago\n' ;;
+    *'docker service ls --filter label=com.docker.stack.namespace=beepbeep'*) printf '2/2\n' ;;
+    *'docker service ls'*) printf 'beepbeep_web replicated 2/2\n' ;;
+    *'docker stack ps beepbeep | grep Running'*) printf 'beepbeep_web.1 Running 5 seconds ago\n' ;;
+    *'docker service logs'*) printf 'mock warning line\n' ;;
+    *) return 97 ;;
+  esac
+}
+docker() { touch "$TEST_REMOTE_CALLED"; return 99; }
+watch() { touch "$TEST_REMOTE_CALLED"; return 99; }
+export -f git python3 aws ssh docker watch
 
 RUN_DIR="$BB3_LEDGER_DIR/DR-fixture"
 jq -n '{runId:"DR-fixture",status:"complete",account:"000000000000",region:"ap-southeast-1",
@@ -29,7 +53,8 @@ jq -n '{runId:"DR-fixture",operation:"failback",status:"complete",account:"00000
 jq -n '{runId:"DR-fixture",mode:"cutover",status:"released",account:"000000000000",region:"ap-southeast-1",
   activePrimary:"old-primary",activeReplica:"old-replica"}' > "$RUN_DIR/network-fence.json"
 jq -n '{runId:"DR-fixture",mode:"failback",status:"attached",account:"000000000000",region:"ap-southeast-1",
-  activePrimary:"new-primary",activeReplica:"new-replica"}' > "$RUN_DIR/failback-network-fence.json"
+  activePrimary:"new-primary",activeReplica:"new-replica",quarantineSecurityGroup:"sg-acde1234"}' \
+  > "$RUN_DIR/failback-network-fence.json"
 jq -n '{runId:"DR-fixture",mode:"failback",status:"owner-confirmed",account:"000000000000",region:"ap-southeast-1",
   appOwner:"owner@example.invalid",activePrimary:"new-primary",activeReplica:"new-replica",
   returnPrimary:"old-primary",returnReplica:"old-replica",fenceVerified:true,existingSessionsClosed:true}' \
@@ -50,11 +75,24 @@ expect_before timeout {exit 96}
 set command [split $env(TEST_ARGS)]
 if {$env(TEST_PHASE) eq "automatic"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
-  expect "Select 1 or 2:*" {send "1\r"}
+  expect "Select 1, 2 or 3:*" {send "1\r"}
+  expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
+  expect "Paste the full log*" {send "sanitized automatic deployment log\r\r\r"}
+  expect "Owner confirms both original endpoints*" {send "n\r"}
+} elseif {$env(TEST_PHASE) eq "guided"} {
+  spawn bash $env(SCRIPT_DEPLOY) {*}$command
+  expect "Select 1, 2 or 3:*" {send "2\r"}
+  expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
+  expect -re {\[PULL\].*} {send "\r"}
+  expect -re {\[DEPLOY\].*} {send "\r"}
+  expect -re {\[VERIFY\].*} {send "\r"}
+  expect -re {\[SERVICES\].*} {send "s\r"}
+  expect -re {\[TASKS\].*} {send "n\r"}
 } elseif {$env(TEST_PHASE) eq "deploy" || $env(TEST_PHASE) eq "no-converge" || $env(TEST_PHASE) eq "resume-deploy"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
-  expect "Select 1 or 2:*" {send "2\r"}
-  expect "App owner name*" {send "\r"}
+  expect "Select 1, 2 or 3:*" {send "3\r"}
+  expect "https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying"
+  expect "Reusing saved app owner:*"
   if {$env(TEST_PHASE) eq "resume-deploy"} {
     expect "Reusing existing sanitized deployment log*"
     expect "Owner confirms both original endpoints*" {send "y\r"}
@@ -66,9 +104,7 @@ if {$env(TEST_PHASE) eq "automatic"} {
   }
 } elseif {$env(TEST_PHASE) eq "health" || $env(TEST_PHASE) eq "wrong-owner" || $env(TEST_PHASE) eq "missing-evidence"} {
   spawn bash $env(SCRIPT_RECOVERY) connectivity {*}$command
-  expect "App owner*" {
-    if {$env(TEST_PHASE) eq "wrong-owner"} {send "different-owner\r"} else {send "\r"}
-  }
+  expect "Reusing saved app owner:*"
   if {$env(TEST_PHASE) ne "wrong-owner"} {
     expect "Did the app health check succeed*" {send "y\r"}
   }
@@ -82,30 +118,22 @@ if {$env(TEST_PHASE) eq "automatic"} {
   }
 } elseif {$env(TEST_PHASE) eq "e2e"} {
   spawn bash $env(SCRIPT_RECOVERY) e2e {*}$command
-  expect "App owner*" {send "\r"}
+  expect "Reusing saved app owner:*"
   expect "Did a successful business transaction*" {send "y\r"}
   expect "Non-secret transaction/reference ID*" {send "txn-ref-1\r"}
   expect "Actual successful transaction time UTC*" {send "2026-10-22T12:05:00Z\r"}
-  expect "Continue to app-owner failback sign-off?*" {send "n\r"}
+  expect "*to confirm evidence review and approve failback*" {send "\r"}
 } elseif {[string match "signoff-*" $env(TEST_PHASE)]} {
   spawn bash $env(SCRIPT_RECOVERY) e2e {*}$command
   expect "Reusing saved failback transaction*"
-  if {$env(TEST_PHASE) ne "signoff-existing"} {
-    expect "Continue to app-owner failback sign-off?*" {
-      if {$env(TEST_PHASE) eq "signoff-default-no"} {send "\r"} else {send "y\r"}
-    }
-    if {$env(TEST_PHASE) ne "signoff-default-no"} {
-      expect "Sign-off app owner*" {
-        if {$env(TEST_PHASE) eq "signoff-wrong-owner"} {send "other-owner\r"} else {send "\r"}
-      }
+  if {$env(TEST_PHASE) ne "signoff-existing" && $env(TEST_PHASE) ne "signoff-wrong-owner"} {
       expect "Reusing the displayed saved deployment, health and transaction references for sign-off*"
       expect "*to confirm evidence review and approve failback*" {
-        if {$env(TEST_PHASE) eq "signoff-empty-token"} {send "\r"} else {send "SIGN-OFF-FAILBACK\r"}
+        if {$env(TEST_PHASE) eq "signoff-default-no"} {send "\r"} elseif {$env(TEST_PHASE) eq "signoff-empty-token"} {send "INVALID\r"} else {send "SIGN-OFF-FAILBACK\r"}
       }
       if {$env(TEST_PHASE) eq "signoff-success"} {
         expect "Open the separately approved retirement workflow now?*" {send "\r"}
       }
-    }
   }
 } else {
   exit 98
@@ -123,11 +151,27 @@ run_expect() {
 }
 
 TEST_ARGS='--failback DR-fixture'; TEST_PHASE=automatic; run_expect 2
-rg 'Automatic BB3 application deployment is unavailable' "$TEMP/output" >/dev/null
-[[ ! -e "$RUN_DIR/failback-app-deploy.json" && ! -e "$RUN_DIR/failback-app-deploy.log" ]]
-printf 'PASS automatic deployment option exits without action or record\n'
+rg 'Automatic SSH deployment completed its command/check sequence' "$TEMP/output" >/dev/null
+rg 'scripts/deploy.sh uat' "$TEST_SSH_CALLS" >/dev/null
+rg 'docker stack ps --filter desired-state=running' "$TEST_SSH_CALLS" >/dev/null
+rg 'docker service logs --timestamps --since 1m beepbeep_bb3-promos' "$TEST_SSH_CALLS" >/dev/null
+rg 'Paste the full log' "$TEMP/output" >/dev/null
+[[ ! -e "$RUN_DIR/failback-app-deploy.json" && -s "$RUN_DIR/failback-app-deploy.log" ]]
+[[ ! -e "$TEST_REMOTE_CALLED" ]]
+[[ ! -e "$TEST_AWS_CALLED" ]]
+printf 'PASS automatic orchestration streams stubbed local-SSH output; no AWS/network and no attestation without owner confirmation\n'
+rm "$RUN_DIR/failback-app-deploy.log"
+
+TEST_PHASE=guided; run_expect 130
+rg 'Skipped SERVICES' "$TEMP/output" >/dev/null
+rg 'Stopped before TASKS' "$TEMP/output" >/dev/null
+! rg 'docker service logs' "$TEST_SSH_CALLS" >/dev/null
+[[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
+printf 'PASS guided mode runs on Enter, skips optional checks, and n stops all later steps without attestation\n'
 
 TEST_PHASE=deploy; run_expect 0
+rg 'Manual deployment guide:' "$TEMP/output" >/dev/null
+rg 'BB3\+Deployment\+Guide#Deploying' "$TEMP/output" >/dev/null
 jq -e '.mode=="manual" and .status=="owner-confirmed" and .appOwner=="owner@example.invalid" and
   .servicesConverged==true and .primaryHost=="old-primary.example.invalid" and
   .replicaHost=="old-replica.example.invalid" and .evidenceRef=="evidence/bb3-secret-endpoints/DR-fixture/failback-app-deploy.log"' \
@@ -136,7 +180,10 @@ jq -e '.mode=="manual" and .status=="owner-confirmed" and .appOwner=="owner@exam
 rg 'synthetic-test-only|DB_PASSWORD' "$RUN_DIR/failback-app-deploy.log" && exit 1 || true
 printf 'PASS manual deployment records only saved original endpoints and restrictive sanitized log\n'
 
+cp "$RUN_DIR/failback-app-deploy.json" "$TEMP/saved-deployment.json"
+jq '.appOwner="different-owner"' "$TEMP/saved-deployment.json" > "$RUN_DIR/failback-app-deploy.json"
 TEST_PHASE=wrong-owner; run_expect 2
+cp "$TEMP/saved-deployment.json" "$RUN_DIR/failback-app-deploy.json"
 [[ ! -e "$RUN_DIR/failback-app-health.json" ]]
 printf 'PASS health owner mismatch is rejected\n'
 TEST_PHASE=missing-evidence; run_expect 2
@@ -188,9 +235,12 @@ cmp "$TEMP/saved-transaction.json" "$RUN_DIR/failback-app-e2e.json"
 printf 'PASS Enter declines sign-off while preserving the saved transaction\n'
 TEST_PHASE=signoff-empty-token; run_expect 1
 [[ ! -e "$RUN_DIR/failback-signoff.json" ]]
+cp "$RUN_DIR/failback-app-health.json" "$TEMP/saved-health.json"
+jq '.appOwner="different-owner"' "$TEMP/saved-health.json" > "$RUN_DIR/failback-app-health.json"
 TEST_PHASE=signoff-wrong-owner; run_expect 1
+cp "$TEMP/saved-health.json" "$RUN_DIR/failback-app-health.json"
 [[ ! -e "$RUN_DIR/failback-signoff.json" ]]
-printf 'PASS blank approval and mismatched owner cannot sign off\n'
+printf 'PASS invalid approval and mismatched saved owner cannot sign off\n'
 TEST_PHASE=signoff-success; run_expect 0
 jq -e '.status=="signed-off" and .appOwner=="owner@example.invalid" and
   .approval=="SIGN-OFF-FAILBACK" and .evidenceReviewedByOwner==true and .cleanupAuthorized==false and
@@ -199,11 +249,23 @@ jq -e '.status=="signed-off" and .appOwner=="owner@example.invalid" and
   .supportingEvidence.health=="health-ref-1" and .supportingEvidence.transaction=="txn-ref-1" and
   (.evidenceHashes|length)==9' \
   "$RUN_DIR/failback-signoff.json" >/dev/null
+[[ -s "$RUN_DIR/failback-report.md" && -s "$RUN_DIR/failback-report.json" ]]
+jq -e '.status=="failback-signed-off" and .report=="failback-report.md" and
+  .uploaded==false and (.reportSha256|test("^[a-f0-9]{64}$"))' \
+  "$RUN_DIR/failback-report.json" >/dev/null
+rg -F '**FAILBACK SIGNED OFF**' "$RUN_DIR/failback-report.md" >/dev/null
+rg -F 'Pending separate retirement approval' "$RUN_DIR/failback-report.md" >/dev/null
+printf 'PASS sign-off creates readable hash-linked failback result report\n'
 ! rg 'Actual supporting (deployment/convergence|app health|transaction/readback) evidence reference:' "$TEMP/output" >/dev/null
+! rg 'App owner \[|Sign-off app owner|Continue to app-owner failback sign-off' "$TEMP/output" >/dev/null
 [[ "$(stat -f '%Lp' "$RUN_DIR/failback-signoff.json")" == 600 ]]
 cp "$RUN_DIR/failback-signoff.json" "$TEMP/saved-signoff.json"
+cp "$RUN_DIR/failback-report.json" "$TEMP/saved-failback-report.json"
+cp "$RUN_DIR/failback-report.md" "$TEMP/saved-failback-report.md"
 TEST_PHASE=signoff-existing; run_expect 0
 cmp "$TEMP/saved-signoff.json" "$RUN_DIR/failback-signoff.json"
+cmp "$TEMP/saved-failback-report.json" "$RUN_DIR/failback-report.json"
+cmp "$TEMP/saved-failback-report.md" "$RUN_DIR/failback-report.md"
 cmp "$TEMP/saved-transaction.json" "$RUN_DIR/failback-app-e2e.json"
 printf 'PASS explicit sign-off reuses the transaction, saves restrictive evidence and never overwrites on retry\n'
 

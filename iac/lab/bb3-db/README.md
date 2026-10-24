@@ -204,10 +204,12 @@ and one review of the saved T0/T8/T9 evidence references. Enter for restrictions
 immutable local closeout record. Type `EDIT` instead to correct the three references before
 the same final approval. The CLI displays the RTO result with color when supported. Runner
 steps show What/Expected descriptions by default; `--verbose` remains accepted for compatibility.
-Plain `S3` runs the complete recovery from P0-S01 through T10 and P5 local packaging, preserving
-all approval and manual application-validation gates. It does not perform external deployment,
-failback or retirement. Use `S3 --to P2-S09` to stop at RDS-only readiness, or
-`S3 --from P3-S01 --to P5` to continue an existing run after P2-S09. Do not restart plain `S3` to resume.
+Plain `S3` checks saved progress and offers confirmed continuation before running recovery through
+T10/P5. Press Enter to accept the suggested action or `n` to cancel; this never approves mutations
+or app-owner evidence. It can continue an already-started failback for the displayed saved config
+run ID, but never starts a new failback or retirement automatically. `S3 --new` deliberately starts
+a separate recovery checkpoint; evidence is retained. Use `S3 --to P2-S09` for RDS-only readiness,
+or explicit `--from`/`--only` for controlled manual selection.
 Default and ranged sequences call P3-S02 with `--apply` to enter its fence/typed-approval flow;
 they never approve the change.
 One-command failback uses `S3 --failback DR-ID` for the explicit completed recovery: endpoint preview,
@@ -215,7 +217,24 @@ restored-pair fence/session closure, guarded endpoint apply, original-source rel
 confirmation, health and transaction/sign-off. Add `--list` to inspect without actions. Approval gates,
 manual deployment and data reconciliation decisions remain mandatory; this is not a new restore or
 automatic retirement. Do not combine top-level failback with step/range selectors. Existing single-step
-failback commands remain available for controlled continuation after interruption.
+failback commands remain available for controlled continuation after interruption. Rerunning the
+main `S3 --failback DR-ID` command offers the next incomplete action, distinguishing restored fencing
+from original release. Atomic ignored checkpoints cover all runner action boundaries; legacy journals
+are checked conservatively. Interrupted restore/create probes run ownership/topology before choosing
+a waiter or retry, and hardening waits for readiness before revalidation. Config drift, malformed
+evidence, wrong-run targets and changed package/sign-off hashes stop for review. No TTY means no
+automatic continuation. `--list` never writes progress or calls AWS.
+
+P3-S03 option 1 runs automatic SSH deployment for dev/uat after clean-main preflight and typed
+`DEPLOY-ENV` approval; option 2 runs it step-by-step (Enter runs, `n` stops, `s` skips optional checks;
+required-step skips prevent attestation); option 3 records an already completed manual deployment and
+prints the [BB3 Deployment Guide](https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying).
+Production SSH deployment is not permitted by this UAT-role workflow. The Docker image/test runs the same
+orchestrator with mocked remote results, network disabled, no mounts and no SSH/Docker CLI. It creates
+a temporary mock container named `bb3-deploument-ec2` by default and removes it after testing; this is
+not an EC2 instance or deployment evidence. Failback sign-off writes hash-linked `failback-report.md`/`.json`; retirement stage 8
+writes a versioned `retirement-report-<audit-time>.md` and checksum. Recovery P5 already packages a detailed
+`snapshot/summary.md` with RTO/RPO results and limitations.
 Original-quarantine release waits for the exact saved SG attachments to report active, rather than
 assuming RDS `available` proves SG convergence. It prints bounded retry progress and retains the SG on
 timeout. After live-state review, retry just P3-S01 `--failback DR-ID --release-quarantine`; original DBs
@@ -366,6 +385,10 @@ bash -n iac/tf.sh
 bash -n iac/lab/bb3-db/restore-drill.sh
 bash iac/lab/bb3-db/test-wrapper.sh
 bash iac/lab/bb3-db/test-restore-drill.sh
+python3 iac/lab/bb3-db/test-runner-progress.py
+bash iac/lab/bb3-db/test-bb3-deployment-mock.sh
+bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
+bash iac/lab/bb3-db/test-app-failback-confirm.sh
 ```
 
 The wrapper test replaces configuration loading, Git ignore checks, AWS, curl and

@@ -690,9 +690,21 @@ if [[ -n "$RETURN_REPLICA" ]]; then
 else
   printf 'Return replica: none selected\n'
 fi
-  APP_OWNER_INPUT=''
-  bb3_prompt_read APP_OWNER_INPUT "App owner name [${APP_OWNER:-required}]: "
-  APP_OWNER="${APP_OWNER_INPUT:-$APP_OWNER}"
+if [[ -z "$APP_OWNER" && "$MODE" == failback && -e "$LEDGER/$RUN_ID/fence.json" ]]; then
+  APP_OWNER="$(jq -er --arg run "$RUN_ID" --arg account "$ACCOUNT" --arg region "$REGION" \
+    --arg primary "$RETURN_PRIMARY" --arg replica "$RETURN_REPLICA" \
+    --arg target "$ACTIVE_PRIMARY" --arg target_replica "$ACTIVE_REPLICA" '
+    select(.runId==$run and .mode=="cutover" and .account==$account and .region==$region and
+      .status=="owner-confirmed" and .activePrimary==$primary and (.activeReplica // "")==$replica and
+      .returnPrimary==$target and (.returnReplica // "")==$target_replica) |
+    .appOwner | select(type=="string" and test("\\S"))' "$LEDGER/$RUN_ID/fence.json")" \
+    || { echo 'Saved recovery app owner does not match this failback scope.' >&2; exit 2; }
+fi
+if [[ -z "$APP_OWNER" ]]; then
+  bb3_prompt_read APP_OWNER 'App owner name: '
+else
+  printf 'Reusing saved app owner: %s\n' "$APP_OWNER"
+fi
 [[ -n "$APP_OWNER" ]] || { echo 'App owner is required.' >&2; exit 2; }
 
 FENCE_METHOD=none

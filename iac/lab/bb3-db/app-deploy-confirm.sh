@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=bb3-prompt.sh
 source "$HERE/bb3-prompt.sh"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-CONFIG="$ROOT/iac/sandbox.env"
+CONFIG="${BB3_SANDBOX_CONFIG:-$ROOT/iac/sandbox.env}"
 LEDGER="${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}"
 RUN_SELECTION=latest
 FAILBACK=false
@@ -31,6 +31,13 @@ if [[ "$FAILBACK" == true ]]; then
   RUN_ID="$RUN_SELECTION"
   ACCOUNT="$(jq -er '.account' <<< "$RUN")"
   REGION="$(jq -er '.region' <<< "$RUN")"
+  [[ -f "$CONFIG" ]] || { echo 'Missing ignored sandbox config needed to select the deployment environment.' >&2; exit 2; }
+  git -C "$ROOT" check-ignore -q "$CONFIG" || { echo 'Sandbox config must be Git-ignored.' >&2; exit 2; }
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+  [[ "${TF_VAR_account_id:-}" == "$ACCOUNT" && "${TF_VAR_region:-}" == "$REGION" \
+    && "${ENV:-}" =~ ^(dev|uat)$ ]] || { echo 'Deployment environment/config does not match the saved failback run.' >&2; exit 2; }
+  DEPLOY_ENV="$ENV"
 else
   [[ -f "$CONFIG" ]] || { echo 'Missing ignored iac/sandbox.env.' >&2; exit 2; }
   # shellcheck source=/dev/null
@@ -46,6 +53,7 @@ else
     || { echo 'Unset exported AWS credentials.' >&2; exit 2; }
   CALLER="$(aws --profile "$PROFILE" --region "$REGION" --no-cli-pager sts get-caller-identity --query Account --output text)"
   [[ "$CALLER" == "$ACCOUNT" ]] || { echo 'AWS caller does not match the configured sandbox.' >&2; exit 2; }
+  DEPLOY_ENV="$ENV"
   RUN="$(python3 "$HERE/secret-endpoints.py" --show-run "$LEDGER" "$RUN_SELECTION" "$ACCOUNT" "$REGION")"
   RUN_ID="$(jq -er '.runId' <<< "$RUN")"
   FENCE="$LEDGER/$RUN_ID/fence.json"
@@ -57,24 +65,34 @@ fi
 PRIMARY_HOST="$(jq -er '.primaryHost // .newHost' <<< "$RUN")"
 REPLICA_HOST="$(jq -er '.replicaHost // .newReplicaHost' <<< "$RUN")"
 printf 'DR run: %s\nPrimary: %s\nReplica: %s\n' "$RUN_ID" "$PRIMARY_HOST" "$REPLICA_HOST"
-printf 'Deployment mode:\n  1. Automatic deployment script (unavailable; no action will run)\n  2. Manual deployment already completed\n'
-bb3_prompt_read DEPLOY_MODE 'Select 1 or 2: '
+printf 'Deployment mode:\n  1. Automatic deployment over local SSH\n  2. Guided deployment over local SSH (Enter=run, n=stop, s=skip optional checks)\n  3. Manual deployment already completed\n'
+bb3_prompt_read DEPLOY_MODE 'Select 1, 2 or 3: '
 case "$DEPLOY_MODE" in
   1)
-    echo 'Automatic BB3 application deployment is unavailable. No deployment was run or recorded.' >&2
-    exit 2
+    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" automatic
     ;;
-  2) ;;
+  2)
+    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" guided
+    ;;
+  3) ;;
   *) echo 'Invalid deployment mode.' >&2; exit 2 ;;
 esac
-if [[ "$FAILBACK" == true ]]; then
-  SAVED_OWNER="$(jq -er '.failbackFence.appOwner' <<< "$RUN")"
-  bb3_prompt_read APP_OWNER "App owner name [${SAVED_OWNER}]: "
-  APP_OWNER="${APP_OWNER:-$SAVED_OWNER}"
+if [[ "$DEPLOY_MODE" == 3 ]]; then
+  cat <<'EOF'
+Manual deployment guide:
+https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying
+Confirm the approved environment/host and completed deployment, then provide sanitized logs below.
+EOF
 else
-  bb3_prompt_read APP_OWNER 'App owner name: '
+  echo 'Automatic SSH deployment completed its command/check sequence. Review the live output; deployment evidence is still owner-confirmed below.'
+fi
+if [[ "$FAILBACK" == true ]]; then
+  APP_OWNER="$(jq -er '.failbackFence.appOwner | select(type=="string" and test("\\S"))' <<< "$RUN")"
+else
+  APP_OWNER="$(jq -er '.appOwner // empty' "$FENCE")"
 fi
 [[ -n "$APP_OWNER" ]] || { echo 'App owner is required.' >&2; exit 2; }
+printf 'Reusing saved app owner: %s\n' "$APP_OWNER"
 RUN_DIR="$LEDGER/$RUN_ID"
 DEPLOY_LOG="$RUN_DIR/app-deploy.log"
 DEPLOY_RECORD="$RUN_DIR/app-deploy.json"
