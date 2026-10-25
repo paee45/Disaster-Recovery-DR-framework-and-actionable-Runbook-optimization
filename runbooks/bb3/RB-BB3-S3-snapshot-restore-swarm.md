@@ -347,6 +347,14 @@ only, not real deployment or app behavior. To run it where Docker is available:
 DOCKER_CONTEXT=colima-dr-framework bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
 ```
 
+To also run the scripted guided interaction test (Enter for required steps, `s` for SERVICES,
+`n` before TASKS), run:
+
+```bash
+BB3_DOCKER_TEST_GUIDED=1 DOCKER_CONTEXT=colima-dr-framework \
+  bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
+```
+
 The test highlights build phases and each Dockerfile layer, showing only the last few layer lines
 to keep the terminal readable. Full image-build and SSH-session logs are retained in ignored
 `evidence/bb3-deployment-mock/<timestamp>-<pid>/`; `NO_COLOR` disables terminal color.

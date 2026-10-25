@@ -45,6 +45,7 @@ fi
 
 WAIT_SECONDS="${BB3_DEPLOY_WAIT_SECONDS:-900}"
 POLL_SECONDS="${BB3_DEPLOY_POLL_SECONDS:-5}"
+MOCK_GUIDED_INDEX=0
 [[ "$WAIT_SECONDS" =~ ^[0-9]+$ && "$WAIT_SECONDS" -ge 1 && "$WAIT_SECONDS" -le 3600 \
   && "$POLL_SECONDS" =~ ^[0-9]+$ && "$POLL_SECONDS" -ge 1 && "$POLL_SECONDS" -le 60 ]] \
   || { echo 'Deployment wait timeout/poll interval is outside the allowed range.' >&2; exit 2; }
@@ -80,6 +81,24 @@ remote_output() {
     ssh -F "$BB3_DEPLOYMENT_SSH_CONFIG" "$HOST" "$command"
   else
     ssh "$HOST" "$command"
+  fi
+}
+
+read_guided_response() {
+  local variable="$1" prompt="$2" action
+  if [[ "$MOCK_SSH" == true && "${BB3_DOCKER_GUIDED_ACTIONS+x}" == x ]]; then
+    local -a actions=()
+    IFS=',' read -r -a actions <<< "$BB3_DOCKER_GUIDED_ACTIONS"
+    action="${actions[$MOCK_GUIDED_INDEX]:-}"
+    MOCK_GUIDED_INDEX=$((MOCK_GUIDED_INDEX + 1))
+    case "$action" in
+      run) printf -v "$variable" '%s' ''; printf '[MOCK INPUT] %s=run\n' "$variable" ;;
+      skip) printf -v "$variable" '%s' s; printf '[MOCK INPUT] %s=skip\n' "$variable" ;;
+      stop) printf -v "$variable" '%s' n; printf '[MOCK INPUT] %s=stop\n' "$variable" ;;
+      *) echo 'Mock guided input exhausted/invalid; refusing to assume Enter.' >&2; return 2 ;;
+    esac
+  else
+    bb3_prompt_read "$variable" "$prompt"
   fi
 }
 
@@ -120,7 +139,7 @@ run_step() {
   local key="$1" label="$2" command="$3" required="$4" response=''
   if [[ "$MODE" == guided && ( "$MOCK" == false || "$MOCK_SSH" == true ) ]]; then
     printf '\n[GUIDED] Next step: %s. Enter runs, n stops, s skips optional checks.\n' "$label"
-    bb3_prompt_read response "[$key] $label [Enter=run, n=stop, s=skip]: "
+    read_guided_response response "[$key] $label [Enter=run, n=stop, s=skip]: " || return $?
     case "$response" in
       ''|y|Y|yes|YES) ;;
       n|N|no|NO) echo "Stopped before $key; no later commands will run." >&2; return 130 ;;
@@ -183,7 +202,8 @@ wait_for_stack() {
 if [[ "$MODE" == guided && ( "$MOCK" == false || "$MOCK_SSH" == true ) ]]; then
   response=''
   printf '\n[GUIDED] Next step: verify all desired tasks and service replicas. Enter runs, n stops, s skips and leaves deployment incomplete.\n'
-  bb3_prompt_read response '[VERIFY] Wait for all desired tasks and replicas to converge [Enter=run, n=stop, s=skip]: '
+  read_guided_response response '[VERIFY] Wait for all desired tasks and replicas to converge [Enter=run, n=stop, s=skip]: ' \
+    || exit $?
   case "$response" in
     ''|y|Y|yes|YES) wait_for_stack || exit $? ;;
     n|N|no|NO) echo 'Stopped before convergence check; no deployment attestation.' >&2; exit 130 ;;

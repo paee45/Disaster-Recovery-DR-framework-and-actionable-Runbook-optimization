@@ -4,6 +4,7 @@ COPY bb3-prompt.sh /opt/bb3/bb3-prompt.sh
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	git openssh-client openssh-server coreutils grep util-linux \
+	expect \
 	&& rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 2000 --user-group --create-home --shell /bin/bash mock \
 	&& passwd -d mock \

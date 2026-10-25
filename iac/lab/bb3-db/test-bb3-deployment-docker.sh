@@ -22,6 +22,7 @@ cleanup() {
   rm -rf "$TEMP"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 mkdir -p "$LOG_DIR"
 chmod 700 "$LOG_ROOT" "$LOG_DIR"
@@ -76,33 +77,44 @@ fi
 show_build_steps
 DEPLOY_ENV="${BB3_DEPLOYMENT_ENV:-uat}"
 DEPLOY_MODE="${BB3_DEPLOYMENT_MODE:-automatic}"
+EXPECTED_EXIT="${BB3_DOCKER_EXPECTED_EXIT:-0}"
+GUIDED_ACTIONS="${BB3_DOCKER_TEST_GUIDED_ACTIONS:-}"
 [[ "$DEPLOY_ENV" =~ ^(dev|uat|prod)$ && "$DEPLOY_MODE" =~ ^(automatic|guided)$ ]] \
   || { echo 'Docker mock environment/mode is invalid.' >&2; exit 2; }
+if [[ "$DEPLOY_MODE" == guided && -z "${BB3_DOCKER_EXPECTED_EXIT:-}" ]]; then EXPECTED_EXIT=130; fi
+if [[ "$DEPLOY_MODE" == guided && -z "$GUIDED_ACTIONS" && ! -t 0 ]]; then
+  echo 'Guided Docker mock requires an interactive terminal or explicit test responses.' >&2
+  exit 2
+fi
 progress '3/3' "Starting $CONTAINER with no network or host mounts; full SSH output goes to docker-ssh-session.log."
-CONTAINER_ID="$("${DOCKER[@]}" create --name "$CONTAINER" --network none --read-only --cap-drop ALL \
+CREATE_ARGS=(--name "$CONTAINER" --network none --read-only --cap-drop ALL \
   --cap-add SETUID --cap-add SETGID --cap-add SYS_CHROOT \
-  --security-opt no-new-privileges --pids-limit 48 --interactive --tty \
+  --security-opt no-new-privileges --pids-limit 48 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
-  --tmpfs /home/mock/projects:rw,nosuid,nodev,exec,size=16m,uid=2000,gid=2000,mode=755 \
+  --tmpfs '/home/mock/projects:rw,nosuid,nodev,exec,size=16m,uid=2000,gid=2000,mode=755' \
   --env ENV="$DEPLOY_ENV" --env BB3_DEPLOYMENT_CONTAINER="$CONTAINER" \
   --env BB3_DEPLOYMENT_HOST=uat-1.app.beepte.ch --env BB3_DOCKER_STACK_NAME=beepbeep \
   --env BB3_DEPLOYMENT_MODE="$DEPLOY_MODE" \
-  --env BB3_DEPLOY_WAIT_SECONDS=30 "$IMAGE")"
-RUN_EXIT=0
-if [[ "${BB3_DOCKER_MOCK_INPUT+x}" == x ]]; then
-  if printf '%b' "$BB3_DOCKER_MOCK_INPUT" | "${DOCKER[@]}" start --attach --interactive "$CONTAINER_ID" 2>&1 | tee "$RUN_LOG"; then
-    RUN_EXIT=0
-  else
-    RUN_EXIT=$?
-  fi
-else
-  if "${DOCKER[@]}" start --attach --interactive "$CONTAINER_ID" 2>&1 | tee "$RUN_LOG"; then
-    RUN_EXIT=0
-  else
-    RUN_EXIT=$?
-  fi
+  --env BB3_DEPLOY_WAIT_SECONDS=30)
+if [[ "$DEPLOY_MODE" == guided && -n "$GUIDED_ACTIONS" ]]; then
+  CREATE_ARGS+=(--env "BB3_DOCKER_GUIDED_ACTIONS=$GUIDED_ACTIONS")
+elif [[ "$DEPLOY_MODE" == guided ]]; then
+  CREATE_ARGS+=(--interactive --tty)
 fi
-if [[ "$RUN_EXIT" != "${BB3_DOCKER_EXPECTED_EXIT:-0}" ]]; then
+CONTAINER_ID="$("${DOCKER[@]}" create "${CREATE_ARGS[@]}" "$IMAGE")"
+RUN_EXIT=0
+if [[ "$DEPLOY_MODE" == guided && -n "$GUIDED_ACTIONS" ]]; then
+  if "${DOCKER[@]}" start --attach "$CONTAINER_ID" > "$RUN_LOG" 2>&1; then RUN_EXIT=0; else RUN_EXIT=$?; fi
+elif [[ "$DEPLOY_MODE" == guided ]]; then
+  progress 'GUIDED INPUT' 'Attached directly to Docker TTY; Enter/n/s keys go to the guided prompts.'
+  if "${DOCKER[@]}" start --attach --interactive "$CONTAINER_ID"; then RUN_EXIT=0; else RUN_EXIT=$?; fi
+  "${DOCKER[@]}" logs "$CONTAINER_ID" > "$RUN_LOG" 2>&1
+elif "${DOCKER[@]}" start --attach "$CONTAINER_ID" > "$RUN_LOG" 2>&1; then
+  RUN_EXIT=0
+else
+  RUN_EXIT=$?
+fi
+if [[ "$RUN_EXIT" != "$EXPECTED_EXIT" ]]; then
   progress 'FAIL' "Mock SSH run failed; full log: $RUN_LOG"
   tail -n 24 "$RUN_LOG" >&2
   exit 1
@@ -129,10 +141,15 @@ if [[ "$DEPLOY_MODE" == automatic ]]; then
   )
 else
   expected_output+=(
+    '[MOCK INPUT] Enter PULL'
     '[PULL] Pull approved main updates'
+    '[MOCK INPUT] Enter DEPLOY'
     '[DEPLOY] Run uat deployment script'
+    '[MOCK INPUT] Enter VERIFY'
     '[VERIFY] Wait for all desired tasks and replicas to converge'
+    '[MOCK INPUT] s SERVICES'
     'Skipped SERVICES.'
+    '[MOCK INPUT] n TASKS'
     'Stopped before TASKS'
   )
   ! grep -F 'docker service logs' "$RUN_LOG" >/dev/null || {
@@ -154,8 +171,9 @@ printf 'Full build log: %s\nFull SSH session log: %s\n' "$BUILD_LOG" "$RUN_LOG"
 if [[ "${BB3_DOCKER_TEST_GUIDED:-0}" == 1 ]]; then
   progress 'GUIDED TEST' 'Second SSH session: Enter runs required steps, s skips optional SERVICES, n stops before TASKS.'
   BB3_DEPLOYMENT_MODE=guided \
+    BB3_DOCKER_TEST_GUIDED=0 \
     BB3_DOCKER_EXPECTED_EXIT=130 \
-    BB3_DOCKER_MOCK_INPUT=$'\n\n\ns\nn\n' \
+    BB3_DOCKER_TEST_GUIDED_ACTIONS=run,run,run,skip,stop \
     bash "$HERE/test-bb3-deployment-docker.sh"
   exit $?
 fi
