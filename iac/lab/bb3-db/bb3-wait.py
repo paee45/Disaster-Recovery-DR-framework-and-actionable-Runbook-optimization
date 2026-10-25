@@ -26,8 +26,12 @@ def run_wait(label, command, stream=None, clock=None):
         elapsed = elapsed_text(clock() - started)
         shown_label = label
         suffix = f" | elapsed {elapsed}"
-        if result is not None:
-            suffix += f" | {result}"
+        if result == "complete":
+            suffix = f" | completed in {elapsed}"
+        elif result is not None:
+            suffix = f" | {result} after {elapsed}"
+        elif not interactive:
+            suffix = f" | started{suffix}"
         if interactive:
             width = max(1, shutil.get_terminal_size((80, 24)).columns - 1)
             label_width = max(0, width - len(suffix))

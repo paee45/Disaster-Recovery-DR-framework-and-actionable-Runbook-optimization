@@ -14,12 +14,13 @@ RECOVERY = ["P0-S01", "P0-S02", "P0-S03", "P1-S01-1", "P1-S01-2", "P2-S00",
             "P2-S07", "P2-S08", "P2-S09", "P3-S01", "P3-S02", "P3-S03",
             "P4-S01", "P4-S02", "P4-G4", "P5"]
 FAILBACK = ["preview", "fence", "endpoints", "release", "deployment", "health", "signoff"]
-JOURNALS = ("cutover.json", "network-fence.json", "incident.json", "fence.json",
+JOURNALS = ("cutover.json", "network-fence.json", "incident.json", "fence.json", "snapshot-recovery.json",
             "app-deploy.json", "app-health.json", "app-e2e.json", "closeout.json", "evidence-package.json",
             "failback-network-fence.json", "failback-fence.json", "failback.json",
             "failback-app-deploy.json", "failback-app-health.json", "failback-app-e2e.json", "failback-signoff.json")
 WRITES = {
     "P0-S03": {"network-fence.json"}, "P1-S01-2": {"incident.json"},
+    "P2-S01": {"snapshot-recovery.json"},
     "P3-S01": {"fence.json"}, "P3-S02": {"cutover.json"}, "P3-S03": {"app-deploy.json"},
     "P4-S01": {"app-health.json"}, "P4-S02": {"app-e2e.json"},
     "P4-G4": {"closeout.json"}, "P5": {"evidence-package.json"},
@@ -227,14 +228,32 @@ def plan(ledger, context, mode, inventory=None):
         changed = sorted(key for key in set(context) | set(state.get("context", {}))
                          if context.get(key) != state.get("context", {}).get(key))
         raise ValueError("Saved runner scope/configuration differs (" + ", ".join(changed) + "); review it before resuming.")
+    failback_plan = None
+    released_in_failback = False
+    if mode == "recovery" and any(name.startswith("failback-") or name == "failback.json" for name in records):
+        failback_plan = plan(ledger, context, "failback", inventory)
+        failback_path = state_path(ledger, context, "failback")
+        if failback_path.exists():
+            failback_state = regular_json(failback_path)
+            identity = {key: context.get(key) for key in ("runId", "account", "region")}
+            network = records.get("network-fence.json")
+            released_in_failback = (
+                "release" in failback_state.get("completed", [])
+                and matching(network, identity, status="released", mode="cutover",
+                             activePrimary=context.get("primary"), activeReplica=context.get("replica"))
+                and evidence_hashes(ledger, context).get("network-fence.json")
+                == failback_state.get("evidenceHashes", {}).get("network-fence.json")
+            )
     if state:
         current_hashes = evidence_hashes(ledger, context)
         allowed_changes = WRITES.get(state.get("pending"), set())
         for name, digest in state.get("evidenceHashes", {}).items():
+            if name == "network-fence.json" and released_in_failback:
+                continue
             if name not in allowed_changes and current_hashes.get(name) != digest:
                 raise ValueError("Completed evidence changed since checkpoint: " + name)
-    if mode == "recovery" and any(name.startswith("failback-") or name == "failback.json" for name in records):
-        return plan(ledger, context, "failback", inventory)
+    if failback_plan is not None:
+        return failback_plan
     identity = {key: context.get(key) for key in ("runId", "account", "region")}
     if mode == "failback":
         if "failback-signoff.json" in records:

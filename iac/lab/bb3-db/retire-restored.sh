@@ -9,7 +9,53 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 # shellcheck source=bb3-prompt.sh
 source "$HERE/bb3-prompt.sh"
 die() { echo "Retirement blocked: $*" >&2; exit 2; }
-progress() { printf '[%s] [%s/8] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >&2; }
+LAST_RETIREMENT_STAGE=''
+progress() {
+  local stage="$1" description="$2" title what expected heading='' label='' reset=''
+  if [[ "$stage" != "$LAST_RETIREMENT_STAGE" ]]; then
+    case "$stage" in
+      1)
+        title='IDENTITY AND FAILBACK SIGN-OFF'
+        what="Verify the configured sandbox account/profile and the explicit run's immutable failback sign-off, then load its retirement scope."
+        expected='The caller, app-owner evidence and original/restored DB identities match the signed-off run. No AWS resource is changed; missing or mismatched approval blocks retirement.' ;;
+      2)
+        title='LIVE SAFETY AND SAVED RESOURCE SCOPE'
+        what='Inspect the original serving endpoints, restored DB identities/topology/tags and run-owned quarantine. Create or validate the local retirement journal.'
+        expected='The app still points to the original pair; the restored resources match their pinned identities and isolation. Deletion protection and unexpected states remain blockers, not settings to repair automatically.' ;;
+      3)
+        title='REVIEW AND APPROVE IRREVERSIBLE RETIREMENT'
+        what='Show exactly which restored DBs, quarantine SG and recovery backups will be removed. Reuse the saved owner and request a retention-approval reference plus RETIRE-RESTORED-PAIR.'
+        expected='Explicit approval is saved before any deletion. Original DBs/backups, the source restore snapshot and evidence stay outside deletion scope. Enter or a wrong token cancels; retry does not bypass this review.' ;;
+      4)
+        title='TEMPORARY SAFETY SNAPSHOT'
+        what='Create or resume the run-owned primary safety snapshot and verify it becomes available before DB deletion. If backup purge already started, verify retirement instead of recreating it.'
+        expected='The snapshot identity and scope are verified before continuing. This is temporary recovery data: the approved later purge removes it; it is not a permanently retained backup.' ;;
+      5)
+        title='RETIRE THE RESTORED REPLICA'
+        what='Recheck serving endpoints and restored-resource guards, then request or resume deletion of only the saved restored replica.'
+        expected='Replica absence is confirmed before primary deletion. Already-requested deletion resumes its waiter; unexpected disappearance, identity drift or an unsafe lifecycle state stops later actions.' ;;
+      6)
+        title='RETIRE THE RESTORED PRIMARY'
+        what='Recheck serving endpoints, primary identity/quarantine and replica absence, then request or resume deletion of only the saved restored primary.'
+        expected="The primary is available, or already deleting after this retirement's recorded request. A modifying primary blocks deletion: wait for the approved change to finish, review its state, then retry this same run. No force-delete or automatic repair occurs." ;;
+      7)
+        title='DETACHED QUARANTINE AND APPROVED BACKUP PURGE'
+        what='Verify both restored DBs and quarantine ENI attachments are absent, remove the detached run-owned SG, then purge only the approved restored-pair automated backups and temporary safety snapshot.'
+        expected='Every scoped resource is verified absent before proceeding. Originals and their backups are retained. A completed retry verifies absence without repeating deletions; interrupted purge resumes from the saved journal.' ;;
+      8)
+        title='FINAL SCOPED AUDIT AND RESULT REPORT'
+        what='Audit attributable regional snapshots, quarantine attachments and run-tagged resources. Any additional restored-pair manual snapshot purge requires its separate displayed scope approval.'
+        expected='No attributable leftovers remain in the audited account/region before an 8/8 completion report is written. Ambiguous ownership or incomplete inventory blocks success; unrelated, cross-region and unknown untagged resources are not certified or auto-deleted.' ;;
+    esac
+    if [[ -t 2 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
+      heading=$'\033[1;35m'; label=$'\033[1;36m'; reset=$'\033[0m'
+    fi
+    printf '\n%s== RETIREMENT %s/8 | %s ==%s\n' "$heading" "$stage" "$title" "$reset" >&2
+    printf '%s  What:%s %s\n%s  Expected:%s %s\n' "$label" "$reset" "$what" "$label" "$reset" "$expected" >&2
+    LAST_RETIREMENT_STAGE="$stage"
+  fi
+  printf '[%s] [%s/8] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$stage" "$description" >&2
+}
 retirement_summary() {
   local highlight='' reset=''
   if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then

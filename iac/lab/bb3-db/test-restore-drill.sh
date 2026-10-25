@@ -227,6 +227,33 @@ while IFS= read -r step; do
 done < <(awk '$1 ~ /^P[0-9]/ {print $1}' <<< "$steps")
 echo 'PASS every step has What/Expected descriptions; default output and RDS-only handoff are visible'
 
+TEST_RUNNER="$HERE/bb3-run.sh" expect <<'EXPECT'
+set timeout 20
+log_user 0
+foreach appearance {color no-color dumb} {
+  set env(TERM) xterm
+  unset -nocomplain env(NO_COLOR)
+  if {$appearance eq "no-color"} {set env(NO_COLOR) ""}
+  if {$appearance eq "dumb"} {set env(TERM) dumb}
+  spawn -noecho bash $env(TEST_RUNNER) S3 --only P2-S09
+  expect {
+    eof {}
+    timeout {puts stderr "FAIL step heading test timed out"; exit 1}
+  }
+  set output $expect_out(buffer)
+  set result [wait]
+  if {[lindex $result 3] != 0} {puts stderr "FAIL heading fixture: $output"; exit 1}
+  set heading [string first "\033\[1;35m== P2-S09 ==\033\[0m" $output]
+  set labels [string first "\033\[1;36m  What:" $output]
+  if {$appearance eq "color"} {
+    if {$heading < 0 || $labels < 0} {puts stderr "FAIL distinct heading/label colors: $output"; exit 1}
+  } elseif {$heading >= 0 || $labels >= 0 || [string first "== P2-S09 ==" $output] < 0} {
+    puts stderr "FAIL plain heading for $appearance: $output"; exit 1
+  }
+}
+puts "PASS bold step headings differ from descriptions; NO_COLOR and dumb terminals stay plain"
+EXPECT
+
 range_steps="$(bash "$HERE/bb3-run.sh" S3 --from P2-S06 --to P2-S09 --list)"
 [[ "$range_steps" == $'Selected BB3 steps (no actions run):\n  P2-S06\n  P2-S07\n  P2-S08\n  P2-S09' ]]
 range_steps="$(bash "$HERE/bb3-run.sh" S3 --to P1-S01-2 --from P1-S01-1 --list)"
@@ -367,7 +394,7 @@ for description in \
   'What: Fence the restored DB pair for failback' \
   'What: Apply failback: return both app secret endpoints' \
   'What: Release the original DB pair quarantine' \
-  'What: Record manual app deployment and service convergence on the original DB endpoint pair.' \
+  'What: Run guarded automatic/guided SSH deployment or confirm manual deployment on the original DB endpoint pair.' \
   'What: Record app-owner health confirmation on the original primary/replica endpoint pair.' \
   'What: Record or reuse the original-path business transaction/readback'; do
   grep -F "$description" "$TEMP/full-failback.txt" >/dev/null

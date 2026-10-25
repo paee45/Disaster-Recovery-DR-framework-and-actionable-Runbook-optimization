@@ -31,7 +31,7 @@ class WaitTests(unittest.TestCase):
         self.assertIn("elapsed 00:00:02", output.getvalue())
         self.assertEqual(output.getvalue().count("\n"), 1)
         self.assertGreaterEqual(output.getvalue().count("\r"), 3)
-        self.assertIn("complete", output.getvalue())
+        self.assertTrue(output.getvalue().endswith(" | completed in 00:00:03\n"))
         self.assertEqual(launch.call_args.args[0][-3:], ["aws", "--profile", "fixture"])
 
     def test_redirected_output_does_not_emit_tick_lines(self):
@@ -46,6 +46,20 @@ class WaitTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count("\n"), 2)
         self.assertNotIn("\r", output.getvalue())
         self.assertIn("stopped (exit 7)", output.getvalue())
+
+    def test_redirected_success_has_distinct_start_and_persistent_result(self):
+        child = Mock()
+        child.wait.return_value = 0
+        child.poll.return_value = 0
+        output = io.StringIO()
+        with patch.object(MODULE.subprocess, "Popen", return_value=child):
+            result = MODULE.run_wait("Source quarantine: primary", ["fixture"], output,
+                                     clock=Mock(side_effect=[0, 0, 65]))
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue().splitlines(), [
+            "Source quarantine: primary | started | elapsed 00:00:00",
+            "Source quarantine: primary | completed in 00:01:05",
+        ])
 
     def test_interrupt_terminates_owned_wait_process(self):
         child = Mock(pid=12345)
@@ -74,7 +88,7 @@ class WaitTests(unittest.TestCase):
         self.assertEqual(result, 0)
         for line in output.getvalue().split("\r")[1:]:
             self.assertLessEqual(len(line.rstrip("\n")), 39)
-        self.assertIn("00:00:00 | complete", output.getvalue())
+        self.assertIn("completed in 00:00:00", output.getvalue())
 
     def test_termination_signals_use_interrupt_cleanup(self):
         with patch.object(MODULE.signal, "signal") as register, \

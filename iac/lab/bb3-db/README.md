@@ -27,13 +27,20 @@ endpoints, restored resource IDs, topology and run tags. It shows the exact DB/S
 scope before matching-owner approval, a retention decision reference and `RETIRE-RESTORED-PAIR`.
 Enter cancels. This one approval includes permanent removal of the restored pair's recovery data;
 no second backup approval is required. It creates and verifies a temporary manual safety snapshot,
-prints timestamped stages 1-7 and waiter start/completion messages (not a percentage),
+prints timestamped stages 1-8 and waiter start/completion messages (not a percentage),
 deletes the restored replica before the primary, then deletes only their run-owned quarantine
 SG after DB/ENI detachment. Finally it deletes automated backups identified by the exact saved
 restored DB resource IDs, and deletes the verified retirement-created snapshot. It retains original
 DBs and their backups, the source restore snapshot, unrelated snapshots/SGs/networking/secrets and
 evidence. Cross-account/Region or mismatched backup identities block deletion. This is a manual
 command, not a scheduled job.
+Each entered stage shows a bold magenta title and cyan What/Expected labels once,
+explaining scope, success criteria, approval requirements and stop/retry behavior.
+Stages cover identity/sign-off, live safety, retirement approval, safety snapshot,
+replica deletion, primary deletion, quarantine/backup purge, then the final scoped audit.
+`NO_COLOR`, dumb terminals and redirected output retain plain explanations. At stage 6,
+`modifying` blocks primary deletion: review the in-progress approved change, wait for
+completion, then resume the same run; completed replica deletion is not repeated.
 No new Terraform stack is used. DB deletion protection is never disabled automatically.
 The ignored `retirement.json` pins resources and records progress; rerun the exact command after
 an interrupted waiter. Unexpected disappearance or identity/evidence drift stops for investigation.
@@ -202,7 +209,33 @@ P4-G4 records the incident approver and actual declaration time T10, without a t
 and one review of the saved T0/T8/T9 evidence references. Enter for restrictions means
 `none`; type `DECLARE-RESTORED` to attest the references were reviewed and finalize the
 immutable local closeout record. Type `EDIT` instead to correct the three references before
-the same final approval. The CLI displays the RTO result with color when supported. Runner
+the same final approval. The CLI highlights the stage and RTO result with color when supported,
+and explains T0 impact, T1 declaration, T8 health, T9 business validation and T10 approval.
+Each milestone has a bold title, its own highlighted UTC time, elapsed-time metric and
+plain-English explanation. T0 means T-zero (impact), not TO; T8 is the successful app
+health timestamp, while RTO is the duration from T0 to T8.
+Service RTO ends at T8; the summary also shows time through T9 and any missed-target margin.
+BB3 defaults to a 60-minute RTO because recovery includes both primary and replica. Set
+`export BB3_RTO_TARGET_MIN=60` in ignored `iac/sandbox.env`; use `45` or `30` for a stricter
+BB3 target. Other framework workflows retain their 30-minute default. The target and
+computed metrics are frozen in new approvals, so later config changes do not reclassify
+an approved run or its package. Legacy approvals retain their original 30-minute target.
+A standalone numeric `export BB3_RTO_TARGET_MIN=...` line is excluded from the runner's
+operational config hash, so changing only that reporting policy does not block resume.
+All other config drift remains guarded. P4-G4 prints its selected run ID before checking
+for an existing immutable approval and explicitly reports when that approval already
+exists; it is not a request to repeat recovery sign-off. For failback, supply that actual `DR-...` value;
+`{{COMPLETED_CUTOVER_DR_ID}}` is documentation placeholder text, not a usable run ID.
+
+For new guided restores, P2-S01 saves immutable `snapshot-recovery.json` from the selected
+AWS snapshot metadata, bound to the run, source DB and restored primary. P4-G4 reports
+`RPO: VERIFIED (snapshot-based)` and PASS/MISS using **T0 minus SnapshotCreateTime**, with
+a 24-hour target. This verifies the agreed daily-snapshot-age measure; it does not certify
+zero data loss or transaction-level completeness. DB/business data-gap verification is
+deferred; existing app health and business transaction confirmation gates remain.
+Runs without saved snapshot metadata show NOT VERIFIED rather than guessing from current
+discovery settings. Existing immutable approvals/packages are not backfilled or rewritten.
+Redirected output, `NO_COLOR` and dumb terminals remain plain. Existing records are not rewritten. Runner
 steps show What/Expected descriptions by default; `--verbose` remains accepted for compatibility.
 Plain `S3` checks saved progress and offers confirmed continuation before running recovery through
 T10/P5. Press Enter to accept the suggested action or `n` to cancel; this never approves mutations
@@ -222,8 +255,12 @@ main `S3 --failback DR-ID` command offers the next incomplete action, distinguis
 from original release. Atomic ignored checkpoints cover all runner action boundaries; legacy journals
 are checked conservatively. Interrupted restore/create probes run ownership/topology before choosing
 a waiter or retry, and hardening waits for readiness before revalidation. Config drift, malformed
-evidence, wrong-run targets and changed package/sign-off hashes stop for review. No TTY means no
-automatic continuation. `--list` never writes progress or calls AWS.
+records, wrong-run targets, changed package/sign-off hashes and untracked evidence edits
+remain blocked. A source-quarantine release legitimately
+updates `network-fence.json` during failback. The main command accepts that change only when
+the matching failback checkpoint records completed release and pins the exact current hash
+for the same source pair; all other historical recovery hashes remain checked.
+No TTY means no automatic continuation. `--list` never writes progress or calls AWS.
 
 P3-S03 option 1 runs automatic SSH deployment for dev/uat after clean-main preflight and typed
 `DEPLOY-ENV` approval; option 2 runs it step-by-step (Enter runs, `n` stops, `s` skips optional checks;
@@ -236,12 +273,31 @@ no host mounts and a synthetic Git repo/fake Docker results. It creates a tempor
 Set `BB3_DOCKER_LOCAL_CONTEXT` in the ignored sandbox config/current environment to route P3-S03 to this
 Docker SSH mock; Docker errors never fall back to SSH. When blank/unset, P3-S03 uses real SSH. The committed
 example leaves it blank; set it to `colima-dr-framework` only to select the local mock. `BB3_DEPLOYMENT_HOST` is validated against `ENV`, and
-`BB3_DOCKER_STACK_NAME` defaults to `beepbeep`. Mock output shows simulated passes but never records deployment evidence. Failback sign-off writes hash-linked
+`BB3_DOCKER_STACK_NAME` defaults to `beepbeep`. Mock PASS alone never records deployment evidence. Failback sign-off writes hash-linked
 `failback-report.md`/`.json`; retirement stage 8
 writes a versioned `retirement-report-<audit-time>.md` and checksum. Recovery P5 already packages a detailed
 `snapshot/summary.md` with RTO/RPO results and limitations.
 Append `--real-ssh` to one `--only P3-S03` invocation to override the configured Docker context without
 editing `sandbox.env`; typed `DEPLOY-ENV` and host allowlisting still apply.
+Both options 1 and 2 continue to normal deployment owner-confirmation prompts after
+a successful Docker simulation. Command transcripts are captured automatically;
+neither option asks for a full-log paste. With real SSH, the captured command/output
+log is reused for owner review/redaction. With the Docker mock, its captured output
+stays simulation-only and a single actual-deployment evidence reference is requested
+instead of pasted logs. Confirm the actual endpoint/service convergence. Only
+that separate owner confirmation records deployment evidence and allows the runner
+to continue into health/business validation. Declining or cancelling leaves P3-S03
+pending. A failed/cancelled mock stops before these prompts; no real SSH fallback
+or automatic attestation is performed.
+The three Docker phases use an alternate terminal screen anchored at the top, with
+a fixed four-line live-output region. Completion/cancellation restores the main
+screen rather than adding the full build/session to its scrollback. Plain/NO_COLOR/
+dumb output shows phase messages and at most four recent lines per build/session.
+Full build/session logs remain in the displayed local evidence directory.
+Automatic command transcripts are Git-ignored, owner-only files, not automatically
+sanitized evidence. Review/redact before confirming; no real SSH fallback is attempted.
+Only option 3 shows the highlighted manual-deployment explanation and full-log paste
+instructions, because deployment happened outside this runner and was not captured here.
 Original-quarantine release waits for the exact saved SG attachments to report active, rather than
 assuming RDS `available` proves SG convergence. It prints bounded retry progress and retains the SG on
 timeout. After live-state review, retry just P3-S01 `--failback DR-ID --release-quarantine`; original DBs
@@ -305,6 +361,12 @@ The all-in-one `S3` sequence waits automatically at the primary and replica avai
 RDS waiters show elapsed `HH:MM:SS` on one line, updated each second in an interactive terminal,
 including primary/replica creation, hardening, fencing and retirement waits. This is elapsed time,
 not a percentage or estimated finish time. Redirected output records only the start and final timer lines.
+The final `completed in HH:MM:SS` line remains on screen and in captured output;
+failed/interrupted waits show the exit result and elapsed duration instead.
+Quarantine waits identify primary and replica separately. In redirected logs,
+`started` and `completed` lines describe the same wait, not duplicate actions.
+Executed step headings are bold magenta; What/Expected labels are cyan. Redirected,
+`NO_COLOR` and dumb-terminal output stays plain.
 Press Ctrl+C during a wait to stop; the runner prints the matching `--only P2-Sxx` resume command. After an
 accepted restore/create request, resume at its wait ID rather than resubmitting the mutation.
 
@@ -397,6 +459,18 @@ bash iac/lab/bb3-db/test-bb3-deployment-mock.sh
 bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
 bash iac/lab/bb3-db/test-app-failback-confirm.sh
 ```
+
+To include scripted guided input and real host-TTY completion/cancellation checks,
+run the Docker test with host Expect installed:
+
+```bash
+DOCKER_CONTEXT=colima-dr-framework BB3_DOCKER_TEST_GUIDED=1 BB3_DOCKER_TEST_TTY=1 \
+	bash iac/lab/bb3-db/test-bb3-deployment-docker.sh
+```
+
+Interactive guided completion returns 0; `n` cancels with exit 130. The harness
+normalizes the expected stop only for its scripted regression, not for operator
+cancellation. Docker simulation never records P3-S03 deployment evidence.
 
 The wrapper test replaces configuration loading, Git ignore checks, AWS, curl and
 Terraform with shell stubs. It never reads real sandbox configuration, credentials,

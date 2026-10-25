@@ -146,7 +146,12 @@ while [[ $# -gt 0 ]]; do
     --list) LIST_ONLY=true; shift ;;
     --verbose) shift ;;
     --failback)
-      [[ $# -ge 2 && "$2" =~ ^DR-[A-Za-z0-9_-]{1,120}$ && -z "$FAILBACK_RUN$ONLY$FROM$TO" && "$NEW_RUN" == false ]] || usage
+      [[ $# -ge 2 ]] || usage
+      [[ "$2" =~ ^DR-[A-Za-z0-9_-]{1,120}$ ]] || {
+        echo 'Failback requires an actual DR- run ID, not the literal {{COMPLETED_CUTOVER_DR_ID}} placeholder. Use the run ID shown by P4-G4 or saved-progress output.' >&2
+        exit 2
+      }
+      [[ -z "$FAILBACK_RUN$ONLY$FROM$TO" && "$NEW_RUN" == false ]] || usage
       FAILBACK_RUN="$2"; shift 2 ;;
     --from)
       [[ $# -ge 2 && -n "$2" && -z "$FROM" && -z "$ONLY$FAILBACK_RUN" && "$NEW_RUN" == false ]] || usage
@@ -252,9 +257,9 @@ progress_context() {
   local config_digest
   read_configuration
   if command -v sha256sum >/dev/null 2>&1; then
-    config_digest="$(sha256sum "$CONFIG" | awk '{print $1}')"
+    config_digest="$(awk '$0 !~ /^export BB3_RTO_TARGET_MIN=[0-9]+([.][0-9]+)?[[:space:]]*$/' "$CONFIG" | sha256sum | awk '{print $1}')"
   else
-    config_digest="$(shasum -a 256 "$CONFIG" | awk '{print $1}')"
+    config_digest="$(awk '$0 !~ /^export BB3_RTO_TARGET_MIN=[0-9]+([.][0-9]+)?[[:space:]]*$/' "$CONFIG" | shasum -a 256 | awk '{print $1}')"
   fi
   jq -cn --arg root "$ROOT" --arg ledger "$LEDGER" --arg account "$ACCOUNT" --arg region "$REGION" \
     --arg environment "${ENV:-}" --arg run "${FAILBACK_RUN:-${BB3_DR_ID:-}}" \
@@ -418,8 +423,8 @@ step_preview() {
           expected='Review the original primary/replica destination. No secret write, fencing, application deployment or data reconciliation occurs; this preview runs before the restored-pair fence.'
         fi ;;
       P3-S03)
-        action='Record manual app deployment and service convergence on the original DB endpoint pair.'
-        expected='The app owner performs the external deployment; automatic deployment remains unavailable. Review/capture the sanitized failback log and explicitly confirm convergence in separate failback evidence, without changing recovery milestones.' ;;
+        action='Run guarded automatic/guided SSH deployment or confirm manual deployment on the original DB endpoint pair.'
+        expected='Dev/uat SSH requires typed approval and owner-confirmed convergence. A configured Docker mock rehearses only and leaves P3-S03 pending. Review/capture sanitized failback evidence without changing recovery milestones.' ;;
       P4-S01)
         action='Record app-owner health confirmation on the original primary/replica endpoint pair.'
         expected='Require matching failback/deployment/fence journals and collect actual successful health-check UTC time and evidence. Save supplemental failback health; original recovery T8 and RTO remain unchanged.' ;;
@@ -428,7 +433,7 @@ step_preview() {
         expected='Preserve the saved transaction reference/time on retry. Review actual deployment/health/business evidence and require matching-owner SIGN-OFF-FAILBACK approval. Recovery T9 stays unchanged; resource retirement needs separate approval.' ;;
     esac
   fi
-  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
     printf '\033[1;36m%s\033[0m %s\n\033[1;36m%s\033[0m %s\n' \
       "$what_label" "$action" "$expected_label" "$expected"
   else
@@ -464,7 +469,11 @@ run_step() {
       return 0
     fi
   fi
-  printf '\n== %s ==\n' "$CURRENT_STEP"
+  if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != dumb ]]; then
+    printf '\n\033[1;35m== %s ==\033[0m\n' "$CURRENT_STEP"
+  else
+    printf '\n== %s ==\n' "$CURRENT_STEP"
+  fi
   step_preview "$CURRENT_STEP" "$@"
   case "$CURRENT_STEP" in
     P1-S01-1)

@@ -7,7 +7,7 @@
 | Execution scope | Approved sandbox account, `ENV=uat`, region `ap-southeast-1`; not real BB3 UAT or production |
 | Owner / review / approval | `{{SRE_OWNER}}` / SRE, application owner and data owner / `{{APPROVER}}` |
 | Recovery | Snapshot -> new primary and replica -> endpoint-only Secrets Manager update -> external app deployment |
-| Targets | RPO 24 hours; Service RTO 30 minutes (`T8-T0`); business validation measured separately |
+| Targets | Snapshot-age RPO 24 hours; BB3 Service RTO defaults to 60 minutes (`T8-T0`), configurable with `BB3_RTO_TARGET_MIN` (e.g. 45 or 30); business validation measured separately |
 | Status | Consolidated UAT-sandbox operational reference; named owner review and real-UAT adoption approval remain required |
 | Application evidence | Owner-attested deployment, health and transaction evidence; not independently verified by the helpers |
 
@@ -318,8 +318,10 @@ stack (`beepbeep` by default). A value inconsistent with `ENV` is refused before
 `BB3_DOCKER_LOCAL_CONTEXT` selects the Docker SSH mock. When set, P3-S03 uses that local Docker context
 and never falls back to real SSH if Docker fails. When blank or unset, P3-S03 uses real local SSH with
 typed approval to `BB3_DEPLOYMENT_HOST`. The committed sandbox example leaves this variable blank for
-real SSH; set it to `colima-dr-framework` to select the local mock. Mock output shows simulated passes
-but exits without deployment evidence, so P3-S03 remains pending.
+real SSH; set it to `colima-dr-framework` to select the local mock. After mock PASS, options 1/2
+continue to owner-confirmation prompts. The mock transcript is already captured but is not actual
+deployment proof: supply an actual-deployment evidence reference and confirm endpoint/service
+convergence. A failed/cancelled mock still stops without real SSH fallback or an attestation.
 To explicitly use real SSH for one P3-S03 invocation while keeping the Docker mock configured, append
 `--real-ssh`:
 
@@ -333,7 +335,12 @@ Real SSH still requires the typed `DEPLOY-ENV` gate and allowlisted host matchin
 Option 2 runs the same steps one at a time: Enter runs, `n` stops all later commands, and `s` skips.
 Skipping `git pull`, deploy or convergence blocks a completed deployment result. Optional service/task/log
 checks may be skipped. Both SSH modes require the local SSH identity/agent and host already authorized by
-the operator; the script does not copy keys, disable host checking or save raw remote output.
+the operator; the script does not copy keys or disable host checking. Both options capture command
+output automatically in owner-only ignored transcript files and do not ask for pasted logs.
+Review/redact captured output before confirming; capture is not automatic sanitization. Only
+option 3 displays highlighted manual evidence instructions and requests pasted deployment logs.
+Docker preparation/build/session output uses a top-anchored alternate screen with four live tail
+lines, restoring the main screen afterward; full logs remain available at the printed paths.
 
 The Docker test image runs this same orchestrator using the real OpenSSH client/server protocol to an
 isolated loopback mock host, `--network none`, a read-only root filesystem and no host mounts. A
@@ -374,7 +381,11 @@ business transaction/readback through the intended DB paths and a non-secret ref
 use operator probe writes or fabricate successful attestations. Resume jobs only with app-owner approval.
 
 Report Service RTO as `T8-T0`, business validation as `T9-T8`, and total through business validation as
-`T9-T0`. RPO is separate and not independently measured by packaging. Retain target misses and operator
+`T9-T0`. New approvals freeze the configured BB3 RTO target; other framework workflows retain
+their 30-minute default. RPO uses `T0 - SnapshotCreateTime` from run-bound restore metadata,
+reported as VERIFIED (snapshot-based) with a 24-hour PASS/MISS comparison. This is a snapshot-age
+check, not transaction-level completeness verification; that work is deferred. Missing metadata
+remains NOT VERIFIED, and old immutable approvals/packages are not rewritten. Retain target misses and operator
 pauses; do not adjust them away or equate local/mock timings with AWS performance.
 
 P4-G4 validates matching incident, cutover, fence, deployment, T8/T9 journals and shows timeline/references.
@@ -463,7 +474,14 @@ purges automated backups for the exact restored DB resource IDs and the verified
 snapshot. Original DBs/backups, source restore snapshot, other snapshots/SGs, shared networking, secrets
 and evidence remain outside scope. Removal of restored recovery data is irreversible.
 
-Timestamped stages 1-7 show waiter start/completion and resume guidance, not invented percentages.
+Timestamped stages 1-8 show waiter start/completion and resume guidance, not invented percentages.
+Each entered stage has a highlighted heading with What/Expected explanations: identity/sign-off,
+live safety/saved scope, irreversible approval, temporary safety snapshot, replica deletion,
+primary deletion, quarantine/backup purge, and final scoped audit/report. Explanations appear
+once per stage rather than on every waiter update; plain/NO_COLOR/dumb output remains readable.
+In stage 6, a primary reported as `modifying` is not ready for deletion. Wait for the approved
+change to complete and recheck before retrying the same run. Do not bypass the lifecycle check
+or restart the drill; previous recorded deletions and the safety snapshot are retained.
 Ignored `retirement.json` pins identities and requested operations. Timeout, pending ENIs, changed metadata
 or incomplete backup deletion is **not completion**. Inspect state, then resume the same explicit command.
 Completed deletions are not blindly repeated; snapshots marked for purge are not recreated. Older

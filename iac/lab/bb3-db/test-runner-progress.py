@@ -143,6 +143,68 @@ class ProgressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Completed evidence changed"):
                 MODULE.plan(ledger, context, "recovery")
 
+    def seed_released_failback(self, root):
+        context = self.context(root)
+        ledger = Path(context["ledger"])
+        run = ledger / "DR-fixture"
+        run.mkdir(parents=True)
+        network = dict(self.identity, mode="cutover", status="attached",
+                       activePrimary="original", activeReplica="original-replica")
+        (run / "cutover.json").write_text(json.dumps(self.records["cutover.json"]))
+        (run / "network-fence.json").write_text(json.dumps(network))
+        MODULE.checkpoint(ledger, context, "recovery", "adopt", "P5")
+        self.fence()
+        self.records["failback.json"] = dict(self.identity, operation="failback", status="complete",
+            source_db="restored", source_replica="restored-replica", db="original", replica="original-replica")
+        self.records["network-fence.json"] = dict(network, status="released")
+        for name, record in self.records.items():
+            (run / name).write_text(json.dumps(record))
+        MODULE.checkpoint(ledger, context, "failback", "adopt", "deployment")
+        return ledger, context, run
+
+    def test_recovery_handoff_accepts_checkpointed_source_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, context, run = self.seed_released_failback(Path(directory))
+            paths = [MODULE.state_path(ledger, context, mode) for mode in ("recovery", "failback")]
+            before = [path.read_bytes() for path in paths]
+            result = MODULE.plan(ledger, context, "recovery")
+            self.assertEqual(result["mode"], "failback")
+            self.assertEqual(result["next"], "deployment")
+            self.assertEqual([path.read_bytes() for path in paths], before)
+
+    def test_handoff_still_rejects_untracked_network_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, context, run = self.seed_released_failback(Path(directory))
+            path = run / "network-fence.json"
+            network = json.loads(path.read_text())
+            path.write_text(json.dumps(dict(network, changedAfterCheckpoint=True)))
+            with self.assertRaisesRegex(ValueError, "Completed evidence changed.*network-fence"):
+                MODULE.plan(ledger, context, "recovery")
+
+    def test_handoff_requires_release_checkpoint_and_matching_source_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, context, run = self.seed_released_failback(Path(directory))
+            failback = MODULE.state_path(ledger, context, "failback")
+            failback.unlink()
+            with self.assertRaisesRegex(ValueError, "Completed evidence changed.*network-fence"):
+                MODULE.plan(ledger, context, "recovery")
+            path = run / "network-fence.json"
+            network = json.loads(path.read_text())
+            path.write_text(json.dumps(dict(network, activePrimary="unrelated-primary")))
+            MODULE.checkpoint(ledger, context, "failback", "adopt", "deployment")
+            with self.assertRaisesRegex(ValueError, "Completed evidence changed.*network-fence"):
+                MODULE.plan(ledger, context, "recovery")
+
+    def test_handoff_does_not_ignore_other_recovery_evidence_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, context, run = self.seed_released_failback(Path(directory))
+            path = run / "cutover.json"
+            cutover = json.loads(path.read_text())
+            path.write_text(json.dumps(dict(cutover, changedDuringFailback=True)))
+            MODULE.checkpoint(ledger, context, "failback", "adopt", "deployment")
+            with self.assertRaisesRegex(ValueError, "Completed evidence changed.*cutover"):
+                MODULE.plan(ledger, context, "recovery")
+
 
 class RunnerInteractionTests(unittest.TestCase):
     def setUp(self):
@@ -260,6 +322,40 @@ bash() {
         self.assertEqual(exit_code, 0, output)
         self.assertNotIn("MOCK_STEP", output)
         self.assertEqual(path.read_bytes(), before)
+
+    def test_numeric_rto_policy_change_preserves_checked_resume(self):
+        self.seed_recovery()
+        config = self.root / "iac/sandbox.env"
+        original = config.read_text()
+        path = MODULE.state_path(self.ledger, self.context, "recovery")
+        before = path.read_bytes()
+        for target in ("60", "45", "30", "45.5"):
+            with self.subTest(target=target):
+                config.write_text(original + f"export BB3_RTO_TARGET_MIN={target}\n")
+                exit_code, output = self.run_terminal([], answer="n")
+                self.assertEqual(exit_code, 0, output)
+                self.assertIn("Suggested continuation: P3-S01", output)
+                self.assertNotIn("MOCK_STEP", output)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_other_config_changes_still_refuse_resume(self):
+        self.seed_recovery()
+        config = self.root / "iac/sandbox.env"
+        original = config.read_text()
+        for added in ("export BB3_DOCKER_STACK_NAME=changed\n",
+                      "export BB3_RTO_TARGET_MIN=60; export BB3_DOCKER_STACK_NAME=changed\n"):
+            with self.subTest(added=added):
+                config.write_text(original + added)
+                exit_code, output = self.run_terminal([])
+                self.assertEqual(exit_code, 2, output)
+                self.assertIn("configDigest", output)
+                self.assertNotIn("MOCK_STEP", output)
+
+    def test_literal_failback_placeholder_has_actionable_error(self):
+        exit_code, output = self.run_terminal(["--failback", "{{COMPLETED_CUTOVER_DR_ID}}"])
+        self.assertEqual(exit_code, 2, output)
+        self.assertIn("actual DR- run ID", output)
+        self.assertNotIn("MOCK_STEP", output)
 
     def test_noninteractive_resume_refuses_without_mutations(self):
         self.seed_recovery()

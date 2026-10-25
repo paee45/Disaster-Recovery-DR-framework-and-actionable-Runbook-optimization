@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -15,11 +16,12 @@ import tempfile
 
 REQUIRED = ("incident.json", "cutover.json", "fence.json", "app-deploy.json",
             "app-health.json", "app-e2e.json")
-OPTIONAL = ("network-fence.json", "app-deploy.log", "run-report.md")
+OPTIONAL = ("network-fence.json", "app-deploy.log", "run-report.md", "snapshot-recovery.json")
 LIMITS = ("Partial local evidence only. Owner attestations are not independent validation. "
           "No live AWS verification or upload was performed. Baseline/raw API evidence is "
-          "not bundled automatically and remains separate/pending. RPO is not independently "
-          "measured. This is not full audit evidence or business certification.")
+          "not bundled automatically and remains separate/pending. Snapshot-based RPO uses "
+          "snapshot metadata, not transaction-level data verification. This is not full audit "
+          "evidence or business certification.")
 
 
 def utc_now():
@@ -133,6 +135,57 @@ class Closeout:
             raise ValueError("Selected run directory does not exist.")
         self.identity = dict(runId=run_id, account=account, region=region)
         self.environment = environment
+        self.snapshot_evidence = None
+        try:
+            self.rto_target_minutes = float(os.environ.get("BB3_RTO_TARGET_MIN", "60"))
+        except ValueError:
+            raise ValueError("BB3_RTO_TARGET_MIN must be a positive number of minutes.") from None
+        if not math.isfinite(self.rto_target_minutes) or self.rto_target_minutes <= 0:
+            raise ValueError("BB3_RTO_TARGET_MIN must be a positive finite number of minutes.")
+
+    def capture_snapshot(self, snapshot, source_db, restored_primary, snapshot_id):
+        restored_primary = text(restored_primary)
+        if (snapshot.get("DBSnapshotIdentifier") != text(snapshot_id)
+                or snapshot.get("DBInstanceIdentifier") != text(source_db)
+                or snapshot.get("Status") != "available"
+                or snapshot.get("SnapshotType") not in ("automated", "manual")
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,62}", restored_primary)):
+            raise ValueError("Snapshot metadata must match the selected source and restore target.")
+        created = timestamp(snapshot.get("SnapshotCreateTime"))
+        network = decode(read_regular(self.run / "network-fence.json"))
+        self.identify(network)
+        if network.get("activePrimary") != source_db or network.get("status") != "attached":
+            raise ValueError("Snapshot source must match the attached run quarantine.")
+        if (self.run / "closeout.json").exists():
+            raise ValueError("Snapshot evidence cannot change after service-restored approval.")
+        evidence = dict(self.identity, environment=self.environment, status="selected-for-restore",
+                        snapshotId=snapshot_id, snapshotCreatedAt=created.isoformat(),
+                        snapshotType=snapshot["SnapshotType"], sourceDb=source_db,
+                        restoredPrimary=restored_primary, metadataSource="rds describe-db-snapshots")
+        path = self.run / "snapshot-recovery.json"
+        if path.exists() or path.is_symlink():
+            if decode(read_regular(path)) != evidence:
+                raise ValueError("Saved snapshot evidence differs; no overwrite is allowed.")
+        else:
+            exclusive_write(path, encoded(evidence))
+        return evidence
+
+    def recovery_metrics(self, times):
+        t0, _, t8, _ = times
+        rto_seconds = (t8 - t0).total_seconds()
+        rpo = dict(status="not-verified", basis="snapshot-age", targetSeconds=86400,
+                   businessDataVerified=False)
+        if self.snapshot_evidence is not None:
+            snapshot_time = timestamp(self.snapshot_evidence["snapshotCreatedAt"])
+            seconds = (t0 - snapshot_time).total_seconds()
+            if seconds < 0:
+                raise ValueError("Snapshot creation time cannot be later than impact T0.")
+            rpo.update(status="verified", snapshotId=self.snapshot_evidence["snapshotId"],
+                       snapshotCreatedAt=snapshot_time.isoformat(), impactAt=t0.isoformat(),
+                       actualSeconds=seconds, met=seconds <= 86400)
+        return dict(rtoTargetMinutes=self.rto_target_minutes,
+                    serviceRtoMinutes=rto_seconds / 60,
+                    rtoMet=rto_seconds <= self.rto_target_minutes * 60, rpo=rpo)
 
     def identify(self, record, deployment=False):
         for key, expected in self.identity.items():
@@ -192,6 +245,7 @@ class Closeout:
             raise ValueError("Inconsistent T0/T1/T8/T9 sequence.")
         if t9 > utc_now() + timedelta(seconds=60):
             raise ValueError("T9 is in the future.")
+        self.snapshot_evidence = None
         for name in OPTIONAL:
             path = self.run / name
             if path.exists() or path.is_symlink():
@@ -204,6 +258,19 @@ class Closeout:
                     for key in ("activePrimary", "activeReplica"):
                         if network.get(key) != fence.get(key):
                             raise ValueError("Network fence pair mismatch.")
+                elif name == "snapshot-recovery.json":
+                    evidence = decode(contents[name])
+                    self.identify(evidence)
+                    if (evidence.get("status") != "selected-for-restore"
+                            or evidence.get("sourceDb") != cutover["source_db"]
+                            or evidence.get("restoredPrimary") != cutover["db"]
+                            or evidence.get("snapshotType") not in ("automated", "manual")
+                            or evidence.get("metadataSource") != "rds describe-db-snapshots"):
+                        raise ValueError("Snapshot evidence does not match this recovery pair.")
+                    text(evidence.get("snapshotId"))
+                    timestamp(evidence.get("snapshotCreatedAt"))
+                    self.snapshot_evidence = evidence
+        self.recovery_metrics((t0, t1, t8, t9))
         return records, contents, (t0, t1, t8, t9)
 
     def summary(self, times, color=False):
@@ -211,28 +278,96 @@ class Closeout:
         rto_minutes = (t8 - t0).total_seconds() / 60
         validation_minutes = (t9 - t8).total_seconds() / 60
         total_minutes = (t9 - t0).total_seconds() / 60
-        use_color = color and sys.stdout.isatty() and "NO_COLOR" not in os.environ
+        use_color = (color and sys.stdout.isatty() and "NO_COLOR" not in os.environ
+                 and os.environ.get("TERM", "dumb") != "dumb")
+        heading = "\033[1;35m" if use_color else ""
         cyan = "\033[1;36m" if use_color else ""
         green = "\033[1;32m" if use_color else ""
         red = "\033[1;31m" if use_color else ""
+        yellow = "\033[1;33m" if use_color else ""
         reset = "\033[0m" if use_color else ""
-        result_color = green if rto_minutes <= 30 else red
-        result = "PASS" if rto_minutes <= 30 else "MISS"
+        target = self.rto_target_minutes
+        result_color = green if rto_minutes <= target else red
+        result = "PASS" if rto_minutes <= target else "MISS"
+        outcome = (f"The {target:g}-minute service recovery target was met ({rto_minutes:.2f} min)."
+               if rto_minutes <= target else
+               f"The {target:g}-minute service recovery target was exceeded by {rto_minutes - target:.2f} min.")
+        rpo = self.recovery_metrics(times)["rpo"]
+        if rpo["status"] == "verified":
+            rpo_result = "PASS" if rpo["met"] else "MISS"
+            rpo_color = green if rpo["met"] else red
+            rpo_lines = [
+                f"{rpo_color}RPO: VERIFIED (snapshot-based) | {rpo_result} | Target: 24 hours{reset}",
+                f"  Snapshot: {rpo['snapshotId']}",
+                f"  Snapshot creation time: {rpo['snapshotCreatedAt']}",
+                f"  Snapshot age at impact T0: {rpo['actualSeconds'] / 3600:.2f} hours",
+                "  Calculation: impact T0 minus the selected restore snapshot creation time.",
+                "  Verified against saved AWS snapshot metadata for this source/restore pair.",
+                "  This is the agreed snapshot-age measure, not proof of zero data loss.",
+                "  DB/business transaction-level data completeness verification is deferred.",
+            ]
+        else:
+            rpo_lines = [
+                f"{yellow}RPO: NOT VERIFIED | Target: no more than 24 hours of data loss{reset}",
+                "  No run-bound restore snapshot metadata was saved for this run.",
+                "  Without its creation time, we cannot report a snapshot-age RPO pass/fail.",
+                "  NOT VERIFIED does not mean zero loss, and does not itself mean a failure.",
+                "  DB/business transaction-level data completeness verification is deferred.",
+            ]
         stamp = lambda value: value.isoformat().replace("+00:00", "Z")
         lines = [
-            "=" * 76,
-            "STAGE: P4-G4 | Service Restored Approval",
-            f"RUN ID: {self.identity['runId']}",
-            "=" * 76,
+            heading + "=" * 76,
+            "STAGE: P4-G4 | Service Restored Approval" + reset,
+            f"{heading}RUN ID: {self.identity['runId']}{reset}",
+            heading + "=" * 76 + reset,
             "",
-            "TIMELINE & RTO METRICS",
-            f"  T0 (Impact): {cyan}{stamp(t0)}{reset}",
-            f"  T1 (Declared): {cyan}{stamp(t1)}{reset}  (T1-T0: {(t1-t0).total_seconds()/60:.2f} min)",
-            f"  T8 (Health): {cyan}{stamp(t8)}{reset}  (T8-T0: {rto_minutes:.2f} min) "
-            f"[{result_color}{result}{reset} - Target: 30 min]",
-            f"  T9 (Business): {cyan}{stamp(t9)}{reset}  (T9-T8: {validation_minutes:.2f} min)",
-            f"  Total through T9: {total_minutes:.2f} min",
-            "  RPO: Not independently measured",
+            f"{result_color}RECOVERY TIMING RESULT: RTO {result} | {rto_minutes:.2f} min / {target:g} min target{reset}",
+            f"  {outcome}",
+            "  Health and business milestones below are owner-attested evidence.",
+            "  Service approval does not turn a missed target into a pass.",
+            "",
+            f"{cyan}TIMELINE & RTO METRICS{reset}",
+            "  T means a recorded milestone; T0 is T-zero, not the letters TO.",
+            "  RTO is a duration: T8 health time minus T0 impact time.",
+            "",
+            f"{heading}  T0 (Impact) - SERVICE IMPACT START / RTO CLOCK STARTS{reset}",
+            f"    Time (UTC): {cyan}{stamp(t0)}{reset}",
+            "    Service impact began, supported by the saved app/monitor reference.",
+            "    This is the start of the recovery clock, not when this script started.",
+            "    Operator pauses, declaration, primary/replica restore and app recovery",
+            "    after this point all count until the successful T8 app health check.",
+            "",
+            f"{heading}  T1 (Declared) - RECOVERY RESPONSE FORMALLY DECLARED{reset}",
+            f"    Time (UTC): {cyan}{stamp(t1)}{reset}",
+            f"    Time to declare (T1-T0): {cyan}{(t1-t0).total_seconds()/60:.2f} min{reset}",
+            "    The S3 recovery was formally declared. Declaration time is included",
+            "    in service RTO; declaring the incident does not restart the clock.",
+            "    This milestone shows how long it took to declare recovery after impact;",
+            "    it does not mean the DB or application was already restored.",
+            "",
+            f"{heading}  T8 (Health) - APP HEALTH RESTORED / RTO CLOCK ENDS{reset}",
+            f"    Time (UTC): {cyan}{stamp(t8)}{reset}",
+            f"    {result_color}SERVICE RTO (T8-T0): {rto_minutes:.2f} min | {result} | Target: {target:g} min{reset}",
+            "    The app owner confirmed a successful health check using the recovered",
+            "    DB endpoints. This ends service RTO; DB availability alone is not T8.",
+            "    T8 is a timestamp, not another spelling of RTO. The duration from",
+            "    T0 to this health check is compared with the configured RTO target.",
+            "",
+            f"{heading}  T9 (Business) - BUSINESS TRANSACTION / READBACK CONFIRMED{reset}",
+            f"    Time (UTC): {cyan}{stamp(t9)}{reset}",
+            f"    Additional validation (T9-T8): {cyan}{validation_minutes:.2f} min{reset}",
+            "    The app owner confirmed a successful business transaction and readback.",
+            "    This is additional validation after health recovery, not the RTO endpoint.",
+            "    A successful new transaction confirms the recovered application workflow;",
+            "    it does not verify that all pre-incident business data was recovered.",
+            f"{cyan}  Total through T9: {total_minutes:.2f} min{reset}",
+            "    Total elapsed from impact through business validation, including pauses.",
+            "",
+            *rpo_lines,
+            "",
+            f"{cyan}P4-G4 / T10: FORMAL SERVICE-RESTORED APPROVAL{reset}",
+            "  The approver reviews deployment, health, business evidence and remaining",
+            "  risks before sign-off. T10 is separate from T8 and does not change RTO.",
         ]
         return "\n".join(lines) + "\n"
 
@@ -240,8 +375,11 @@ class Closeout:
         return text(input(question_prompt(prompt + " (no secrets): ")))
 
     def declare(self):
+        print(f"P4-G4 | RUN ID: {self.identity['runId']}")
         path = self.run / "closeout.json"
         if path.exists() or path.is_symlink():
+            print("Service-restored approval already exists for this run. P4-G4 cannot overwrite or repeat it.")
+            print("Existing approval and recovery metrics are unchanged; continue the separately approved failback workflow instead.")
             raise ValueError("Immutable closeout already exists; no overwrite.")
         records, contents, times = self.load()
         print(self.summary(times, color=True))
@@ -281,6 +419,7 @@ class Closeout:
                       originalT0EvidenceRef=records["incident.json"]["t0EvidenceRef"],
                       originalT8EvidenceRef=records["app-health.json"]["evidenceRef"],
                       reviewed=True, restrictions=restrictions, recordedAt=utc_now().isoformat(),
+                      recoveryMetrics=self.recovery_metrics(times),
                       sourceHashes={name: digest(content) for name, content in contents.items()},
                       limitations=LIMITS)
         exclusive_write(path, encoded(result))
@@ -295,6 +434,16 @@ class Closeout:
         contents["closeout.json"] = read_regular(self.run / "closeout.json")
         closed = decode(contents["closeout.json"])
         self.identify(closed)
+        saved_metrics = closed.get("recoveryMetrics")
+        if saved_metrics is not None and not isinstance(saved_metrics, dict):
+            raise ValueError("Saved recovery metrics must be an object.")
+        self.rto_target_minutes = 30.0 if saved_metrics is None else saved_metrics.get("rtoTargetMinutes")
+        if (isinstance(self.rto_target_minutes, bool)
+                or not isinstance(self.rto_target_minutes, (int, float))
+                or not math.isfinite(self.rto_target_minutes) or self.rto_target_minutes <= 0):
+            raise ValueError("Saved RTO target must be a positive finite number.")
+        if saved_metrics is not None and saved_metrics != self.recovery_metrics(times):
+            raise ValueError("Saved recovery metrics do not match the approved evidence.")
         if closed.get("status") != "service-restored" or closed.get("reviewed") is not True:
             raise ValueError("Reviewed service-restored closeout is required.")
         for key in ("approver", "role", "t0EvidenceRef", "t8EvidenceRef", "t9EvidenceRef", "restrictions"):
@@ -402,10 +551,15 @@ class Closeout:
 
 def main():
     parser = argparse.ArgumentParser(description=LIMITS)
-    parser.add_argument("command", choices=("declare", "package"))
+    parser.add_argument("command", choices=("declare", "package", "capture-snapshot"))
     for name in ("root", "ledger", "run-id", "account", "region", "environment"):
         parser.add_argument("--" + name, required=True)
+    for name in ("snapshot-json", "snapshot-id", "source-db", "restored-primary"):
+        parser.add_argument("--" + name)
     args = parser.parse_args()
+    if args.command == "capture-snapshot" and any(value is None for value in (
+            args.snapshot_json, args.snapshot_id, args.source_db, args.restored_primary)):
+        parser.error("capture-snapshot requires snapshot JSON, snapshot ID, source DB and restore target")
     try:
         if args.command == "declare" and (not sys.stdin.isatty() or not sys.stdout.isatty()):
             raise ValueError("A real interactive terminal is required.")
@@ -413,7 +567,11 @@ def main():
         workflow = Closeout(args.root, args.ledger, args.run_id, args.account, args.region, args.environment)
         if not git_ignored(workflow.root, workflow.run / "closeout.json"):
             raise ValueError("Ledger must be Git-ignored.")
-        getattr(workflow, args.command)()
+        if args.command == "capture-snapshot":
+            workflow.capture_snapshot(decode(args.snapshot_json), args.source_db,
+                                      args.restored_primary, args.snapshot_id)
+        else:
+            getattr(workflow, args.command)()
         return 0
     except (OSError, ValueError, EOFError, KeyboardInterrupt):
         print("Closeout refused or interrupted; inspect journal prerequisites/approval and immutable outputs. "

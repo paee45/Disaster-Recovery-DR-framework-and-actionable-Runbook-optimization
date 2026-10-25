@@ -20,6 +20,8 @@ export BB3_SANDBOX_CONFIG="$TEMP/sandbox.env" TEST_STATE="$TEMP/state" TEST_CALL
 TEST_PYTHON="$(command -v python3)"
 export TEST_PYTHON TEST_APPROVAL=RETIRE-RESTORED-PAIR TEST_DRIFT=none
 export TEST_SNAPSHOT_APPROVAL=''
+export TERM=xterm
+unset NO_COLOR
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 printf '%s\n' 'MOCK TEST ONLY: all AWS calls below use fixture stubs; no live resources are changed.'
 PS4='[test] + '
@@ -151,6 +153,10 @@ aws() {
       if [[ "$waiter" == db-instance-deleted ]]; then
         if [[ "$TEST_DRIFT" == interrupt && "$db" == new-replica ]]; then return 1; fi
         rm -f "$TEST_STATE/$db.db"
+        if [[ "$TEST_DRIFT" == primary-modifying && "$db" == new-replica ]]; then
+          jq '.DBInstanceStatus="modifying"' "$TEST_STATE/new-primary.db" > "$TEST_STATE/primary-update"
+          mv "$TEST_STATE/primary-update" "$TEST_STATE/new-primary.db"
+        fi
       fi ;;
     rds/delete-db-instance)
       [[ "$db" == new-primary || "$db" == new-replica ]] || return 99
@@ -220,6 +226,15 @@ run_case() {
 }
 export TEST_DRIFT=none
 reset_fixture; run_case 0
+for stage in 1 2 3 4 5 6 7 8; do
+  [[ "$(grep -Fc "== RETIREMENT $stage/8 |" "$TEMP/output")" == 1 ]] \
+    || { echo "FAIL missing or repeated retirement stage $stage explanation" >&2; exit 1; }
+done
+[[ "$(grep -Fc '  What:' "$TEMP/output")" == 8 && "$(grep -Fc '  Expected:' "$TEMP/output")" == 8 ]]
+grep -F "$(printf '\033[1;35m')== RETIREMENT 6/8" "$TEMP/output" >/dev/null
+grep -F "$(printf '\033[1;36m')  What:" "$TEMP/output" >/dev/null
+grep -F 'A modifying primary blocks deletion' "$TEMP/output" >/dev/null
+printf 'PASS all eight retirement stages have distinct highlighted headings and meaningful What/Expected explanations once per stage\n'
 jq -e '.status=="complete" and .backupPurgeComplete==true and .backupPolicy=="purge-restored-pair"' \
   "$RUN_DIR/retirement.json" >/dev/null
 REPORT="$(find "$RUN_DIR" -maxdepth 1 -name 'retirement-report-*.md' -type f | head -n 1)"
@@ -243,6 +258,23 @@ run_case 0
 jq -e '.status=="complete" and (.stage8VerifiedAt|type=="string")' "$RUN_DIR/retirement.json" >/dev/null
 [[ "$(rg -c 'create-db-snapshot' "$TEST_CALLS")" == 1 ]]
 printf 'PASS fresh retirement waits for stage 8 completion and resumes without repeating prior deletions\n'
+export TEST_DRIFT=primary-modifying
+reset_fixture; run_case 2
+grep -F '== RETIREMENT 6/8 | RETIRE THE RESTORED PRIMARY ==' "$TEMP/output" >/dev/null
+grep -F 'lifecycle status failed' "$TEMP/output" >/dev/null
+grep -F 'resume the same run:' "$TEMP/output" >/dev/null
+[[ ! -f "$TEST_STATE/new-replica.db" && -f "$TEST_STATE/new-primary.db" ]]
+if rg 'delete-db-instance --db-instance-identifier new-primary|delete-security-group|delete-db-snapshot' "$TEST_CALLS" >/dev/null; then
+  echo 'FAIL modifying primary allowed later retirement mutations' >&2; exit 1
+fi
+[[ "$(rg -c 'delete-db-instance --db-instance-identifier new-replica' "$TEST_CALLS")" == 1 ]]
+jq '.DBInstanceStatus="available"' "$TEST_STATE/new-primary.db" > "$TEST_STATE/primary-update"
+mv "$TEST_STATE/primary-update" "$TEST_STATE/new-primary.db"
+export TEST_DRIFT=none
+run_case 0
+[[ "$(rg -c 'delete-db-instance --db-instance-identifier new-replica' "$TEST_CALLS")" == 1 ]]
+[[ "$(rg -c 'create-db-snapshot' "$TEST_CALLS")" == 1 ]]
+printf 'PASS stage 6 modifying primary blocks deletion; same-run retry preserves completed replica deletion and safety snapshot\n'
 for TEST_DRIFT in account secret tag ingress missing-sg backup-owner; do
   export TEST_DRIFT
   reset_fixture; run_case 2
@@ -328,6 +360,13 @@ if LC_ALL=C grep -F "$(printf '\033')" "$TEMP/output" >/dev/null; then
   exit 1
 fi
 printf 'PASS completed retry verifies DB/SG/backup absence without mutations\n'
+TERM=dumb run_case 0
+if LC_ALL=C grep -F "$(printf '\033')" "$TEMP/output" >/dev/null; then
+  echo 'FAIL dumb terminal left styling in retirement output' >&2; exit 1
+fi
+grep -F '  What:' "$TEMP/output" >/dev/null
+grep -F '  Expected:' "$TEMP/output" >/dev/null
+printf 'PASS NO_COLOR and dumb terminals retain plain retirement stage explanations\n'
 export TEST_DRIFT=eni
 reset_fixture; run_case 2
 [[ ! -f "$TEST_STATE/sg-deleted" ]]

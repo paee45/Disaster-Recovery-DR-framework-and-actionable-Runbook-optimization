@@ -217,7 +217,9 @@ for instance_id in "${INSTANCE_IDS[@]}"; do
   fi
 done
 for instance_id in "${INSTANCE_IDS[@]}"; do
-  bb3_wait 'Waiting for source quarantine DB availability' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+  db_role=replica
+  if [[ "$instance_id" == "${INSTANCE_IDS[0]}" ]]; then db_role=primary; fi
+  bb3_wait "Source quarantine: $db_role ($instance_id) availability" aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
     --db-instance-identifier "$instance_id"
   current_groups="$(group_ids_for_db "$instance_id")"
   jq -e --arg sg "$QUARANTINE_SG" 'length==1 and .[0]==$sg' <<< "$current_groups" >/dev/null \

@@ -50,9 +50,25 @@ MOCK_GUIDED_INDEX=0
   && "$POLL_SECONDS" =~ ^[0-9]+$ && "$POLL_SECONDS" -ge 1 && "$POLL_SECONDS" -le 60 ]] \
   || { echo 'Deployment wait timeout/poll interval is outside the allowed range.' >&2; exit 2; }
 
+if [[ -n "${BB3_DEPLOY_TRANSCRIPT:-}" ]]; then
+  [[ -f "$BB3_DEPLOY_TRANSCRIPT" && ! -L "$BB3_DEPLOY_TRANSCRIPT" && -O "$BB3_DEPLOY_TRANSCRIPT" ]] \
+    || { echo 'Deployment transcript must be an existing owned regular file.' >&2; exit 2; }
+fi
+
+remote_ssh() {
+  if [[ -n "${BB3_DEPLOY_TRANSCRIPT:-}" ]]; then
+    ssh "$@" 2>&1 | tee -a "$BB3_DEPLOY_TRANSCRIPT"
+  else
+    ssh "$@"
+  fi
+}
+
 remote_output() {
   local command="$1"
   printf '[%s] %s\n' "$HOST" "$command" >&2
+  if [[ -n "${BB3_DEPLOY_TRANSCRIPT:-}" ]]; then
+    printf '[%s] %s\n' "$HOST" "$command" >> "$BB3_DEPLOY_TRANSCRIPT"
+  fi
   if [[ "$MOCK" == true ]]; then
     printf '[MOCK SSH] %s\n' "$HOST" >&2
     case "$command" in
@@ -78,9 +94,9 @@ remote_output() {
     esac
   elif [[ "$MOCK_SSH" == true ]]; then
     printf '[MOCK SSH PROTOCOL] isolated Docker host %s\n' "$HOST" >&2
-    ssh -F "$BB3_DEPLOYMENT_SSH_CONFIG" "$HOST" "$command"
+    remote_ssh -F "$BB3_DEPLOYMENT_SSH_CONFIG" "$HOST" "$command"
   else
-    ssh "$HOST" "$command"
+    remote_ssh "$HOST" "$command"
   fi
 }
 

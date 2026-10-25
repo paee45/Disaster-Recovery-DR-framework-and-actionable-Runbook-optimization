@@ -28,6 +28,7 @@ git -C "$ROOT" check-ignore -q "$CONFIG" \
 source "$CONFIG"
 set +x
 umask 077
+export BB3_RTO_TARGET_MIN="${BB3_RTO_TARGET_MIN:-60}"
 unset AWS_DEFAULT_PROFILE TF_VAR_terrakube_token
 PROFILE="${TF_VAR_aws_profile:-}"
 REGION="${TF_VAR_region:-}"

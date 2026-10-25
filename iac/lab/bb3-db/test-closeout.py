@@ -37,6 +37,9 @@ class CloseoutTests(unittest.TestCase):
         self.ledger = self.root / "evidence/runs"
         self.run = self.ledger / "DR-fixture"
         self.run.mkdir(parents=True)
+        self.target_environment = patch.dict(os.environ, {"BB3_RTO_TARGET_MIN": "30"})
+        self.target_environment.start()
+        self.addCleanup(self.target_environment.stop)
         self.identity = dict(runId="DR-fixture", account="000000000000", region="ap-southeast-1")
         self.records = {
             "incident.json": dict(status="declared", environment="uat", scenario="S3",
@@ -92,6 +95,178 @@ class CloseoutTests(unittest.TestCase):
         self.assertEqual(before, {name: (self.run / name).read_bytes() for name in MODULE.REQUIRED})
         self.assertIn("MISS", self.workflow.summary(self.workflow.load()[2]))
         self.assertEqual((self.run / "closeout.json").stat().st_mode & 0o777, 0o600)
+
+    def test_summary_explains_milestones_and_unverified_rpo(self):
+        output = self.workflow.summary(self.workflow.load()[2])
+        self.assertIn("RTO MISS | 46.00 min / 30 min target", output)
+        self.assertIn("exceeded by 16.00 min", output)
+        self.assertIn("start of the recovery clock", output)
+        self.assertIn("T0 is T-zero", output)
+        self.assertIn("T8 is a timestamp", output)
+        self.assertIn("SERVICE IMPACT START / RTO CLOCK STARTS", output)
+        self.assertIn("APP HEALTH RESTORED / RTO CLOCK ENDS", output)
+        self.assertIn("Time (UTC): 2026-10-21T00:46:00Z", output)
+        self.assertIn("SERVICE RTO (T8-T0): 46.00 min | MISS | Target: 30 min", output)
+        self.assertIn("Additional validation (T9-T8): 4.00 min", output)
+        self.assertIn("declaring the incident does not restart the clock", output)
+        self.assertIn("DB availability alone is not T8", output)
+        self.assertIn("not the RTO endpoint", output)
+        self.assertIn("Total through T9: 50.00 min", output)
+        self.assertIn("RPO: NOT VERIFIED | Target: no more than 24 hours", output)
+        self.assertIn("cannot report a snapshot-age RPO pass/fail", output)
+        self.assertIn("does not mean zero loss", output)
+        self.assertIn("No run-bound restore snapshot metadata", output)
+        self.assertIn("verification is deferred", output)
+        self.assertIn("T10 is separate from T8", output)
+        self.assertNotIn("\033[", output)
+
+    def test_bb3_default_and_configured_rto_targets(self):
+        for configured, target, result in ((None, 60, "PASS"), ("60", 60, "PASS"),
+                                            ("45", 45, "MISS"), ("30", 30, "MISS")):
+            with self.subTest(configured=configured), patch.dict(os.environ, {}, clear=True):
+                if configured is not None:
+                    os.environ["BB3_RTO_TARGET_MIN"] = configured
+                workflow = MODULE.Closeout(self.root, self.ledger, "DR-fixture", "000000000000",
+                                           "ap-southeast-1", "uat")
+                self.assertEqual(workflow.rto_target_minutes, target)
+                output = workflow.summary(workflow.load()[2])
+                self.assertIn(f"RTO {result} | 46.00 min / {target} min target", output)
+
+    def test_invalid_rto_target_is_refused(self):
+        for value in ("", "invalid", "0", "-1", "nan", "inf"):
+            with self.subTest(value=value), patch.dict(os.environ, {"BB3_RTO_TARGET_MIN": value}):
+                with self.assertRaisesRegex(ValueError, "BB3_RTO_TARGET_MIN"):
+                    MODULE.Closeout(self.root, self.ledger, "DR-fixture", "000000000000",
+                                    "ap-southeast-1", "uat")
+
+    def capture_snapshot(self, created="2026-10-20T04:00:00Z"):
+        self.write("network-fence.json", dict(self.identity, status="attached",
+                   activePrimary="old-primary", activeReplica="old-replica"))
+        snapshot = dict(DBSnapshotIdentifier="rds:fixture-daily", DBInstanceIdentifier="old-primary",
+                        Status="available", SnapshotType="automated", SnapshotCreateTime=created)
+        return self.workflow.capture_snapshot(snapshot, "old-primary", "new-primary", "rds:fixture-daily")
+
+    def test_snapshot_based_rpo_is_verified_without_business_data_claim(self):
+        captured = self.capture_snapshot()
+        records, contents, times = self.workflow.load()
+        self.assertIn("snapshot-recovery.json", contents)
+        output = self.workflow.summary(times)
+        self.assertIn("RPO: VERIFIED (snapshot-based) | PASS | Target: 24 hours", output)
+        self.assertIn("Snapshot age at impact T0: 20.00 hours", output)
+        self.assertIn("transaction-level data completeness verification is deferred", output)
+        metrics = self.workflow.recovery_metrics(times)
+        self.assertEqual(metrics["rpo"]["actualSeconds"], 72000)
+        self.assertFalse(metrics["rpo"]["businessDataVerified"])
+        self.assertEqual(captured["restoredPrimary"], records["cutover.json"]["db"])
+        self.assertEqual(self.capture_snapshot(), captured)
+
+    def test_snapshot_capture_cli_saves_run_bound_evidence(self):
+        self.capture_snapshot()
+        (self.run / "snapshot-recovery.json").unlink()
+        snapshot = dict(DBSnapshotIdentifier="rds:fixture-daily", DBInstanceIdentifier="old-primary",
+                        Status="available", SnapshotType="automated", SnapshotCreateTime="2026-10-20T04:00:00Z")
+        arguments = ["closeout.py", "capture-snapshot", "--root", str(self.root), "--ledger", str(self.ledger),
+                     "--run-id", "DR-fixture", "--account", "000000000000", "--region", "ap-southeast-1",
+                     "--environment", "uat", "--snapshot-json", json.dumps(snapshot),
+                     "--snapshot-id", "rds:fixture-daily", "--source-db", "old-primary",
+                     "--restored-primary", "new-primary"]
+        with patch.object(MODULE.sys, "argv", arguments):
+            self.assertEqual(MODULE.main(), 0)
+        output = self.workflow.summary(self.workflow.load()[2])
+        self.assertIn("RPO: VERIFIED (snapshot-based) | PASS", output)
+
+    def test_configured_rto_boundaries_use_unrounded_elapsed_time(self):
+        for target in (45, 60):
+            with self.subTest(target=target):
+                self.workflow.rto_target_minutes = target
+                t0, t1, _, _ = self.workflow.load()[2]
+                t8 = t0 + MODULE.timedelta(minutes=target)
+                self.assertIn("RTO PASS", self.workflow.summary((t0, t1, t8, t8)))
+                t8 += MODULE.timedelta(microseconds=1)
+                self.assertIn("RTO MISS", self.workflow.summary((t0, t1, t8, t8)))
+
+    def test_snapshot_rpo_exact_24_hour_boundary(self):
+        for created, expected in (("2026-10-20T00:00:00Z", "PASS"),
+                                  ("2026-10-19T23:59:59Z", "MISS")):
+            with self.subTest(created=created):
+                (self.run / "snapshot-recovery.json").unlink(missing_ok=True)
+                self.capture_snapshot(created)
+                output = self.workflow.summary(self.workflow.load()[2])
+                self.assertIn(f"RPO: VERIFIED (snapshot-based) | {expected}", output)
+
+    def test_snapshot_evidence_mismatch_and_future_time_are_refused(self):
+        captured = self.capture_snapshot()
+        for field, value in (("sourceDb", "wrong-primary"), ("restoredPrimary", "wrong-target"),
+                             ("runId", "DR-wrong"), ("snapshotCreatedAt", "invalid"),
+                             ("snapshotCreatedAt", "2026-10-21T00:00:01Z")):
+            with self.subTest(field=field):
+                self.write("snapshot-recovery.json", dict(captured, **{field: value}))
+                with self.assertRaises(ValueError):
+                    self.workflow.load()
+        self.write("snapshot-recovery.json", captured)
+        self.declare()
+        with self.assertRaisesRegex(ValueError, "after service-restored"):
+            self.capture_snapshot()
+
+    def test_snapshot_capture_requires_available_matching_metadata(self):
+        self.capture_snapshot()
+        snapshot = dict(DBSnapshotIdentifier="rds:fixture-daily", DBInstanceIdentifier="old-primary",
+                        Status="available", SnapshotType="automated", SnapshotCreateTime="2026-10-20T04:00:00Z")
+        for field, value in (("SnapshotCreateTime", None), ("Status", "creating"),
+                             ("DBInstanceIdentifier", "other-primary"),
+                             ("DBSnapshotIdentifier", "other-snapshot"), ("SnapshotType", None)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.workflow.capture_snapshot(dict(snapshot, **{field: value}), "old-primary",
+                                               "new-primary", "rds:fixture-daily")
+        with self.assertRaisesRegex(ValueError, "differs"):
+            self.capture_snapshot("2026-10-20T05:00:00Z")
+
+    def test_approved_metrics_and_snapshot_are_frozen_for_packaging(self):
+        self.capture_snapshot()
+        closed = self.declare()
+        original = (self.run / "closeout.json").read_bytes()
+        self.assertEqual(closed["recoveryMetrics"]["rtoTargetMinutes"], 30)
+        with patch.dict(os.environ, {"BB3_RTO_TARGET_MIN": "60"}):
+            workflow = MODULE.Closeout(self.root, self.ledger, "DR-fixture", "000000000000",
+                                       "ap-southeast-1", "uat")
+            receipt = workflow.package()
+        package = Path(receipt["location"]) / "snapshot"
+        report = (package / "summary.md").read_text()
+        self.assertIn("RTO MISS | 46.00 min / 30 min target", report)
+        self.assertIn("RPO: VERIFIED (snapshot-based) | PASS", report)
+        self.assertEqual(original, (self.run / "closeout.json").read_bytes())
+        self.assertTrue((package / "snapshot-recovery.json").exists())
+
+    def test_tampered_saved_metrics_are_refused(self):
+        closed = self.declare()
+        for value in ([], {"rtoTargetMinutes": True}, dict(closed["recoveryMetrics"], rtoMet=True)):
+            with self.subTest(value=value):
+                self.write("closeout.json", dict(closed, recoveryMetrics=value))
+                with self.assertRaises(ValueError):
+                    self.package()
+
+    def test_summary_rto_boundary_and_color_policy(self):
+        t0 = MODULE.timestamp("2026-10-21T00:00:00Z")
+        t1 = MODULE.timestamp("2026-10-21T00:01:00Z")
+        t8 = MODULE.timestamp("2026-10-21T00:30:00Z")
+        times = (t0, t1, t8, t8)
+        tty = type("TTY", (), {"isatty": lambda self: True})()
+        with patch.object(MODULE.sys, "stdout", tty), patch.dict(os.environ, {"TERM": "xterm"}, clear=True):
+            output = self.workflow.summary(times, color=True)
+            self.assertIn("\033[1;35m" + "=" * 76, output)
+            self.assertIn("\033[1;35m  T0 (Impact)", output)
+            self.assertIn("\033[1;35m  T8 (Health)", output)
+            self.assertIn("Time (UTC): \033[1;36m2026-10-21T00:30:00Z", output)
+            self.assertIn("\033[1;32mRECOVERY TIMING RESULT: RTO PASS", output)
+            self.assertIn("\033[1;33mRPO: NOT VERIFIED", output)
+            self.assertIn("target was met (30.00 min)", output)
+            missed = self.workflow.summary(self.workflow.load()[2], color=True)
+            self.assertIn("\033[1;31mRECOVERY TIMING RESULT: RTO MISS", missed)
+            with patch.dict(os.environ, {"NO_COLOR": ""}):
+                self.assertNotIn("\033[", self.workflow.summary(times, color=True))
+            with patch.dict(os.environ, {"TERM": "dumb"}):
+                self.assertNotIn("\033[", self.workflow.summary(times, color=True))
+        self.assertNotIn("\033[", self.workflow.summary(times, color=True))
 
     def test_package_snapshot_manifest_archive_and_exclusions(self):
         (self.run / "sandbox.env").write_text("PASSWORD=synthetic-never-package")
@@ -170,6 +345,12 @@ class CloseoutTests(unittest.TestCase):
     def test_no_overwrite(self):
         self.declare()
         original = (self.run / "closeout.json").read_bytes()
+        with patch.object(MODULE.sys, "stdout", new_callable=io.StringIO) as output:
+            with self.assertRaises(ValueError):
+                self.declare([])
+            self.assertIn("P4-G4 | RUN ID: DR-fixture", output.getvalue())
+            self.assertIn("Service-restored approval already exists", output.getvalue())
+            self.assertIn("cannot overwrite or repeat", output.getvalue())
         with self.assertRaises(ValueError):
             self.declare([])
         self.assertEqual(original, (self.run / "closeout.json").read_bytes())
@@ -179,6 +360,7 @@ class CloseoutTests(unittest.TestCase):
 
     def test_legacy_closeout_with_ticket_still_packages(self):
         closed = self.declare()
+        closed.pop("recoveryMetrics")
         self.write("closeout.json", dict(closed, approvalRef="legacy-ticket"))
         self.assertEqual(self.package()["status"], "local-packaged")
 

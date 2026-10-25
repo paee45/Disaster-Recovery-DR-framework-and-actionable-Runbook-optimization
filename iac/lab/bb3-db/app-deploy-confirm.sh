@@ -68,6 +68,10 @@ fi
 PRIMARY_HOST="$(jq -er '.primaryHost // .newHost' <<< "$RUN")"
 REPLICA_HOST="$(jq -er '.replicaHost // .newReplicaHost' <<< "$RUN")"
 printf 'DR run: %s\nPrimary: %s\nReplica: %s\n' "$RUN_ID" "$PRIMARY_HOST" "$REPLICA_HOST"
+if [[ "$FORCE_REAL_SSH" != true && -n "${BB3_DOCKER_LOCAL_CONTEXT:-}" ]]; then
+  printf 'Transport: Docker SSH simulation (%s). Options 1 and 2 rehearse commands, then continue to actual deployment owner confirmation.\n' \
+    "$BB3_DOCKER_LOCAL_CONTEXT"
+fi
 printf 'Deployment mode:\n  1. Automatic deployment over local SSH\n  2. Guided deployment over local SSH (Enter=run, n=stop, s=skip optional checks)\n  3. Manual deployment already completed\n'
 bb3_prompt_read DEPLOY_MODE 'Select 1, 2 or 3: '
 case "$DEPLOY_MODE" in
@@ -76,30 +80,49 @@ case "$DEPLOY_MODE" in
   3) ;;
   *) echo 'Invalid deployment mode.' >&2; exit 2 ;;
 esac
+DEPLOYMENT_SIMULATED=false
+AUTO_TRANSCRIPT=''
 if [[ "$DEPLOY_MODE" != 3 ]]; then
+  RUN_DIR="$LEDGER/$RUN_ID"
+  mkdir -p "$RUN_DIR"
+  chmod 700 "$LEDGER" "$RUN_DIR"
+  git -C "$ROOT" check-ignore -q "$RUN_DIR/.command-capture-check" \
+    || { echo 'Deployment transcript must be Git-ignored.' >&2; exit 2; }
+  AUTO_TRANSCRIPT="$(mktemp "$RUN_DIR/deployment-command.XXXXXX")"
+  printf 'Command transcript captured at %s UTC; review/redact before confirming evidence.\n' \
+    "$(date -u +%FT%TZ)" > "$AUTO_TRANSCRIPT"
+  printf 'Capturing command output: %s\n' "$AUTO_TRANSCRIPT"
   if [[ "$FORCE_REAL_SSH" == true ]]; then
     echo 'Explicit --real-ssh selected; BB3_DOCKER_LOCAL_CONTEXT is ignored for this invocation.'
-    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
+    BB3_DEPLOY_TRANSCRIPT="$AUTO_TRANSCRIPT" ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
   elif [[ -n "${BB3_DOCKER_LOCAL_CONTEXT:-}" ]]; then
     DOCKER_CONTEXT="$BB3_DOCKER_LOCAL_CONTEXT" \
       BB3_DEPLOYMENT_ENV="$DEPLOY_ENV" \
       BB3_DEPLOYMENT_MODE="$EXECUTION_MODE" \
+      BB3_DEPLOY_TRANSCRIPT="$AUTO_TRANSCRIPT" \
       bash "$HERE/test-bb3-deployment-docker.sh"
-    echo 'Docker SSH simulation finished. This is not a deployment; no P3-S03 evidence was recorded.' >&2
-    exit 2
+    DEPLOYMENT_SIMULATED=true
+    echo 'Docker SSH simulation finished. Continuing to normal deployment owner-confirmation prompts.'
+    echo 'Mock output is already captured separately. Mock PASS is not actual deployment evidence; provide its actual evidence reference below.'
   else
     printf 'BB3_DOCKER_LOCAL_CONTEXT is blank; using real SSH to %s (ENV=%s).\n' "$BB3_DEPLOYMENT_HOST" "$DEPLOY_ENV"
-    ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
+    BB3_DEPLOY_TRANSCRIPT="$AUTO_TRANSCRIPT" ENV="$DEPLOY_ENV" bash "$HERE/bb3-deployment.sh" "$EXECUTION_MODE"
   fi
-  echo 'SSH deployment command/check sequence finished. Review live output; deployment evidence is still owner-confirmed below.'
+  printf 'Captured command transcript: %s\n' "$AUTO_TRANSCRIPT"
+  if [[ "$DEPLOYMENT_SIMULATED" == false ]]; then
+    echo 'SSH deployment command/check sequence finished. Review live output; deployment evidence is still owner-confirmed below.'
+  fi
 fi
 if [[ "$DEPLOY_MODE" == 3 ]]; then
+  printf '\n%sP3-S03 | MANUAL DEPLOYMENT EVIDENCE%s\n' "$BB3_PROMPT_MAGENTA" "$BB3_PROMPT_RESET"
+  echo 'What: Record deployment completed outside this runner. Its SSH output was not captured here.'
+  echo 'Expected: Sanitized deployment logs and explicit owner confirmation of the selected DB endpoints and converged services/tasks.'
   cat <<'EOF'
 Manual deployment guide:
 https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying
 Confirm the approved environment/host and completed deployment, then provide sanitized logs below.
 EOF
-else
+elif [[ "$DEPLOYMENT_SIMULATED" == false ]]; then
   echo 'Automatic SSH deployment completed its command/check sequence. Review the live output; deployment evidence is still owner-confirmed below.'
 fi
 if [[ "$FAILBACK" == true ]]; then
@@ -130,11 +153,28 @@ git -C "$ROOT" check-ignore -q "$DEPLOY_LOG" \
 if [[ -e "$DEPLOY_LOG" || -L "$DEPLOY_LOG" ]]; then
   [[ -f "$DEPLOY_LOG" && ! -L "$DEPLOY_LOG" && -s "$DEPLOY_LOG" ]] \
     || { echo 'Existing deployment log is not a nonempty regular file; refusing to replace it.' >&2; exit 2; }
-  printf 'Reusing existing sanitized deployment log for owner review: %s\n' "$EVIDENCE_REF"
+  printf 'Reusing existing deployment log for owner review/redaction: %s\n' "$EVIDENCE_REF"
+elif [[ "$DEPLOY_MODE" != 3 && "$DEPLOYMENT_SIMULATED" == false ]]; then
+  [[ -f "$AUTO_TRANSCRIPT" && ! -L "$AUTO_TRANSCRIPT" && -s "$AUTO_TRANSCRIPT" ]] \
+    || { echo 'Automatic deployment transcript is missing or unsafe.' >&2; exit 2; }
+  cp "$AUTO_TRANSCRIPT" "$DEPLOY_LOG"
+  chmod 600 "$DEPLOY_LOG"
+  printf 'Using automatically captured deployment log for owner review: %s\n' "$EVIDENCE_REF"
+  echo 'Review/redact the captured log before confirming below; capture is not automatic sanitization or independent proof.'
+elif [[ "$DEPLOY_MODE" != 3 ]]; then
+  bb3_prompt_read ACTUAL_DEPLOY_REF 'Actual deployment evidence reference (not the mock log; no secrets): '
+  [[ -n "${ACTUAL_DEPLOY_REF//[[:space:]]/}" && "$ACTUAL_DEPLOY_REF" != "$AUTO_TRANSCRIPT" ]] \
+    || { echo 'An actual deployment reference is required; mock transcript cannot substitute for it.' >&2; exit 2; }
+  printf 'Owner-provided actual deployment evidence reference: %s\nMock command transcript (simulation only): %s\n' \
+    "$ACTUAL_DEPLOY_REF" "$AUTO_TRANSCRIPT" > "$DEPLOY_LOG"
+  chmod 600 "$DEPLOY_LOG"
+  echo 'Actual evidence remains owner-attested; the mock transcript is separate and does not prove deployment.'
 else
   TMP_LOG="$(mktemp "$RUN_DIR/.$LOG_NAME.XXXXXX")"
   trap 'rm -f "$TMP_LOG"' EXIT
-  echo 'Paste sanitized deployment/convergence logs. Redact credentials, tokens, secret values, and customer data.'
+  printf '\n%sMANUAL LOG CAPTURE | REVIEW AND REDACT%s\n' "$BB3_PROMPT_MAGENTA" "$BB3_PROMPT_RESET"
+  printf '%sPaste sanitized deployment/convergence logs.%s Redact credentials, tokens, secret values, and customer data.\n' \
+    "$BB3_PROMPT_YELLOW" "$BB3_PROMPT_RESET"
   echo 'Paste the full log, then press Enter twice on a blank line to finish.'
   LOG_COMPLETE=false
   BLANK_PENDING=false
@@ -161,9 +201,9 @@ else
   printf 'Captured sanitized deployment log; evidence=%s\n' "$EVIDENCE_REF"
 fi
 if [[ "$FAILBACK" == true ]]; then
-  bb3_prompt_read CONFIRM 'Owner confirms both original endpoints and all expected services/tasks converged? [y/N]: '
+  bb3_prompt_read CONFIRM 'Owner confirms both original endpoints and all expected services/tasks converged, and evidence reviewed/redacted? [y/N]: '
 else
-  bb3_prompt_read CONFIRM 'Owner confirms both restored endpoints and all expected services/tasks converged? [y/N]: '
+  bb3_prompt_read CONFIRM 'Owner confirms both restored endpoints and all expected services/tasks converged, and evidence reviewed/redacted? [y/N]: '
 fi
 [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo 'Deployment confirmation not recorded; sanitized log retained for review.' >&2; exit 2; }
 RESULT="$(python3 "$HERE/secret-endpoints.py" "$DEPLOY_FLAG" "$LEDGER" "$RUN_ID" "$ACCOUNT" "$REGION" "$APP_OWNER" "$EVIDENCE_REF")"

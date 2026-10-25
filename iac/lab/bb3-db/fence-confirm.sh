@@ -453,7 +453,9 @@ apply_quarantine_group() {
     fi
   done
   for instance_id in "${instance_ids[@]}"; do
-    bb3_wait 'Waiting for restored quarantine DB availability' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+    local db_role=replica
+    if [[ "$instance_id" == "$ACTIVE_PRIMARY" ]]; then db_role=primary; fi
+    bb3_wait "Restored quarantine: $db_role ($instance_id) availability" aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
       --db-instance-identifier "$instance_id" || return 1
     wait_for_quarantine_attachment "$instance_id" \
       || { echo "Quarantine SG attachment is not active on $instance_id after retries." >&2; return 1; }
@@ -601,7 +603,9 @@ release_source_quarantine() {
       aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds modify-db-instance \
         --db-instance-identifier "$instance_id" --vpc-security-group-ids "${target_groups[@]}" \
         --apply-immediately >/dev/null
-      bb3_wait 'Waiting for original DB availability after SG release' aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
+      local db_role=replica
+      if [[ "$instance_id" == "${instance_ids[0]}" ]]; then db_role=primary; fi
+      bb3_wait "Original SG release: $db_role ($instance_id) availability" aws --profile "$PROFILE" --region "$REGION" --no-cli-pager rds wait db-instance-available \
         --db-instance-identifier "$instance_id"
     fi
     wait_for_saved_security_groups "$instance_id" "$expected_groups" || return 2

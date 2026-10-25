@@ -49,7 +49,8 @@ bash() {
     touch "$TEST_DOCKER_MOCK_CALLED"
     printf 'DOCKER MOCK ENV=%s MODE=%s CONTAINER=%s\n' \
       "${BB3_DEPLOYMENT_ENV:-}" "${BB3_DEPLOYMENT_MODE:-}" "${BB3_DEPLOYMENT_CONTAINER:-}"
-    return 0
+    printf 'DOCKER MOCK TRANSCRIPT: simulation only\n' >> "$BB3_DEPLOY_TRANSCRIPT"
+    return "${TEST_DOCKER_MOCK_EXIT:-0}"
   fi
   command bash "$@"
 }
@@ -91,9 +92,9 @@ if {$env(TEST_PHASE) eq "automatic"} {
   expect "Select 1, 2 or 3:*" {send "1\r"}
   expect "BB3_DOCKER_LOCAL_CONTEXT is blank; using real SSH to uat-1.app.beepte.ch*"
   expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
-  expect "Paste the full log*" {send "sanitized automatic deployment log\r\r\r"}
+  expect -exact "Using automatically captured deployment log for owner review:"
   expect "Owner confirms both original endpoints*" {send "n\r"}
-} elseif {$env(TEST_PHASE) eq "guided"} {
+} elseif {$env(TEST_PHASE) eq "guided" || $env(TEST_PHASE) eq "guided-complete"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
   expect "Select 1, 2 or 3:*" {send "2\r"}
   expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
@@ -101,20 +102,32 @@ if {$env(TEST_PHASE) eq "automatic"} {
   expect -re {\[DEPLOY\].*} {send "\r"}
   expect -re {\[VERIFY\].*} {send "\r"}
   expect -re {\[SERVICES\].*} {send "s\r"}
-  expect -re {\[TASKS\].*} {send "n\r"}
-} elseif {$env(TEST_PHASE) eq "docker-mock"} {
+  expect -re {\[TASKS\].*} {
+    if {$env(TEST_PHASE) eq "guided"} {send "n\r"} else {send "\r"}
+  }
+  if {$env(TEST_PHASE) eq "guided-complete"} {
+    expect -re {\[LOGS\].*} {send "\r"}
+    expect -re {\[WARNINGS\].*} {send "\r"}
+    expect -exact "Using automatically captured deployment log for owner review:"
+    expect "Owner confirms both original endpoints*" {send "n\r"}
+  }
+} elseif {[string match "docker-mock*" $env(TEST_PHASE)]} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
-  expect "Select 1, 2 or 3:*" {send "1\r"}
-  expect "DOCKER MOCK ENV=uat MODE=automatic CONTAINER=bb3-deploument-ec2"
-  expect "Docker SSH simulation finished. This is not a deployment*"
-  set result [wait]
-  exit [lindex $result 3]
+  expect "Select 1, 2 or 3:*" {send "$env(TEST_MOCK_SELECTION)\r"}
+  expect -re {DOCKER MOCK ENV=uat MODE=(automatic|guided) CONTAINER=bb3-deploument-ec2}
+  if {$env(TEST_PHASE) ne "docker-mock-stop"} {
+    expect -exact "Continuing to normal deployment owner-confirmation prompts."
+    expect -exact "Actual deployment evidence reference (not the mock log; no secrets): " {send "actual-deploy-ref-fixture\r"}
+    expect "Owner confirms both original endpoints*" {
+      if {$env(TEST_PHASE) eq "docker-mock-confirm"} {send "y\r"} else {send "n\r"}
+    }
+  }
 } elseif {$env(TEST_PHASE) eq "real-ssh-override"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
   expect "Select 1, 2 or 3:*" {send "1\r"}
   expect "Explicit --real-ssh selected*"
   expect "Type *DEPLOY-UAT*" {send "DEPLOY-UAT\r"}
-  expect "Paste the full log*" {send "sanitized stub ssh log\r\r\r"}
+  expect -exact "Using automatically captured deployment log for owner review:"
   expect "Owner confirms both original endpoints*" {send "n\r"}
 } elseif {$env(TEST_PHASE) eq "deploy" || $env(TEST_PHASE) eq "no-converge" || $env(TEST_PHASE) eq "resume-deploy"} {
   spawn bash $env(SCRIPT_DEPLOY) {*}$command
@@ -122,7 +135,7 @@ if {$env(TEST_PHASE) eq "automatic"} {
   expect "https://beep-technologies.atlassian.net/wiki/spaces/BB3/pages/1216610316/BB3+Deployment+Guide#Deploying"
   expect "Reusing saved app owner:*"
   if {$env(TEST_PHASE) eq "resume-deploy"} {
-    expect "Reusing existing sanitized deployment log*"
+    expect "Reusing existing deployment log for owner review/redaction*"
     expect "Owner confirms both original endpoints*" {send "y\r"}
   } else {
     expect "Paste the full log*" {send "sanitized deployment log\r\r\r"}
@@ -178,18 +191,29 @@ run_expect() {
   [[ "$result" == "$expected" ]] || { cat "$TEMP/output" >&2; echo "Expected exit $expected, got $result" >&2; exit 1; }
 }
 
+assert_no_paste_prompt() {
+  if rg 'Paste the full log|Paste sanitized deployment|MANUAL LOG CAPTURE' "$TEMP/output" >/dev/null; then
+    echo 'FAIL options 1/2 requested manual log paste' >&2
+    exit 1
+  fi
+}
+
 TEST_ARGS='--failback DR-fixture'; TEST_PHASE=automatic; run_expect 2
 rg 'Automatic SSH deployment completed its command/check sequence' "$TEMP/output" >/dev/null
 rg 'scripts/deploy.sh uat' "$TEST_SSH_CALLS" >/dev/null
 rg 'docker stack ps --filter desired-state=running' "$TEST_SSH_CALLS" >/dev/null
 rg 'docker service logs --timestamps --since 1m beepbeep_bb3-promos' "$TEST_SSH_CALLS" >/dev/null
-rg 'Paste the full log' "$TEMP/output" >/dev/null
+assert_no_paste_prompt
+rg 'deployment output: mock success' "$RUN_DIR/failback-app-deploy.log" >/dev/null
+rg 'docker service logs' "$RUN_DIR/failback-app-deploy.log" >/dev/null
+[[ "$(stat -f '%Lp' "$RUN_DIR/failback-app-deploy.log")" == 600 ]]
 [[ ! -e "$RUN_DIR/failback-app-deploy.json" && -s "$RUN_DIR/failback-app-deploy.log" ]]
 [[ ! -e "$TEST_REMOTE_CALLED" ]]
 [[ ! -e "$TEST_AWS_CALLED" ]]
 printf 'PASS automatic orchestration streams stubbed local-SSH output; no AWS/network and no attestation without owner confirmation\n'
 rm "$RUN_DIR/failback-app-deploy.log"
 
+: > "$TEST_SSH_CALLS"
 TEST_PHASE=guided; run_expect 130
 rg 'Skipped SERVICES' "$TEMP/output" >/dev/null
 rg 'Stopped before TASKS' "$TEMP/output" >/dev/null
@@ -197,12 +221,56 @@ rg 'Stopped before TASKS' "$TEMP/output" >/dev/null
 [[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
 printf 'PASS guided mode runs on Enter, skips optional checks, and n stops all later steps without attestation\n'
 
+TEST_PHASE=guided-complete; run_expect 2
+assert_no_paste_prompt
+rg 'deployment output: mock success' "$RUN_DIR/failback-app-deploy.log" >/dev/null
+[[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
+rm "$RUN_DIR/failback-app-deploy.log"
+printf 'PASS successful guided SSH captures logs without manual paste and still requires owner confirmation\n'
+
 : > "$TEST_SSH_CALLS"
 printf '%s\n' 'export BB3_DOCKER_LOCAL_CONTEXT=colima-dr-framework' >> "$BB3_SANDBOX_CONFIG"
-TEST_PHASE=docker-mock; run_expect 2
-[[ -e "$TEST_DOCKER_MOCK_CALLED" && ! -s "$TEST_SSH_CALLS" ]]
-[[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
-printf 'PASS P3-S03 docker-mock transport routes to Docker test and never falls back to SSH/evidence\n'
+TEST_PHASE=docker-mock
+for selection in 1 2; do
+  export TEST_MOCK_SELECTION="$selection"
+  run_expect 2
+  rg 'then continue to actual deployment owner confirmation' "$TEMP/output" >/dev/null
+  rg 'Mock PASS is not actual deployment evidence' "$TEMP/output" >/dev/null
+  assert_no_paste_prompt
+  rg 'Actual evidence remains owner-attested' "$TEMP/output" >/dev/null
+  rg 'actual-deploy-ref-fixture' "$RUN_DIR/failback-app-deploy.log" >/dev/null
+  if rg 'DOCKER MOCK TRANSCRIPT' "$RUN_DIR/failback-app-deploy.log" >/dev/null; then
+    echo 'FAIL mock output was copied as actual deployment evidence' >&2; exit 1
+  fi
+  if [[ "$selection" == 1 ]]; then
+    rg 'DOCKER MOCK ENV=uat MODE=automatic' "$TEMP/output" >/dev/null
+  else
+    rg 'DOCKER MOCK ENV=uat MODE=guided' "$TEMP/output" >/dev/null
+  fi
+  [[ -e "$TEST_DOCKER_MOCK_CALLED" && ! -s "$TEST_SSH_CALLS" ]]
+  [[ ! -e "$RUN_DIR/failback-app-deploy.json" ]]
+  rm -f "$RUN_DIR/failback-app-deploy.log"
+done
+printf 'PASS both Docker options reach normal owner-confirmation prompts; declining records no deployment attestation or SSH call\n'
+
+for selection in 1 2; do
+  export TEST_MOCK_SELECTION="$selection"
+  TEST_PHASE=docker-mock-confirm; run_expect 0
+  jq -e '.status=="owner-confirmed" and .servicesConverged==true and .appOwner=="owner@example.invalid"' \
+    "$RUN_DIR/failback-app-deploy.json" >/dev/null
+  [[ ! -s "$TEST_SSH_CALLS" ]]
+  TEST_PHASE=health; run_expect 0
+  jq -e '.healthVerified==true' "$RUN_DIR/failback-app-health.json" >/dev/null
+  rm -f "$RUN_DIR/failback-app-deploy.log" "$RUN_DIR/failback-app-deploy.json" "$RUN_DIR/failback-app-health.json"
+done
+printf 'PASS both mock choices allow separately owner-confirmed actual deployment and progression to the health step\n'
+
+export TEST_DOCKER_MOCK_EXIT=130
+TEST_PHASE=docker-mock-stop; run_expect 130
+unset TEST_DOCKER_MOCK_EXIT
+! rg 'Owner confirms|Paste the full log' "$TEMP/output" >/dev/null
+[[ ! -e "$RUN_DIR/failback-app-deploy.json" && ! -s "$TEST_SSH_CALLS" ]]
+printf 'PASS failed/cancelled Docker mock stops before owner confirmation without deployment evidence or SSH fallback\n'
 
 : > "$TEST_SSH_CALLS"
 rm -f "$TEST_DOCKER_MOCK_CALLED"
@@ -215,6 +283,9 @@ rm -f "$RUN_DIR/failback-app-deploy.log"
 TEST_ARGS='--failback DR-fixture'
 
 TEST_PHASE=deploy; run_expect 0
+rg 'P3-S03 \| MANUAL DEPLOYMENT EVIDENCE' "$TEMP/output" >/dev/null
+rg 'MANUAL LOG CAPTURE \| REVIEW AND REDACT' "$TEMP/output" >/dev/null
+rg 'Paste the full log' "$TEMP/output" >/dev/null
 rg 'Manual deployment guide:' "$TEMP/output" >/dev/null
 rg 'BB3\+Deployment\+Guide#Deploying' "$TEMP/output" >/dev/null
 jq -e '.mode=="manual" and .status=="owner-confirmed" and .appOwner=="owner@example.invalid" and

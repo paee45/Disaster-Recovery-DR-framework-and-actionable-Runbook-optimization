@@ -2,9 +2,9 @@
 set -euo pipefail
 set +x
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
+  GREEN=$'\033[32m'; RED=$'\033[31m'; RESET=$'\033[0m'
 else
-  GREEN=''; RED=''; YELLOW=''; RESET=''
+  GREEN=''; RED=''; RESET=''
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -155,7 +155,7 @@ else
 fi
 
 parameter_summary() {
-  local label="$1" instance="$2" groups group name family apply_status values
+  local label="$1" instance="$2" groups name family apply_status values
   groups="$(jq -c '.DBParameterGroups // []' <<<"$instance")"
   [[ "$(jq -r 'length' <<<"$groups")" == 1 ]] || { echo "$label must have exactly one parameter group." >&2; return 1; }
   name="$(jq -r '.[0].DBParameterGroupName' <<<"$groups")"
@@ -432,7 +432,6 @@ parameter_diff_rows() {
 PRIMARY_PARAMETER_DIFFS="$(parameter_diff_rows "$CAPTURE_DIRECTORY/primary/parameters-1.json" "$PARAMETER_TEMP_DIR/primary.json")"
 PRIMARY_PARAMETER_COUNT="$(jq -r '.Parameters|length' "$CAPTURE_DIRECTORY/primary/parameters-1.json")"
 PRIMARY_LIVE_PARAMETER_COUNT="$(jq -r '.Parameters|length' "$PARAMETER_TEMP_DIR/primary.json")"
-REPLICA_PARAMETER_DIFFS=''; REPLICA_PARAMETER_COUNT=0; REPLICA_LIVE_PARAMETER_COUNT=0
 
 print_snapshot_baseline_diffs() {
   local rows="$1" diff_type field captured snapshot_value formatted
@@ -642,6 +641,13 @@ case "$MODE" in
     confirm_current_parameters
     confirm_go
     confirm RESTORE
+    if [[ -n "${BB3_DR_ID:-}" ]]; then
+      python3 "$HERE/closeout.py" capture-snapshot --root "$ROOT" \
+        --ledger "${BB3_LEDGER_DIR:-$ROOT/evidence/bb3-secret-endpoints}" \
+        --run-id "$BB3_DR_ID" --account "$ACCOUNT" --region "$REGION" --environment "${ENV:-}" \
+        --snapshot-json "$snapshot_record" --snapshot-id "$SNAPSHOT_ID" \
+        --source-db "$SOURCE_PRIMARY" --restored-primary "$TARGET_PRIMARY"
+    fi
     umask 077
     request_file="$(mktemp "${TMPDIR:-/tmp}/bb3-restore-request.XXXXXX")"
     trap cleanup EXIT

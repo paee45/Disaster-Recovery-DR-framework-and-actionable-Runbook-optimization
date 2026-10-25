@@ -19,6 +19,14 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Code style: bash, `set -o pipefail`, comment density like the existing scripts, plain English in docs (non-native readers).
 
 ## Owner decisions (do not re-litigate)
+- **BB3 KPI policy (2026-10-25):** `BB3_RTO_TARGET_MIN` in ignored sandbox env defaults to
+  60 minutes (primary + replica restore); 45/30-minute overrides are allowed. Other framework
+  RTO defaults remain 30 minutes. BB3 RPO is verified on the agreed snapshot-age basis:
+  `T0 - SnapshotCreateTime`, target 24 hours, from run-bound metadata captured at approved
+  restore submission. This does not prove business-data completeness; that verification is
+  deferred. Existing app health/transaction gates remain. Targets/results freeze in new
+  approvals; legacy approvals keep 30 minutes, missing metadata stays unverified, and existing
+  immutable approvals/packages are not rewritten.
 - **`SECRET_MODE=k8s`** (plain Kubernetes Secret patched directly, every key in `K8S_HOST_KEY`, e.g.
   `POSTGRES_DB_HOST1,POSTGRES_DB_HOST2`, gets the same endpoint; each change recorded with an ID in the ledger ConfigMap
   `dr-endpoint-ledger-<secret>`; `failback <id>` / `rollback`). **ESO (`SECRET_MODE=eso`) is a to-do**, kept working.
@@ -70,6 +78,77 @@ ISO 27001 scope, **RPO 24 h, RTO 30 min**. Start with `README.md` and `runbooks/
 - Run only ONE build at a time (overlapping up.sh runs break each other); a wrapper script avoids self-matching kills.
 
 ## Status (update as you go)
+- **BB3 retirement stage explanations (2026-10-25):** all eight retirement stages now
+  show a bold magenta heading and cyan What/Expected labels on entry, with scope,
+  approval, success and stop/retry explanations. Plain/NO_COLOR/dumb output is preserved.
+  Lifecycle guards are unchanged. Mocked tests cover primary `modifying` after replica
+  deletion: stage 6 stops before primary/SG/backup deletion, then same-run retry retains
+  completed replica deletion and the safety snapshot. Full mocked retirement suite and
+  shell lint pass; no live retirement or owner run evidence was changed.
+- **BB3 recovery-to-failback checkpoint handoff (2026-10-25):** main-command resume now
+  recognises source `network-fence.json` released by the same run's completed failback
+  release checkpoint, requiring matching source identities and the exact pinned current
+  hash. Other recovery evidence and failback hash/config guards remain enforced; no
+  repinning is performed. P4-G4 explicitly explains an already-existing immutable approval.
+  All 21 resume and 36 closeout tests pass. Read-only planning of the owner's run selects
+  failback sign-off; no checkpoints, approvals, journals or AWS resources were changed.
+- **Private repository migration to-do (2026-10-25):** owner requested tracking the
+  future move into private `Beep-Technologies/ev-infrastructure`, branch `pa-dev-uat`,
+  under new `dr/`. README item 7 records path/root, ignore, CI/hook and regression checks;
+  local env/credentials/evidence/state remain excluded. No migration or push performed.
+- **BB3 compact Docker pane and automatic capture (2026-10-25):** Docker phases use a
+  top-anchored alternate screen with a four-line live region; success/cancellation restores
+  the main screen and full logs remain separate. Plain output retains only recent tails.
+  Options 1/2 now capture command output automatically without a full-log paste prompt;
+  real-SSH capture still needs owner review/redaction and endpoint/service confirmation.
+  Mock output remains simulation-only, with an actual evidence reference collected separately.
+  Only option 3 shows highlighted manual evidence explanations/paste instructions. Stubbed
+  app tests and actual Docker automatic/scripted/real-TTY completion/cancellation pass,
+  including pane lifecycle assertions. No live EC2 deployment or saved drill evidence changed.
+- **BB3 mock-to-owner continuation (2026-10-25):** owner selected normal confirmation
+  prompts after successful Docker simulation. Options 1/2 now continue within P3-S03
+  to actual sanitized deployment logs and explicit endpoint/service owner confirmation,
+  then normal health/business checks. Mock PASS alone never records an attestation;
+  failed/cancelled mocks still stop, without real SSH fallback. This supersedes the
+  earlier unconditional mock stop described below. Interactive regressions cover both
+  choices, declined/accepted confirmation and next-step health eligibility. No live
+  deployment, failback, health attestation or saved run evidence was changed.
+- **BB3 reporting-policy resume and selected run ID (2026-10-25):** confirmed read-only
+  that adding only `BB3_RTO_TARGET_MIN=60` caused the current recovery configDigest refusal.
+  Runner hashing now excludes only standalone numeric exports of that reporting setting;
+  resource/identity/transport config and evidence drift remain guarded. P4-G4 prints the
+  selected run before immutable-approval refusal, and literal failback placeholders get
+  an actionable error. Mocked regression and read-only planning recognise the completed
+  recovery; no checkpoint/journal/approval changes or live failback were performed.
+- **BB3 configurable metrics and milestone display (2026-10-25):** added validated BB3
+  60-minute RTO default/env override and immutable restore snapshot metadata, with snapshot-age
+  RPO PASS/MISS against 24 hours and explicit deferred business-data verification. New approvals
+  freeze metric policy/results for later packaging; resume tracks snapshot evidence. T0/T1/T8/T9
+  each have a bold heading, separate highlighted UTC time, duration and detailed explanation;
+  T-zero, T8 and RTO are explicitly distinguished. Current ignored env now sets only the new
+  RTO target to 60; existing config values, journals and live resources were not changed.
+- **BB3 service-restored review summary (2026-10-25):** P4-G4 highlights the stage/run
+  and RTO PASS/MISS result, shows the missed-target margin and explains T0/T1/T8/T9/T10.
+  RPO now explicitly says NOT VERIFIED against the 24-hour data-loss target and explains
+  the missing recovered-data/source evidence; no zero-loss or RPO pass/fail is inferred
+  from snapshot time or a new business transaction. Plain logs/NO_COLOR/dumb output remain.
+  All 26 closeout tests pass, including color policies, the RTO boundary and unchanged
+  immutable approval/package gates. Existing evidence and live resources were not changed.
+- **BB3 progress display and mock handoff (2026-10-25):** completed waits retain a
+  `completed in HH:MM:SS` result; redirected start/final lines and primary/replica
+  quarantine waits are explicitly labelled. Step headings are bold magenta, distinct
+  from cyan What/Expected labels, with plain NO_COLOR/redirected/dumb output. Docker
+  phases show live build-step/recent output and streamed SSH output while retaining
+  logs. Both mock deployment choices explicitly leave P3-S03 pending and print guarded
+  real/manual continuation guidance; no mock attestation or real SSH fallback. Mocked
+  waiter/fence/runner/app checks and Docker automatic/scripted/real-TTY completion and
+  cancellation pass. Ignored sandbox config was read, not changed; no live AWS or EC2 actions.
+- **BB3 interactive Docker guided deployment (2026-10-25):** fixed the mock entrypoint
+  silently selecting automatic mode for interactive guided runs. Successful interactive
+  completion expects exit 0; operator cancellation propagates 130 without attestation.
+  Removed duplicate container Expect driving because the mock runner already consumes
+  explicit scripted actions. Automatic and scripted cases plus real host-TTY completion
+  and cancellation pass. No real EC2 host or external application repository was accessed.
 - **BB3 guarded SSH deployment and reports (2026-10-24):** P3-S03 option 1 runs automatic SSH deploy
   for dev/uat after clean-main preflight and typed `DEPLOY-ENV`; option 2 guides Enter/run, n/stop,
   s/skip; option 3 records an already completed manual deploy and prints the external guide. Prod SSH
